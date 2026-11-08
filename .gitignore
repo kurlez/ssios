@@ -1,0 +1,12 @@
+.ssios/
+.ssios-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.img
+*.raw
+*.qcow2
+.letta-local/
+*.sock
+.DS_Store

@@ -1,0 +1,38 @@
+# SSIOS 开发配置样例。不含凭证。真实令牌由 `ssios init` 写到状态目录。
+# 默认只绑定环回地址。不要把 host 改成 0.0.0.0。
+
+profile = "dev"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[llm]
+# mock：确定性、无网络。ollama：本机 Ollama，无云端回退。
+provider = "mock"
+ollama_base_url = "http://127.0.0.1:11434"
+ollama_model = "llama3.1:8b"
+request_timeout_seconds = 60
+
+[runtime]
+# dev-guard 是进程内限制，不是 microVM。
+# cloud-hypervisor 在 v0 只做预检和命令构造，执行路径失败关闭。
+backend = "dev-guard"
+cpus = 1
+memory_mb = 512
+kvm_path = "/dev/kvm"
+cloud_hypervisor_bin = "cloud-hypervisor"
+virtiofsd_bin = "virtiofsd"
+kernel_path = ""
+root_image_path = ""
+
+[limits]
+task_timeout_seconds = 30
+max_tool_calls = 8
+max_output_bytes = 65536
+approval_ttl_seconds = 600
+core_token_budget = 2000
+
+[memory]
+# 显式标签：不是嵌入式 Letta Code，也不是 npm 包 memfs。
+mode = "letta-memfs-compat"
