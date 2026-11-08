@@ -1,8 +1,16 @@
 # SSIOS
 
-本地个人 Agent OS 的可运行原型。控制面、审批、审计和项目存储都在本机完成。记忆层按 Letta MemFS 的 Git Markdown 语义实现，模式名是 `letta-memfs-compat`。它不嵌入 Letta Code，也不使用 npm 包 `memfs`。
+## microVM 还不能执行任务
 
-这不是已经加固的生产操作系统。`dev-guard` 是进程内工具白名单，不是 microVM。Cloud Hypervisor 适配器只做预检和命令构造；真正启动客户机的路径会失败关闭，不会退回在宿主机上执行任务。
+Cloud Hypervisor 代码只生成启动参数并做预检。它没有启动过客户机，也不是生产执行环境。缺 KVM、`cloud-hypervisor`、`virtiofsd`、内核或磁盘时会失败关闭，并且不会改在宿主机上跑任务。`dev-guard` 只是进程内的工具白名单。
+
+## 两种记忆模式
+
+默认 `letta-memfs-compat` 是本仓库自己的 Git Markdown 兼容库，用来在没有 Letta CLI 时跑通 mock 演示。它不是 Letta MemFS。
+
+可选 `letta-memfs-upstream` 调用钉住的 Letta Code `0.34.45`（Apache-2.0）本地后端。它只运行文档中的 JSON 子命令：`agents create`、`memory tokens`、`memory export`、`memory status`，然后在 Letta 创建的 `memfs/<agent-id>/memory` 仓库里做经过批准的 git 提交。不会运行 `letta -p`，也不会加 `--yolo`。CLI 缺失或版本不符时直接失败，不会退回兼容库。
+
+控制面、审批、审计和项目存储在本机完成。开发档默认只绑定 `127.0.0.1`，模型是确定性 `mock`。
 
 ## 环境
 
@@ -21,6 +29,16 @@ make up        # 前台启动开发档，Ctrl-C 停止
 make preflight # 打印 Cloud Hypervisor 预检，预期失败关闭
 make memfs-info
 ```
+
+上游 MemFS 冒烟（需要已安装钉住版本，且不会启动代理对话）：
+
+```bash
+npm install --prefix "$HOME/.ssios-letta" --no-fund --no-audit @letta-ai/letta-code@0.34.45
+PYTHONPATH=src python3 -m ssios memfs-upstream-smoke \
+  --state .ssios-upstream --letta-bin "$HOME/.ssios-letta/node_modules/.bin/letta"
+```
+
+完整性校验见 `third_party/letta-code.pin.json`。Node 需要满足该包的 engines 字段。不要把 `LETTA_API_KEY` 放进环境；这条命令会丢掉父进程里的该变量。
 
 也可以直接调用：
 

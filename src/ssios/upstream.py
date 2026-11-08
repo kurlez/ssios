@@ -19,15 +19,18 @@ UPSTREAM_PACKAGE = "@letta-ai/letta-code"
 LOCAL_MEMORY_LAYOUT = "~/.letta/lc-local-backend/memfs/<agent-id>/memory"
 
 
-def describe_memfs() -> dict:
+def describe_memfs(mode: str = "letta-memfs-compat") -> dict:
+    upstream = mode == "letta-memfs-upstream"
     return {
-        "mode": "letta-memfs-compat",
-        "label": "local-compatibility",
+        "mode": mode,
+        "label": "letta-code-local-cli" if upstream else "local-compatibility",
         "letta_code_embedded": False,
         "npm_memfs_package": False,
         "vector_store": False,
         "semantic_index": False,
-        "canonical_store": "git-markdown",
+        "canonical_store": "letta-local-memfs-git" if upstream else "git-markdown-compat",
+        "fallback_to_compat": False,
+        "harness_prompt": False,
         "pinned_upstream_package": UPSTREAM_PACKAGE,
         "pinned_upstream_version": UPSTREAM_LETTA_CODE_VERSION,
         "pinned_upstream_license": UPSTREAM_LICENSE,
@@ -35,7 +38,7 @@ def describe_memfs() -> dict:
         "docs": UPSTREAM_DOCS,
         "upstream_local_layout": LOCAL_MEMORY_LAYOUT,
         "upstream_tasks_outstanding": [
-            "untrusted letta --backend local sidecar is not wired",
+            "letta -p agent turns are intentionally not invoked",
             "official git smart HTTP memory sidecar is not bundled",
         ],
     }

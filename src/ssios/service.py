@@ -14,6 +14,7 @@ from ssios.audit import AuditLog
 from ssios.auth import AuthStore, Grant, Principal
 from ssios.errors import FlowInterrupt, SsiosError
 from ssios.gitio import GitRunner
+from ssios.letta_upstream import UpstreamLettaBridge
 from ssios.llm import build_llm
 from ssios.memory_store import MemoryStore, validate_document
 from ssios.paths import fixtures_dir
@@ -51,6 +52,7 @@ class ControlPlane:
         self.approvals = ApprovalStore(settings.state_dir / "approvals.json")
         self.git = GitRunner(settings.state_dir / "git-hooks", settings.state_dir / "empty-gitconfig")
         self.memory = MemoryStore(settings.state_dir, self.git, self.fixtures)
+        self.upstream = UpstreamLettaBridge(settings.state_dir, settings.letta_bin)
         self.storage = ProjectStorage(settings.state_dir, self.fixtures)
         self.llm = build_llm(settings)
         self.dev = DevGuardRuntime()
@@ -77,6 +79,8 @@ class ControlPlane:
         self.approvals.load()
         self._load_tasks()
         self._check_perms()
+        if self._uses_upstream():
+            self.upstream.preflight()
 
     def _ensure_layout(self) -> None:
         state = self.settings.state_dir
@@ -94,7 +98,7 @@ class ControlPlane:
         if not (state / "tasks.json").exists():
             write_json(state / "tasks.json", {"tasks": {}})
         for project_id in ("demo-alpha", "demo-beta"):
-            if not (self.memory.root / project_id / "repo" / ".git").exists():
+            if not self._uses_upstream() and not (self.memory.root / project_id / "repo" / ".git").exists():
                 self.memory.seed_project(project_id)
             if not (self.storage.exports / project_id / "exp-1" / "manifest.json").exists():
                 self.storage.seed_export(project_id, "exp-1")
@@ -139,7 +143,7 @@ class ControlPlane:
             "profile": self.settings.profile,
             "llm_provider": self.settings.llm_provider,
             "runtime_backend": self.settings.runtime_backend,
-            "memory_mode": "letta-memfs-compat",
+            "memory_mode": self.settings.memory_mode,
         }
 
     def status(self, token: str) -> dict:
@@ -150,7 +154,7 @@ class ControlPlane:
             "bind": f"{self.settings.host}:{self.bound_port}",
             "telemetry": False,
             "outbound": "deny",
-            "memory": describe_memfs(),
+            "memory": describe_memfs(self.settings.memory_mode),
             "llm": {
                 "provider": self.settings.llm_provider,
                 "deterministic": bool(getattr(self.llm, "deterministic", False)),
@@ -203,6 +207,8 @@ class ControlPlane:
     def read_core(self, token: str, project_id: str) -> dict:
         with self.lock:
             principal = self._grant(token, project_id, "allow_memory_read")
+            if self._uses_upstream():
+                return self.upstream.core(project_id, budget=self.settings.core_token_budget)
             return self.memory.core(
                 project_id,
                 budget=self.settings.core_token_budget,
@@ -212,12 +218,17 @@ class ControlPlane:
     def read_memory(self, token: str, project_id: str, path: str) -> dict:
         with self.lock:
             principal = self._grant(token, project_id, "allow_memory_read")
+            if self._uses_upstream():
+                return self.upstream.read_committed(project_id, path)
             return self.memory.read_file(project_id, path, include_untrusted=principal.role == "human")
 
     def search_memory(self, token: str, project_id: str, query: str) -> dict:
         with self.lock:
             principal = self._grant(token, project_id, "allow_memory_read")
-            result = self.memory.search(project_id, query, include_untrusted=principal.role == "human")
+            if self._uses_upstream():
+                result = self.upstream.search(project_id, query)
+            else:
+                result = self.memory.search(project_id, query, include_untrusted=principal.role == "human")
             self.audit.write(
                 ts=self.now(),
                 actor_role=principal.role,
@@ -344,12 +355,12 @@ class ControlPlane:
                 raise SsiosError("memory_invalid", "files rejected", 400)
             for item in files:
                 validate_document(str(item.get("path", "")), str(item.get("content", "")))
-            proposal = self.memory.propose(
-                project_id,
-                str(body.get("expected_revision", "")),
-                files,
-                task_id=principal.grant.task_id if principal.grant else "human",
-            )
+            task_id = principal.grant.task_id if principal.grant else "human"
+            expected = str(body.get("expected_revision", ""))
+            if self._uses_upstream():
+                proposal = self.upstream.stage_proposal(project_id, expected, files, task_id=task_id)
+            else:
+                proposal = self.memory.propose(project_id, expected, files, task_id=task_id)
             approval = self._approval(
                 action="memory.commit",
                 project_id=project_id,
@@ -374,12 +385,21 @@ class ControlPlane:
         with self.lock:
             project_id = str(body.get("project_id", ""))
             principal = self._grant(token, project_id, "allow_memory_propose")
-            proposal = self.memory.propose_forget(
-                project_id,
-                str(body.get("expected_revision", "")),
-                str(body.get("path", "")),
-                task_id=principal.grant.task_id if principal.grant else "human",
-            )
+            task_id = principal.grant.task_id if principal.grant else "human"
+            if self._uses_upstream():
+                proposal = self.upstream.stage_forget(
+                    project_id,
+                    str(body.get("expected_revision", "")),
+                    str(body.get("path", "")),
+                    task_id=task_id,
+                )
+            else:
+                proposal = self.memory.propose_forget(
+                    project_id,
+                    str(body.get("expected_revision", "")),
+                    str(body.get("path", "")),
+                    task_id=task_id,
+                )
             approval = self._approval(
                 action="memory.forget",
                 project_id=project_id,
@@ -468,7 +488,7 @@ class ControlPlane:
             if decision == "deny":
                 self.approvals.mark(approval_id, status="denied", decision="deny")
                 if record.get("proposal_id"):
-                    self.memory.mark_proposal(record["proposal_id"], "rejected")
+                    self._mark_proposal(record["proposal_id"], "rejected")
                 self._refresh_task(record["task_id"])
                 self.audit.write(
                     ts=self.now(),
@@ -487,7 +507,7 @@ class ControlPlane:
                 if exc.code == "cas_conflict":
                     self.approvals.mark(approval_id, status="conflict", decision="approve")
                     if record.get("proposal_id"):
-                        self.memory.mark_proposal(record["proposal_id"], "conflict")
+                        self._mark_proposal(record["proposal_id"], "conflict")
                 elif exc.code == "payload_mismatch":
                     self.approvals.mark(approval_id, status="tampered", decision="approve")
                 else:
@@ -572,8 +592,19 @@ class ControlPlane:
             encoded = result["final_text"].encode("utf-8")
             staged = self.storage.stage(task_id, "summary.md", encoded)
             self.storage.freeze(task_id)
-            topic = self.memory.read_file(task["project_id"], "topics/fixtures/MEMORY.md", include_untrusted=False)
-            index = topic["content"]
+            if self._uses_upstream():
+                try:
+                    topic = self.upstream.read_committed(task["project_id"], "topics/fixtures/MEMORY.md")
+                    index = topic["content"]
+                except SsiosError as exc:
+                    if exc.code != "not_found":
+                        raise
+                    index = "# Fixtures\n"
+                revision = self.upstream.head(task["project_id"])
+            else:
+                topic = self.memory.read_file(task["project_id"], "topics/fixtures/MEMORY.md", include_untrusted=False)
+                index = topic["content"]
+                revision = self.memory.head(task["project_id"])
             if "last-summary.md" not in index:
                 index = index.rstrip() + "\n- last-summary.md — approved task summary\n"
             summary_doc = (
@@ -583,16 +614,24 @@ class ControlPlane:
                 "---\n\n"
                 f"{result['final_text']}\n"
             )
-            revision = self.memory.head(task["project_id"])
-            proposal = self.memory.propose(
-                task["project_id"],
-                revision,
-                [
-                    {"path": "topics/fixtures/last-summary.md", "content": summary_doc},
-                    {"path": "topics/fixtures/MEMORY.md", "content": index},
-                ],
-                task_id=task_id,
-            )
+            files = [
+                {"path": "topics/fixtures/last-summary.md", "content": summary_doc},
+                {"path": "topics/fixtures/MEMORY.md", "content": index},
+            ]
+            if self._uses_upstream():
+                proposal = self.upstream.stage_proposal(
+                    task["project_id"],
+                    revision,
+                    files,
+                    task_id=task_id,
+                )
+            else:
+                proposal = self.memory.propose(
+                    task["project_id"],
+                    revision,
+                    files,
+                    task_id=task_id,
+                )
             publish = self._approval(
                 action="storage.publish",
                 project_id=task["project_id"],
@@ -673,12 +712,21 @@ class ControlPlane:
                 task["published_revision"] = revision
             return revision
         if action in ("memory.commit", "memory.forget"):
-            revision = self.memory.apply(
-                record["proposal_id"],
-                record["expected_revision"],
-                record["approval_id"],
-                record["payload_sha256"],
-            )
+            if self._uses_upstream():
+                revision = self.upstream.apply(
+                    record["proposal_id"],
+                    record["expected_revision"],
+                    record["approval_id"],
+                    record["payload_sha256"],
+                    approved=True,
+                )
+            else:
+                revision = self.memory.apply(
+                    record["proposal_id"],
+                    record["expected_revision"],
+                    record["approval_id"],
+                    record["payload_sha256"],
+                )
             task = self.tasks.get(record["task_id"])
             if task is not None and action == "memory.commit":
                 task["memory_revision"] = revision
@@ -691,7 +739,10 @@ class ControlPlane:
             if sha256_bytes(data) != record["payload_sha256"]:
                 raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
             return data.decode("utf-8")
-        proposal = self.memory.load_proposal(record["proposal_id"])
+        if self._uses_upstream():
+            proposal = self.upstream.load_proposal(record["proposal_id"])
+        else:
+            proposal = self.memory.load_proposal(record["proposal_id"])
         if record["action"] == "memory.forget":
             return proposal["path"]
         return "\n\n".join(item["content"] for item in proposal["files"])
@@ -723,6 +774,15 @@ class ControlPlane:
         if task is None:
             raise SsiosError("not_found", "task not found", 404)
         return task
+
+    def _uses_upstream(self) -> bool:
+        return self.settings.memory_mode == "letta-memfs-upstream"
+
+    def _mark_proposal(self, proposal_id: str, status: str) -> None:
+        if self._uses_upstream():
+            self.upstream.mark_proposal(proposal_id, status)
+        else:
+            self.memory.mark_proposal(proposal_id, status)
 
 
 def production_blocked(settings) -> bool:

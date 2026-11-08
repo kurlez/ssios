@@ -32,6 +32,7 @@ class Settings:
     approval_ttl_seconds: float
     core_token_budget: int
     memory_mode: str
+    letta_bin: str
     state_dir: Path
     config_path: Path | None
 
@@ -81,8 +82,8 @@ def load_settings(
     if not (ollama_base.startswith("http://127.0.0.1:") or ollama_base.startswith("http://localhost:")):
         raise SsiosError("config_invalid", "ollama base url must target loopback", 500)
     memory_mode = str(memory.get("mode", "letta-memfs-compat"))
-    if memory_mode != "letta-memfs-compat":
-        raise SsiosError("config_invalid", "v0 memory mode is letta-memfs-compat", 500)
+    if memory_mode not in ("letta-memfs-compat", "letta-memfs-upstream"):
+        raise SsiosError("config_invalid", "memory mode must be letta-memfs-compat or letta-memfs-upstream", 500)
     budget = int(limits.get("core_token_budget", 2000))
     if budget < 16:
         raise SsiosError("config_invalid", "core token budget is too small", 500)
@@ -111,6 +112,7 @@ def load_settings(
         approval_ttl_seconds=ttl,
         core_token_budget=budget,
         memory_mode=memory_mode,
+        letta_bin=str(memory.get("letta_bin", "")),
         state_dir=state_dir,
         config_path=config_path,
     )

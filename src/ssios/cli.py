@@ -7,9 +7,13 @@ import json
 import time
 from pathlib import Path
 
+from dataclasses import replace
+
 from ssios.client import request
 from ssios.config import load_settings
+from ssios.errors import SsiosError
 from ssios.httpapi import ControlServer
+from ssios.letta_upstream import UpstreamLettaBridge
 from ssios.runtime import CloudHypervisorRuntime
 from ssios.service import ControlPlane, production_blocked
 from ssios.upstream import describe_memfs, probe_local_binary
@@ -21,17 +25,21 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "memfs-info"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight"):
             command.add_argument("--profile", choices=("dev", "production"))
             command.add_argument("--port", type=int)
         if name == "memfs-info":
             command.add_argument("--execute-version", action="store_true")
+        if name == "memfs-upstream-smoke":
+            command.add_argument("--letta-bin", default="")
     args = parser.parse_args(argv)
     if args.command == "memfs-info":
         print(json.dumps({"memfs": describe_memfs(), "probe": probe_local_binary(execute=args.execute_version)}, indent=2, ensure_ascii=False))
         return 0
+    if args.command == "memfs-upstream-smoke":
+        return run_upstream_smoke(Path(args.state), args.config, args.letta_bin)
     settings = load_settings(
         Path(args.config),
         state_dir=Path(args.state),
@@ -65,13 +73,63 @@ def _up(settings) -> int:
     server = ControlServer(plane)
     server.start()
     print(f"SSIOS 开发配置已在 http://{settings.host}:{plane.bound_port} 监听")
-    print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：letta-memfs-compat")
+    print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：{settings.memory_mode}")
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         server.stop()
         return 0
+
+
+def run_upstream_smoke(state: Path, config: str, letta_bin: str) -> int:
+    settings = replace(
+        load_settings(Path(config), state_dir=state),
+        memory_mode="letta-memfs-upstream",
+        letta_bin=letta_bin,
+    )
+    bridge = UpstreamLettaBridge(settings.state_dir, settings.letta_bin)
+    try:
+        preflight = bridge.preflight()
+        before = bridge.core("smoke", budget=4000)
+        proposal = bridge.stage_proposal(
+            "smoke",
+            before["revision"],
+            [
+                {
+                    "path": "topics/fixtures/overview.md",
+                    "content": "---\nname: overview\ndescription: \"synthetic upstream topic\"\n---\n\nUPSTREAM-TOPIC-MARKER\n",
+                },
+                {"path": "topics/fixtures/MEMORY.md", "content": "# Fixtures\n\n- overview.md\n"},
+            ],
+            task_id="human",
+        )
+        try:
+            bridge.apply(proposal["id"], before["revision"], "unapproved", proposal["payload_sha256"], approved=False)
+        except SsiosError as exc:
+            if exc.code != "upstream_rejected":
+                raise
+        revision = bridge.apply(proposal["id"], before["revision"], "cli-smoke", proposal["payload_sha256"], approved=True)
+        after = bridge.core("smoke", budget=4000)
+        topic = bridge.read_committed("smoke", "topics/fixtures/overview.md")
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail, "live_integration": False}, indent=2))
+        return 1
+    report = {
+        "live_integration": True,
+        "preflight": preflight,
+        "core_before": [item["path"] for item in before["files"]],
+        "core_after": [item["path"] for item in after["files"]],
+        "topics": after["topics"],
+        "topic_loaded_as_core": topic["core"],
+        "marker_present": "UPSTREAM-TOPIC-MARKER" in topic["content"],
+        "revision_changed": revision != before["revision"],
+        "fallback": "none",
+    }
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    if not report["marker_present"] or report["topic_loaded_as_core"] or not report["revision_changed"]:
+        return 1
+    return 0
 
 
 def _get(settings, path: str) -> int:

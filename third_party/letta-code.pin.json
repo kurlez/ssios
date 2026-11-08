@@ -1,0 +1,22 @@
+{
+  "package": "@letta-ai/letta-code",
+  "version": "0.34.45",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/letta-ai/letta-code",
+  "tarball": "https://registry.npmjs.org/@letta-ai/letta-code/-/letta-code-0.34.45.tgz",
+  "integrity": "sha512-IhB4vDuNebew2bKbAGYJ3zROPG6kLD2rPhMHXOSSxjExDFCTLAN74d5/4Sn7K8d3yV8n2mZT5uWVcA4FbN+yJw==",
+  "bin": "letta",
+  "engines_node": "^22.23.4 || ^24.22.1 || ^26.12.1",
+  "local_backend": {
+    "flag": "--backend local",
+    "env": "LETTA_LOCAL_BACKEND_DIR",
+    "memory_layout": "memfs/<agent-id>/memory",
+    "create": "letta --backend local agents create --personality blank",
+    "read": [
+      "letta --backend local memory tokens --format json",
+      "letta --backend local memory export",
+      "letta --backend local memory status"
+    ],
+    "write": "The memory subcommand documents that memory is git-backed and commits are made with git. SSIOS commits only inside that memory directory, with hooks disabled, after a human approval. It does not run letta -p or --yolo."
+  }
+}

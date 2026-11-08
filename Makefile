@@ -20,3 +20,6 @@ preflight:
 
 memfs-info:
 	$(PYTHON) -m ssios memfs-info
+
+memfs-upstream-smoke:
+	$(PYTHON) -m ssios memfs-upstream-smoke --state .ssios-upstream --config config/ssios.example.toml --letta-bin "$${SSIOS_LETTA_BIN}"

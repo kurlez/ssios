@@ -34,5 +34,7 @@ approval_ttl_seconds = 600
 core_token_budget = 2000
 
 [memory]
-# 显式标签：不是嵌入式 Letta Code，也不是 npm 包 memfs。
+# letta-memfs-compat：无 Letta CLI 时的兼容库，不是上游 MemFS。
+# letta-memfs-upstream：钉住的 letta 0.34.45 本地后端。缺失时失败，不回退。
 mode = "letta-memfs-compat"
+letta_bin = ""

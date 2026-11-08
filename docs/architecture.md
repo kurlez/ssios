@@ -32,7 +32,7 @@ flowchart TB
   letta -. 不进入可信核心 .-> mem
 ```
 
-可信部分是控制面进程：令牌校验、项目 ACL、记忆经纪、存储经纪、审批绑定、审计和 dev-guard 的工具循环。模型输出不可信。未来的客户机不可信。Letta Code 能执行 shell，因此即使使用本地后端，也不能放进可信核心。
+可信部分是控制面进程：令牌校验、项目 ACL、记忆经纪、存储经纪、审批绑定、审计和 dev-guard 的工具循环。模型输出不可信。未来的客户机不可信。Letta Code 能执行 shell，因此即使使用本地后端，也不能放进可信核心。可选的上游模式把 `letta` 放在经纪之外，只调用文档里的 JSON 子命令；批准仍由人类令牌完成。它不会在 CLI 失败时改用 `letta-memfs-compat`。
 
 `dev-guard` 的隔离级别是 `process-jail`。它在同一进程里跑代理循环，只允许 `memory.read`、`memory.search` 和 `storage.read`。模型里的 `approve: true` 会被忽略并记入审计。这能挡住错误的工具调用，不能挡住控制面进程自身的漏洞，也不能代替 KVM。
 

@@ -1,6 +1,8 @@
 # Letta MemFS 集成边界
 
-用户选择的记忆系统是 Letta MemFS。v0 实现的是与其公开文件语义兼容的本地库，标签为 `letta-memfs-compat`。这不是把 Letta Code 嵌进控制面，也不是声称已经接通上游服务。
+默认模式 `letta-memfs-compat` 只复用公开的 Git Markdown 形状，方便没有 Letta CLI 时运行 mock 演示。它不是 Letta MemFS。
+
+可选模式 `letta-memfs-upstream` 才调用上游。钉住的包是 `@letta-ai/letta-code@0.34.45`，完整性摘要写在 `third_party/letta-code.pin.json`。
 
 ## 上游现状
 
@@ -40,12 +42,27 @@ npm 上的 `memfs` 是另一个内存文件系统包。本项目不依赖它，�
 
 `ssios memfs-info` 只打印上述钉住的版本和本地探测结果。默认不执行 `letta`。`--execute-version` 才会运行 `letta --version`，并设置 `LETTA_CODE_TELEM=0` 与 `DISABLE_AUTOUPDATER=1`。控制面启动时不会做这件事。
 
+## 上游模式实际调用的命令
+
+在空的 `HOME` 和单独的 `LETTA_LOCAL_BACKEND_DIR` 里，只允许这些参数：
+
+- `letta --version`
+- `letta --backend local agents create --personality blank`
+- `letta --backend local memory tokens --format json`
+- `letta --backend local memory export --agent ... --out ...`
+- `letta --backend local memory status --agent ...`
+
+`memory` 子命令的帮助写明：记忆由 Git 支持，提交使用 git。批准之后，SSIOS 只在该代理的 `memfs/<agent-id>/memory` 目录里 `git add` / `git commit`，并把 `core.hooksPath` 指到一个空目录，避免运行 Letta 安装的 `post-commit`（那个钩子会在配置了远端时后台 `git push`）。
+
+核心文件列表来自 `memory tokens`。主题目录来自 `memory export` 里不在该列表中的 `MEMORY.md`。读取时，Git `HEAD` 的字节必须和同一次 export 一致。
+
+明确拒绝的参数包括 `-p`、`--yolo`、`--permission-mode`、`--tools` 和 `--disable-memory-guard`。因此没有“无模型的完整代理回合”。上游本地创建代理本身不需要账号，也不需要调用模型；这已经在 0.34.45 上验证过。
+
 ## 没有做的事
 
-- 没有把 Letta Code 作为记忆服务启动
-- 没有调用 `api.letta.com`，也不需要付费云
+- 没有运行 `letta -p` 或任何会让 harness 执行 shell 的回合
+- 没有调用 `api.letta.com`
 - 没有实现 Git smart HTTP sidecar
-- 没有 QMD，也没有语义或混合检索
-- 没有把上游 `memory-confinement` 当作安全边界
-
-本地兼容模式可以在没有 Letta 账号的机器上完成核心加载、按需读取、暂存、批准提交、重启和遗忘。与上游 Letta Code 的字节级互通，以及让不可信的 `letta --backend local` 在隔离环境里读写同一仓库，仍然是未完成项。
+- 没有 QMD
+- 没有把 `memory-confinement` 当作安全边界
+- 兼容模式不会在上游模式失败时自动接替

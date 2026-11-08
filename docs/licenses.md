@@ -20,6 +20,8 @@ MIT License。版权所有者为 Kent Liu，见仓库根目录的 `LICENSE`。
 
 ## Letta
 
-Letta MemFS 的文档和 Letta Code 实现属于 Letta，上游仓库是 <https://github.com/letta-ai/letta-code>，许可证 Apache-2.0。钉住的对照版本是 `@letta-ai/letta-code` 0.34.45，核对日期 2026-11-08。
+Letta MemFS 的文档和 Letta Code 实现属于 Letta，上游仓库是 <https://github.com/letta-ai/letta-code>，许可证 Apache-2.0。可选上游模式钉住 `@letta-ai/letta-code` 0.34.45。npm 完整性摘要：
 
-本仓库没有复制 Letta Code 的源码、提示词或模型。`NOTICE` 说明了语义来源。兼容库是 SSIOS 自己的 Python 代码，MIT 许可，不能把它再描述成 Letta 的发行版。
+`sha512-IhB4vDuNebew2bKbAGYJ3zROPG6kLD2rPhMHXOSSxjExDFCTLAN74d5/4Sn7K8d3yV8n2mZT5uWVcA4FbN+yJw==`
+
+本仓库没有复制 Letta Code 的源码、提示词或模型。安装发生在状态目录或用户指定的前缀里，不进入 SSIOS 的默认依赖。`NOTICE` 说明了语义来源。兼容库是 SSIOS 自己的 Python 代码，MIT 许可，不能把它再描述成 Letta 的发行版。
