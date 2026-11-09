@@ -23,7 +23,7 @@ summary_repair_retries = 1
 
 [runtime]
 # dev-guard 是进程内限制，不是 microVM。
-# cloud-hypervisor 在 v0 只做预检和命令构造，执行路径失败关闭。
+# macos-vm 使用 krunvm。cloud-hypervisor 在具备内核和 initramfs 时启动客户机，否则失败关闭。
 backend = "dev-guard"
 cpus = 1
 memory_mb = 512
@@ -32,6 +32,11 @@ cloud_hypervisor_bin = "cloud-hypervisor"
 virtiofsd_bin = "virtiofsd"
 kernel_path = ""
 root_image_path = ""
+initramfs_path = ""
+echo_initramfs_path = ""
+krunvm_bin = "krunvm"
+# python:3.12-alpine 的清单摘要，2026-11-09 从 registry-1.docker.io 读取。
+guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7"
 
 [limits]
 task_timeout_seconds = 30

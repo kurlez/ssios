@@ -35,9 +35,9 @@ mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表�
 这些代码路径存在，但本环境没有把它们跑成端到端系统：
 
 - 真实 Ollama 进程和真实 7B/8B 模型。适配器会发 `POST /api/chat`。写这份状态时，这台 Linux 机器的 `127.0.0.1:11434` 没有服务，所以没有声称跑过 `deepseek-r1:7b`
-- 可打开的 `/dev/kvm`、`cloud-hypervisor`、`virtiofsd`、客户机内核和根磁盘。缺任何一项时预检失败
-- 即使上述文件都存在，`execution_implemented` 仍是 false，因为仓库没有客户机代理协议，也没有测试过启动时延。这台 Linux 机器上的 `/dev/kvm` 当前用户打不开。没有测量客户机冷启动时间
-- macOS 的 Hypervisor.framework 客户机。`docs/macos-vm.md` 里的 `krunvm` 只是预检和失败关闭，不是已经跑起来的隔离
+- 默认测试不下载客户机内核。样例配置的 `kernel_path` 为空时，`cloud-hypervisor` 任务仍然失败关闭，不会改在宿主机上跑
+- 这台机器上把 `/dev/kvm` 打开给当前用户之后，用 Cloud Hypervisor v54.0 和 cloud-hypervisor 发布的 Linux 7.2.8 内核（`ch-release-v7.2.8-20261009` 的 `bzImage-x86_64`）启动了 initramfs。`echo ok` 的墙钟是 898 毫秒。带 virtio-fs 输入和 scratch、没有 `--net` 的摘要 worker 用了 1576 毫秒，任务进入 `awaiting_approval`，`isolated` 为 true。模型调用是宿主机上的 mock。krunvm 没有安装，所以没有启动 macOS 那条路径
+- macOS 的 Hypervisor.framework 客户机要在 Mac 上用 `krunvm` 跑 `ssios vm-doctor` 和 `scripts/macos-vm-smoke.sh`。这里没有启动过它
 - Letta Code 0.34.45 的本地后端。探测函数可选，默认不执行
 
 ## 计划中

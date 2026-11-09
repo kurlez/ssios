@@ -53,6 +53,9 @@ TASK_FIELDS = (
     "topic",
     "diagnostic_path",
     "diagnostic_class",
+    "runtime_backend",
+    "isolated",
+    "boot_ms",
 )
 
 
@@ -244,6 +247,12 @@ class ControlPlane:
             "cloud_hypervisor": self.cloud.preflight(),
         }
 
+    def _guest_runtime(self):
+        custom = getattr(self, "guest_runtime", None)
+        if custom is not None:
+            return custom
+        return build_runtime(self.settings)
+
     def require_principal(self, token: str) -> Principal:
         principal = self.auth.lookup(token)
         if principal is None:
@@ -355,7 +364,13 @@ class ControlPlane:
         with self.lock:
             self.require_human(token)
             if self.settings.runtime_backend != "dev-guard":
-                build_runtime(self.settings).launch()
+                runtime = self._guest_runtime()
+                if not runtime.can_launch():
+                    raise SsiosError(
+                        "microvm_fail_closed",
+                        "microVM backend cannot start a guest; the task was not run on the host",
+                        503,
+                    )
             project_id = str(body.get("project_id", ""))
             kind = str(body.get("kind", ""))
             revision = str(body.get("input_revision", ""))
@@ -385,6 +400,9 @@ class ControlPlane:
                 "topic": _optional_topic(body.get("topic")),
                 "diagnostic_path": None,
                 "diagnostic_class": None,
+                "runtime_backend": self.settings.runtime_backend,
+                "isolated": False,
+                "boot_ms": None,
             }
             self.tasks[task_id] = task
             grant = Grant(
@@ -705,7 +723,12 @@ class ControlPlane:
         deadline = time.monotonic() + self.settings.task_timeout_seconds
         self._arm(cancel_event, deadline)
         try:
-            result = self.runner.run(task, token, cancel_event, deadline)
+            if self.settings.runtime_backend == "dev-guard":
+                result = self.runner.run(task, token, cancel_event, deadline)
+            else:
+                from ssios.vmguest import execute_guest
+
+                result = execute_guest(self, task, token, cancel_event, deadline)
             self._finish(task_id, token, result)
         except FlowInterrupt:
             kind = "cancelled" if self.user_cancelled(task_id) else "timeout"
@@ -782,6 +805,9 @@ class ControlPlane:
                 expected_revision=revision,
                 proposal_id=proposal["id"],
             )
+            task["runtime_backend"] = result.get("runtime_backend", task.get("runtime_backend"))
+            task["isolated"] = bool(result.get("isolated", task.get("isolated")))
+            task["boot_ms"] = result.get("boot_ms", task.get("boot_ms"))
             task["tool_trace"] = list(result["trace"])
             task["output_sha256"] = staged["sha256"]
             task["approval_ids"] = [publish["id"], memory_approval["id"]]

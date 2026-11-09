@@ -264,7 +264,15 @@ def _task(plane, session: dict, task_id: str) -> str:
         task = plane.get_task(_human(plane), task_id)
     except SsiosError as exc:
         return _page(session, "任务", f"<p>{html.escape(exc.detail)}</p>")
-    return _page(session, task_id, f"<pre>{html.escape(json.dumps(task, ensure_ascii=False, indent=2))}</pre>")
+    isolated = "是" if task.get("isolated") else "否"
+    boot = task.get("boot_ms")
+    boot_line = f"{boot} 毫秒" if isinstance(boot, int) else "没有"
+    summary = (
+        f"<p>后端：{html.escape(str(task.get('runtime_backend') or ''))}</p>"
+        f"<p>隔离：{isolated}</p>"
+        f"<p>启动并运行：{html.escape(boot_line)}</p>"
+    )
+    return _page(session, task_id, summary + f"<pre>{html.escape(json.dumps(task, ensure_ascii=False, indent=2))}</pre>")
 
 
 def _approvals(plane, session: dict) -> str:

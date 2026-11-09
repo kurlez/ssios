@@ -1,11 +1,85 @@
 #!/bin/sh
-# Run this on the Mac. It does not boot a guest and does not delete state.
+# Full summary inside krunvm, against a temporary state directory.
+# This script does not read or delete .ssios, .ssios-demo, or .ssios-memfs.
+# It does not create disk images. Create a case-sensitive volume yourself if
+# krunvm/buildah asks for one; see docs/macos-vm.md.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-echo "krunvm: $(command -v krunvm || echo missing)"
-if command -v krunvm >/dev/null 2>&1; then
-  krunvm --version || true
+if ! command -v krunvm >/dev/null 2>&1; then
+  echo "krunvm is not installed. See docs/macos-vm.md." >&2
+  exit 2
 fi
-PYTHONPATH=src python3 -m ssios vm-doctor --state .ssios-memfs --config .ssios/memfs.toml
-echo "vm-doctor does not start a microVM. Isolation is true only when status reports isolated=true."
+krunvm --version
+STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vm-smoke.XXXXXX")
+cleanup() {
+  if [ -n "${PID:-}" ]; then
+    kill "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null || true
+  fi
+  rm -rf "$STATE"
+}
+trap cleanup EXIT
+cp config/ssios.example.toml "$STATE/smoke.toml"
+python3 - "$STATE/smoke.toml" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace('backend = "dev-guard"', 'backend = "macos-vm"', 1)
+path.write_text(text, encoding="utf-8")
+PY
+PYTHONPATH=src python3 -m ssios up --profile dev --state "$STATE" --config "$STATE/smoke.toml" --port 0 >"$STATE/up.log" 2>&1 &
+PID=$!
+python3 - "$STATE" <<'PY'
+import json, pathlib, sys, time, urllib.parse, urllib.request
+state = pathlib.Path(sys.argv[1])
+log = (state / "up.log").read_text(encoding="utf-8", errors="replace") if (state / "up.log").exists() else ""
+deadline = time.time() + 20
+url = ""
+while time.time() < deadline:
+    log = (state / "up.log").read_text(encoding="utf-8", errors="replace")
+    for line in log.splitlines():
+        if "http://" in line:
+            url = line[line.find("http://"):].split()[0]
+            break
+    if url:
+        try:
+            urllib.request.urlopen(url + "/ui/login", timeout=1).read()
+            break
+        except Exception:
+            pass
+    time.sleep(0.2)
+else:
+    sys.stderr.write(log)
+    raise SystemExit("ssios up did not start")
+token = (state / "secrets" / "human.token").read_text(encoding="utf-8").strip()
+body = json.dumps({
+    "project_id": "demo-alpha",
+    "kind": "project-summary",
+    "input_revision": "exp-1",
+    "input_path": "notes.md",
+}).encode()
+request = urllib.request.Request(url + "/v1/tasks", data=body, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
+with urllib.request.urlopen(request, timeout=30) as response:
+    created = json.load(response)
+task_id = created["id"]
+deadline = time.time() + 180
+while time.time() < deadline:
+    req = urllib.request.Request(url + "/v1/tasks/" + task_id, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=10) as response:
+        task = json.load(response)
+    if task["status"] in {"awaiting_approval", "failed", "committed"}:
+        break
+    time.sleep(0.5)
+else:
+    raise SystemExit("task did not finish")
+print(json.dumps({
+    "status": task["status"],
+    "runtime_backend": task.get("runtime_backend"),
+    "isolated": task.get("isolated"),
+    "boot_ms": task.get("boot_ms"),
+    "error_code": task.get("error_code"),
+}, ensure_ascii=False))
+if not task.get("isolated"):
+    raise SystemExit("guest did not run")
+PY

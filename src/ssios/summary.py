@@ -314,10 +314,15 @@ def _verify(base: str, token: str, task: dict) -> int:
     runtime = status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
     backend = str(runtime.get("active_backend") or "dev-guard")
     print("模型连通不等于任务成功。下面是已发布结果。", flush=True)
-    if backend == "dev-guard":
+    if task.get("isolated"):
+        print(
+            f"本次执行后端是 {task.get('runtime_backend') or backend}。客户机已运行，启动并完成用时 {task.get('boot_ms')} 毫秒。模型调用在宿主机上。",
+            flush=True,
+        )
+    elif backend == "dev-guard":
         print("本次执行后端是 dev-guard：任务在控制面进程内完成，没有启动 microVM。", flush=True)
     else:
-        print(f"本次执行后端是 {backend}，但客户机没有启动，任务没有在隔离虚拟机里运行。", flush=True)
+        print(f"本次执行后端是 {backend}，但客户机没有运行，任务没有在隔离虚拟机里完成。", flush=True)
     print(f"任务 {task['id']} 已提交。", flush=True)
     print(f"发布 {published.get('revision')} sha256 {published.get('sha256')}", flush=True)
     print(

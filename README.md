@@ -105,7 +105,7 @@ PYTHONPATH=src python3 -m ssios summary \
 PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-microVM 不参与这条路径。`dev-guard` 只是进程内限制。`macos-vm` 和 `cloud-hypervisor` 会在创建任务时失败关闭，不会改在宿主机上跑。状态里的 `isolated` 在这两种后端上仍是 false。
+`dev-guard` 在控制面进程内完成任务。`macos-vm` 在装了 `krunvm` 之后把摘要 worker 放进客户机；模型调用仍由宿主机代理。没有客户机时任务失败关闭。`isolated` 只在客户机确实写出结果时为 true。说明见 [docs/macos-vm.md](docs/macos-vm.md)。
 
 Letta 每次 `memory export` 会在状态目录留下一份完整副本。读完后会删掉当次的 `exports/<agent>/scratch`。已经积累的 `exports/<agent>/<四位十六进制>/` 不会自动删。先停掉 `ssios up`，再看清单：
 

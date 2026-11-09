@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "vm-doctor":
         from ssios.runtime import build_runtime
 
-        print(json.dumps(build_runtime(settings).preflight() if settings.runtime_backend != "dev-guard" else {"backend": "dev-guard", "isolated": False, "microvm": False, "detail": "dev-guard is not a microVM"}, ensure_ascii=False, indent=2))
+        print(json.dumps(build_runtime(settings).doctor(), ensure_ascii=False, indent=2))
         return 0
     if args.command == "gc":
         return run_gc(settings, dry_run=args.dry_run)

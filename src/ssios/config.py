@@ -30,6 +30,10 @@ class Settings:
     virtiofsd_bin: str
     kernel_path: str
     root_image_path: str
+    initramfs_path: str
+    echo_initramfs_path: str
+    guest_image: str
+    krunvm_bin: str
     task_timeout_seconds: float
     max_tool_calls: int
     max_output_bytes: int
@@ -132,6 +136,15 @@ def load_settings(
         virtiofsd_bin=str(runtime.get("virtiofsd_bin", "virtiofsd")),
         kernel_path=str(runtime.get("kernel_path", "")),
         root_image_path=str(runtime.get("root_image_path", "")),
+        initramfs_path=str(runtime.get("initramfs_path", "")),
+        echo_initramfs_path=str(runtime.get("echo_initramfs_path", "")),
+        guest_image=str(
+            runtime.get(
+                "guest_image",
+                "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7",
+            )
+        ),
+        krunvm_bin=str(runtime.get("krunvm_bin", "krunvm")),
         task_timeout_seconds=float(limits.get("task_timeout_seconds", 30)),
         max_tool_calls=int(limits.get("max_tool_calls", 8)),
         max_output_bytes=int(limits.get("max_output_bytes", 65536)),
