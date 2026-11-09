@@ -78,6 +78,7 @@ class ControlPlane:
         self.auth.load()
         self.approvals.load()
         self._load_tasks()
+        self._ensure_memory_repos()
         self._check_perms()
         if self._uses_upstream():
             self.upstream.preflight()
@@ -98,14 +99,40 @@ class ControlPlane:
         if not (state / "tasks.json").exists():
             write_json(state / "tasks.json", {"tasks": {}})
         for project_id in ("demo-alpha", "demo-beta"):
-            if not self._uses_upstream() and not (self.memory.root / project_id / "repo" / ".git").exists():
-                self.memory.seed_project(project_id)
             if not (self.storage.exports / project_id / "exp-1" / "manifest.json").exists():
                 self.storage.seed_export(project_id, "exp-1")
         vault = state / "vault" / "canary.txt"
         if not vault.exists():
             data = (self.fixtures / "vault" / "canary.txt").read_bytes()
             atomic_write(vault, data, 0o600)
+
+    def _ensure_memory_repos(self) -> None:
+        if self._uses_upstream():
+            return
+        for project_id in ("demo-alpha", "demo-beta"):
+            git_dir = self.memory.root / project_id / "repo" / ".git"
+            if git_dir.is_dir():
+                continue
+            if self._memory_history_required(project_id):
+                raise SsiosError(
+                    "memory_repo_missing",
+                    "canonical memory repository is missing; existing approvals and the audit log were left unchanged",
+                    500,
+                )
+            repo = self.memory.repo(project_id)
+            if repo.exists():
+                self.memory.repair_uninitialized_repo(project_id)
+            else:
+                self.memory.seed_project(project_id)
+
+    def _memory_history_required(self, project_id: str) -> bool:
+        for task in self.tasks.values():
+            if task.get("project_id") == project_id and task.get("memory_revision"):
+                return True
+        for record in self.approvals.records():
+            if record.get("project_id") == project_id and str(record.get("action", "")).startswith("memory."):
+                return True
+        return False
 
     def _check_perms(self) -> None:
         state = self.settings.state_dir

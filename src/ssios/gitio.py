@@ -67,12 +67,25 @@ def _is_empty_commit(stdout: bytes, stderr: bytes) -> bool:
     return _EMPTY_COMMIT.search(text) is not None
 
 
+def anchored_path(path: Path, anchor: Path) -> Path:
+    """Resolve path against the process directory captured at startup.
+
+    Git is later started with a different cwd. A relative `-C` would then be
+    interpreted from that cwd and miss a repository that exists.
+    """
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = anchor / path
+    return path.resolve()
+
+
 class GitRunner:
     def __init__(self, hooks_path: Path, empty_config: Path) -> None:
-        self.hooks_path = hooks_path
-        self.empty_config = empty_config
-        self.home = empty_config.parent / "git-home"
-        self.blank = empty_config.parent / "git-blank"
+        self._anchor = Path.cwd()
+        self.hooks_path = anchored_path(hooks_path, self._anchor)
+        self.empty_config = anchored_path(empty_config, self._anchor)
+        self.home = self.empty_config.parent / "git-home"
+        self.blank = self.empty_config.parent / "git-blank"
 
     def prepare(self) -> None:
         self.hooks_path.mkdir(parents=True, exist_ok=True)
@@ -111,7 +124,15 @@ class GitRunner:
     def run(self, repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
         if any(not isinstance(part, str) or "\x00" in part or part == "--global" for part in args):
             raise SsiosError("git_rejected", "git argument rejected", 500)
-        cmd = ["git", "--no-pager", "-C", str(repo), *self._overrides(), *args]
+        repo_path = anchored_path(repo, self._anchor)
+        if not repo_path.is_dir():
+            subcommand = args[0] if args else "git"
+            raise SsiosError(
+                "memory_repo_missing",
+                f"git {subcommand} was not started; canonical repository directory is missing and was not created",
+                500,
+            )
+        cmd = ["git", "--no-pager", "-C", str(repo_path), *self._overrides(), *args]
         completed = subprocess.run(
             cmd,
             check=False,
@@ -136,9 +157,10 @@ class GitRunner:
 
     def init_repo(self, repo: Path) -> None:
         self.prepare()
-        repo.mkdir(parents=True, exist_ok=True)
+        repo_path = anchored_path(repo, self._anchor)
+        repo_path.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
-            ["git", "--no-pager", "-C", str(repo), *self._overrides(), "init", "-b", "main"],
+            ["git", "--no-pager", "-C", str(repo_path), *self._overrides(), "init", "-b", "main"],
             check=False,
             capture_output=True,
             shell=False,

@@ -29,7 +29,9 @@ SSIOS 配置里的 Ollama 地址必须是环回地址。程序会拒绝其他主
 
 ## 演示如果在批准后报 git_failed
 
-不要删除 `.ssios` 或 `.ssios-demo`。更新到当前分支后再执行 `make demo`。已经过期的审批不会被续期；演示会按当前仓库修订另开新审批再批准。Git 失败时的 `detail` 包含子命令、退出码和经过删减的输出。这些恢复测试是在 Linux 上做的，没有在这台 Mac 上复测。
+不要删除 `.ssios` 或 `.ssios-demo`。更新后再执行 `make demo`。
+
+已在 Linux 上复现这次 `git rev-parse` 失败：状态目录是相对路径 `.ssios-demo`，仓库目录本身存在，但 `git -C` 仍用相对路径，而 Git 子进程的 cwd 是 `.ssios-demo/git-home`，于是报 `cannot change to '.ssios-demo/memory/demo-alpha/repo'`。修复是在启动时把状态目录收成绝对路径。若记忆仓库真的不存在、而审批又引用了旧修订，程序会停下且不重建仓库、不改审批。该复现没有在 Mac 上再跑。
 
 ## 本环境没有覆盖的内容
 

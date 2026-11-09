@@ -51,8 +51,8 @@ def validate_letta_argv(argv: list[str]) -> None:
 
 class UpstreamLettaBridge:
     def __init__(self, state_dir: Path, letta_bin: str) -> None:
-        self.state_dir = state_dir
-        self.root = state_dir / "upstream-letta"
+        self.state_dir = state_dir if state_dir.is_absolute() else (Path.cwd() / state_dir).resolve()
+        self.root = self.state_dir / "upstream-letta"
         self.backend_dir = self.root / "backend"
         self.home_dir = self.root / "empty-home"
         self.work_dir = self.root / "empty-cwd"

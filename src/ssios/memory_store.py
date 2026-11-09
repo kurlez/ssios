@@ -83,6 +83,47 @@ class MemoryStore:
     def provenance_path(self, project_id: str) -> Path:
         return self.root / project_id / "provenance.json"
 
+    def repair_uninitialized_repo(self, project_id: str) -> str:
+        """Initialize git in a copied tree that never received .git.
+
+        Existing files are kept. This is refused by the caller when approvals
+        already name a revision, because a new history would not match them.
+        """
+        repo = self.repo(project_id)
+        if (repo / ".git").is_dir():
+            return self.head(project_id)
+        if not (repo / "MEMORY.md").is_file():
+            raise SsiosError(
+                "memory_repo_missing",
+                "canonical memory repository is incomplete; files were not deleted or replaced",
+                500,
+            )
+        self.git.init_repo(repo)
+        paths = []
+        for path in sorted(repo.rglob("*")):
+            if not path.is_file() or path.is_symlink() or ".git" in path.parts:
+                continue
+            paths.append(path.relative_to(repo).as_posix())
+        if not paths:
+            raise SsiosError(
+                "memory_repo_missing",
+                "canonical memory repository has no files to commit; nothing was deleted",
+                500,
+            )
+        revision = self.git.commit_paths(repo, paths, "ssios seed synthetic memory")
+        files = {}
+        for rel in paths:
+            blob = self._show(repo, rel)
+            files[rel] = {
+                "trust": "synthetic_seed",
+                "source": "interrupted_setup",
+                "payload_sha256": sha256_bytes(blob),
+                "revision": revision,
+                "tombstone": False,
+            }
+        write_json(self.provenance_path(project_id), {"project_id": project_id, "files": files})
+        return revision
+
     def seed_project(self, project_id: str) -> str:
         self._project(project_id)
         source = self.fixtures / project_id

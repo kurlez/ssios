@@ -30,7 +30,7 @@ make preflight # 打印 Cloud Hypervisor 预检。这不是启动虚拟机
 make memfs-info
 ```
 
-`make demo` 使用状态目录 `.ssios-demo`，不会删除已有的 `.ssios` 或 `.ssios-demo`。过期的审批保持过期，不会延长原单或重用原来的 nonce。再执行 `make demo` 时，演示程序会按当前修订另开一张新审批，再用演示用的人类令牌批准新单。已发布且内容相同的结果不会重复发布。被拒绝、取消、失败或超时的任务不会在同一次命令里循环重试。若那份状态不想再动，可以换一个新目录，旧目录保持原样：
+`make demo` 的 `--state .ssios-demo` 会在启动时按当前工作目录收成绝对路径，再交给 Git。这样内部 Git 的工作目录即使改到 `git-home`，也不会再把相对路径 `-C` 解析错。它不会删除已有的 `.ssios` 或 `.ssios-demo`。过期的审批保持过期，不会延长原单或重用原来的 nonce。再执行 `make demo` 时，演示程序会按当前修订另开一张新审批，再用演示用的人类令牌批准新单。已发布且内容相同的结果不会重复发布。被拒绝、取消、失败或超时的任务不会在同一次命令里循环重试。若那份状态不想再动，可以换一个新目录，旧目录保持原样：
 
 ```bash
 PYTHONPATH=src python3 -m ssios demo --state .ssios-demo-retry --config config/ssios.example.toml

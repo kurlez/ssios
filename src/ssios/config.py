@@ -90,6 +90,10 @@ def load_settings(
     ttl = float(limits.get("approval_ttl_seconds", 600))
     if ttl < 0:
         raise SsiosError("config_invalid", "approval ttl must be >= 0", 500)
+    state_path = Path(state_dir).expanduser()
+    if not state_path.is_absolute():
+        state_path = Path.cwd() / state_path
+    state_path = state_path.resolve()
     return Settings(
         profile=chosen_profile,
         host=host,
@@ -113,6 +117,6 @@ def load_settings(
         core_token_budget=budget,
         memory_mode=memory_mode,
         letta_bin=str(memory.get("letta_bin", "")),
-        state_dir=state_dir,
+        state_dir=state_path,
         config_path=config_path,
     )
