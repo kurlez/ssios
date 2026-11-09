@@ -115,7 +115,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         if page.cookie:
             self.send_header("Set-Cookie", page.cookie)
         self.end_headers()
@@ -147,11 +147,14 @@ class AppHandler(BaseHTTPRequestHandler):
         return token
 
     def _check_host(self) -> None:
-        host = self.headers.get("Host", "")
-        name = host
-        if host.count(":") == 1:
+        host = self.headers.get("Host", "").strip()
+        if host.startswith("[") and "]" in host:
+            name = host[1 : host.index("]")]
+        elif host.count(":") == 1:
             name = host.split(":", 1)[0]
-        if name not in ("127.0.0.1", "localhost"):
+        else:
+            name = host
+        if name not in ("127.0.0.1", "localhost", "::1"):
             raise SsiosError("bad_host", "host rejected", 403)
 
     def _body(self) -> dict:

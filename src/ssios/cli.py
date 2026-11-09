@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         plane = ControlPlane(settings)
         plane.open()
         code = issue_login_code(plane)
-        print(f"http://{settings.host}:{settings.port}/ui/login?code={code}")
+        print(f"http://127.0.0.1:{settings.port}/ui/login?code={code}")
         print("这个代码大约两分钟内有效，且只保存在本机状态目录的哈希里。")
         return 0
     if args.command == "vm-doctor":

@@ -31,7 +31,9 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
     parts = urlsplit(target)
     path = parts.path.rstrip("/") or "/ui"
     query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
-    _check_origin(plane, headers)
+    rejected = _check_origin(plane, headers)
+    if rejected is not None:
+        return rejected
     if method == "GET" and path == "/ui/login":
         return Page(200, _login_page(query.get("code", "")))
     if method == "POST" and path == "/ui/login":
@@ -174,15 +176,61 @@ def _hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _check_origin(plane, headers) -> None:
-    origin = headers.get("Origin")
-    if not origin:
-        return
-    host = plane.settings.host
+def _bound_port(plane) -> int:
     port = plane.bound_port or plane.settings.port
-    allowed = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
-    if host not in ("127.0.0.1", "localhost") or origin not in allowed:
-        raise SsiosError("csrf_rejected", "origin rejected", 403)
+    return int(port)
+
+
+def loopback_origins(port: int) -> set[str]:
+    return {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
+
+
+def _origin_value(value: str) -> str:
+    text = value.strip()
+    if not text or text.lower() == "null":
+        return ""
+    parts = urlsplit(text if "://" in text else "")
+    if parts.scheme != "http" or parts.username or parts.password or parts.port is None:
+        return ""
+    host = parts.hostname or ""
+    if host == "::1":
+        host = "[::1]"
+    if host not in ("127.0.0.1", "localhost", "[::1]"):
+        return ""
+    return f"http://{host}:{parts.port}"
+
+
+def _check_origin(plane, headers) -> Page | None:
+    """Reject cross-site UI posts. A literal Origin of null falls back to Referer."""
+    port = _bound_port(plane)
+    allowed = loopback_origins(port)
+    origin = str(headers.get("Origin") or "").strip()
+    site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if site == "cross-site":
+        return _origin_rejection(origin or "(没有 Origin)", allowed)
+    if origin.lower() in ("", "null"):
+        referer = str(headers.get("Referer") or headers.get("Referrer") or "").strip()
+        if referer and _origin_value(referer) not in allowed:
+            return _origin_rejection(origin or "(没有 Origin)", allowed)
+        return None
+    if _origin_value(origin) not in allowed:
+        return _origin_rejection(origin, allowed)
+    return None
+
+
+def _origin_rejection(received: str, allowed: set[str]) -> Page:
+    shown = html.escape(received)
+    expected = "、".join(html.escape(item) for item in sorted(allowed))
+    body = (
+        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>来源被拒绝</title>"
+        + _STYLE
+        + "<body><main><h1>来源被拒绝</h1>"
+        + f"<p>收到的 Origin：{shown}</p>"
+        + f"<p>允许的 Origin：{expected}</p>"
+        + "<p>请从 http://127.0.0.1 和实际端口重新打开登录页。其他网站的来源会被拒绝。</p>"
+        + "</main></body></html>"
+    )
+    return Page(403, body)
 
 
 def _human(plane) -> str:
