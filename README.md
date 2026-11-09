@@ -71,7 +71,27 @@ cp config/ssios.example.toml .ssios/ollama.toml
 PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios --config .ssios/ollama.toml
 ```
 
-模型不在或端口不通时，任务失败，错误码是 `llm_unavailable`。
+模型不在或端口不通时，任务失败，错误码是 `llm_unavailable`。Ollama 自己能回答，只说明进程在听，不代表 SSIOS 任务已经成功。
+
+## 对已经运行的服务做一次摘要
+
+`ssios summary` 连接已经启动的服务，不另开进程，也不自动批准。它只跑合成项目 `local-summary`，不会改 `demo-alpha` 或其他项目的记忆。请使用和 `ssios up` 相同的 `--state` 与 `--config`。
+
+更新代码后，先停掉旧的 `ssios up`（不要删除状态目录），再用原来的参数启动一次，让新代码补上 `local-summary` 的导出：
+
+```bash
+PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+另一个终端：
+
+```bash
+PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve` 和 `<think>` 思考块都不会被当成批准。思考块里的 JSON 会被丢掉。
+
+microVM 不参与这条路径。`dev-guard` 只是进程内限制。
 
 Linux 客户机访问不到 macOS 宿主机的 `127.0.0.1`。默认不要把 Ollama 绑到 `0.0.0.0`。如果必须从客户机调用宿主机模型，只为该客户机地址做显式转发，并在防火墙上收紧来源。详见 [docs/macos-m4.md](docs/macos-m4.md)。
 

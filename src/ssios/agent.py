@@ -14,7 +14,10 @@ SYSTEM_PROMPT = (
     'or {"type":"tool","name":"storage.read","arguments":{"path":"..."}} '
     'or {"type":"tool","name":"memory.search","arguments":{"query":"..."}}. '
     'Finish with {"type":"final","text":"..."}. '
-    "Core memory is already loaded. Shell, network, and approve fields are ignored."
+    "Core memory is already loaded. Shell, network, and approve fields are ignored. "
+    "If you need the granted input, call storage.read with path notes.md. "
+    "Reasoning may sit inside <think></think>; the JSON object must be outside those tags. "
+    "An approve field does not approve anything."
 )
 
 ALLOWED_TOOLS = {"memory.read", "storage.read", "memory.search"}
@@ -75,17 +78,22 @@ class AgentRunner:
         return {"trace": trace, "final_text": final, "output_sha256_len": len(encoded)}
 
     def _dispatch(self, token: str, task: dict, name: str, arguments: dict) -> dict:
-        if name == "memory.read":
-            return self.plane.read_memory(token, task["project_id"], str(arguments.get("path", "")))
-        if name == "storage.read":
-            return self.plane.read_input(
-                token,
-                task["project_id"],
-                task["input_revision"],
-                str(arguments.get("path", "")),
-            )
-        if name == "memory.search":
-            return self.plane.search_memory(token, task["project_id"], str(arguments.get("query", "")))
+        try:
+            if name == "memory.read":
+                return self.plane.read_memory(token, task["project_id"], str(arguments.get("path", "")))
+            if name == "storage.read":
+                return self.plane.read_input(
+                    token,
+                    task["project_id"],
+                    task["input_revision"],
+                    str(arguments.get("path", "")),
+                )
+            if name == "memory.search":
+                return self.plane.search_memory(token, task["project_id"], str(arguments.get("query", "")))
+        except SsiosError as exc:
+            if exc.code == "not_found":
+                return {"error": "not_found", "detail": exc.detail}
+            raise
         raise SsiosError("tool_denied", "tool is not allowed", 403)
 
     def _check(self, task_id: str, cancel_event, deadline: float) -> None:

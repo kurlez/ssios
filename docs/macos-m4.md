@@ -33,9 +33,33 @@ SSIOS 配置里的 Ollama 地址必须是环回地址。程序会拒绝其他主
 
 已在 Linux 上复现这次 `git rev-parse` 失败：状态目录是相对路径 `.ssios-demo`，仓库目录本身存在，但 `git -C` 仍用相对路径，而 Git 子进程的 cwd 是 `.ssios-demo/git-home`，于是报 `cannot change to '.ssios-demo/memory/demo-alpha/repo'`。修复是在启动时把状态目录收成绝对路径。若记忆仓库真的不存在、而审批又引用了旧修订，程序会停下且不重建仓库、不改审批。该复现没有在 Mac 上再跑。
 
+## 服务已经起来之后
+
+`ollama` 能回答，只说明本机模型进程在听。要跑通一次任务，用和正在运行的服务相同的状态目录和配置。不要再启动第二个服务，也不要删除 `.ssios-memfs`。
+
+先在跑着 `ssios up` 的终端按 Ctrl-C，更新到当前分支后再启动那一个进程：
+
+```bash
+git fetch origin
+git checkout cursor/ssios-local-prototype-6121
+git pull
+PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+另一个终端：
+
+```bash
+PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+它只对合成项目 `local-summary` 提出摘要。看完拟发布的文本和记忆差异后，输入 `yes` 批准，或输入 `no` 拒绝。不输入就结束时，审批保持待处理。DeepSeek 的 `<think>` 内容和 JSON 里的 `approve` 都不会变成批准。
+
+这条命令走开发档控制面。它不是 microVM，也没有把“模型端口通了”当成任务成功。
+
 ## 本环境没有覆盖的内容
 
 - 没有 macOS 版本号，因此没有验证某个虚拟化产品的兼容矩阵
 - 没有 Apple Silicon 上的 Cloud Hypervisor 启动
 - 没有 virtiofs 在 M4 上的挂载测试
 - 没有 FileVault 操作步骤的自动化。磁盘加密仍是系统设置里的前提
+- 没有在这台 Mac 上复测 `ssios summary`。Linux 上的对应测试使用 mock 或 HTTP 桩，不代表 `deepseek-r1:7b` 已经在这里跑通

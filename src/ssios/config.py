@@ -53,8 +53,10 @@ def load_settings(
 ) -> Settings:
     data: dict = {}
     if config_path is not None:
+        config_path = Path(config_path).expanduser()
         if not config_path.is_file():
             raise SsiosError("config_missing", "config file not found", 500)
+        config_path = config_path.resolve()
         data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     server = _section(data, "server")
     llm = _section(data, "llm")

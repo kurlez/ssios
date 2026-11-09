@@ -16,6 +16,7 @@ from ssios.httpapi import ControlServer
 from ssios.letta_upstream import UpstreamLettaBridge
 from ssios.runtime import CloudHypervisorRuntime
 from ssios.service import ControlPlane, production_blocked
+from ssios.summary import run_summary
 from ssios.upstream import describe_memfs, probe_local_binary
 
 
@@ -25,9 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
-        if name in ("up", "demo", "preflight"):
+        if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
             command.add_argument("--port", type=int)
         if name == "memfs-info":
@@ -66,6 +67,18 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "port", None) is None:
             settings = replace(settings, port=0)
         return run_demo(settings)
+    if args.command == "summary":
+        try:
+            return run_summary(settings)
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        except KeyboardInterrupt:
+            print(json.dumps({"error": "interrupted", "detail": "已中断，没有批准。"}, ensure_ascii=False), flush=True)
+            return 130
+        except Exception as exc:
+            print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
+            return 1
     return 2
 
 

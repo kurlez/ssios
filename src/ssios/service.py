@@ -23,6 +23,8 @@ from ssios.storage import ProjectStorage
 from ssios.upstream import describe_memfs
 from ssios.util import assert_private, atomic_write, read_json, secure_mkdir, sha256_bytes, write_json
 
+SEEDED_PROJECTS = ("demo-alpha", "demo-beta", "local-summary")
+
 TASK_FIELDS = (
     "id",
     "project_id",
@@ -98,7 +100,7 @@ class ControlPlane:
             write_json(self.approvals.path, {"approvals": {}})
         if not (state / "tasks.json").exists():
             write_json(state / "tasks.json", {"tasks": {}})
-        for project_id in ("demo-alpha", "demo-beta"):
+        for project_id in SEEDED_PROJECTS:
             if not (self.storage.exports / project_id / "exp-1" / "manifest.json").exists():
                 self.storage.seed_export(project_id, "exp-1")
         vault = state / "vault" / "canary.txt"
@@ -109,7 +111,7 @@ class ControlPlane:
     def _ensure_memory_repos(self) -> None:
         if self._uses_upstream():
             return
-        for project_id in ("demo-alpha", "demo-beta"):
+        for project_id in SEEDED_PROJECTS:
             git_dir = self.memory.root / project_id / "repo" / ".git"
             if git_dir.is_dir():
                 continue
@@ -195,6 +197,22 @@ class ControlPlane:
                 "cloud_hypervisor": self.cloud.preflight(),
             },
             "approvals": "separate-human-token",
+            "identity": self.service_identity(),
+        }
+
+    def service_identity(self) -> dict:
+        return {
+            "state_dir": str(self.settings.state_dir),
+            "config_path": str(self.settings.config_path or ""),
+            "profile": self.settings.profile,
+            "memory_mode": self.settings.memory_mode,
+            "llm_provider": self.settings.llm_provider,
+            "ollama_model": self.settings.ollama_model,
+            "ollama_base_url": self.settings.ollama_base_url,
+            "llm_timeout_seconds": self.settings.llm_timeout_seconds,
+            "task_timeout_seconds": self.settings.task_timeout_seconds,
+            "letta_bin": self.settings.letta_bin,
+            "bind": f"{self.settings.host}:{self.bound_port}",
         }
 
     def preflight(self, token: str) -> dict:
@@ -489,6 +507,7 @@ class ControlPlane:
             )
             public = self.approvals.public(record)
             public["preview"] = preview
+            public["files"] = self._preview_files(record)
             return public
 
     def decide(self, token: str, approval_id: str, body: dict) -> dict:
@@ -536,12 +555,16 @@ class ControlPlane:
                     project_id=record["project_id"],
                 )
                 raise SsiosError("approval_binding_mismatch", "approval binding does not match", 409)
-            task = self.tasks.get(record["task_id"])
-            if task is not None and task["status"] in ("cancelled", "timeout", "failed", "rejected"):
-                raise SsiosError("task_closed", "task is closed", 409)
             decision = body.get("decision")
             if decision not in ("approve", "deny"):
                 raise SsiosError("approval_invalid", "decision rejected", 400)
+            task = self.tasks.get(record["task_id"])
+            if (
+                decision != "deny"
+                and task is not None
+                and task["status"] in ("cancelled", "timeout", "failed", "rejected")
+            ):
+                raise SsiosError("task_closed", "task is closed", 409)
             if decision == "deny":
                 self.approvals.mark(approval_id, status="denied", decision="deny")
                 if record.get("proposal_id"):
@@ -803,6 +826,26 @@ class ControlPlane:
         if record["action"] == "memory.forget":
             return proposal["path"]
         return "\n\n".join(item["content"] for item in proposal["files"])
+
+    def _preview_files(self, record: dict) -> list[dict]:
+        if record["action"] == "storage.publish":
+            return [{"path": "summary.md", "content": self._preview_text(record)}]
+        if record["action"] == "memory.forget":
+            proposal = self._load_proposal(record["proposal_id"])
+            self._check_proposal_hash(proposal, record["payload_sha256"])
+            return [{"path": str(proposal.get("path", "")), "content": ""}]
+        if record["action"] != "memory.commit":
+            return []
+        proposal = self._load_proposal(record["proposal_id"])
+        self._check_proposal_hash(proposal, record["payload_sha256"])
+        files = []
+        for item in proposal.get("files") or []:
+            files.append({"path": str(item.get("path", "")), "content": str(item.get("content", ""))})
+        return files
+
+    def _check_proposal_hash(self, proposal: dict, payload_sha256: str) -> None:
+        if MemoryStore.proposal_hash(proposal) != payload_sha256:
+            raise SsiosError("payload_mismatch", "proposal bytes do not match the approval", 409)
 
     def _refresh_task(self, task_id: str) -> None:
         task = self.tasks.get(task_id)

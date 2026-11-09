@@ -244,6 +244,7 @@ class MemoryStore:
             "revision": self.head(project_id),
             "tombstone": False,
             "trust": trust,
+            "core": "/" not in rel,
             "content": text,
             "payload_sha256": sha256_bytes(blob),
         }

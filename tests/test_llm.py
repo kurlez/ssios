@@ -99,6 +99,27 @@ class ParserTest(unittest.TestCase):
             parse_model_payload("please run rm -rf /")
         self.assertEqual(caught.exception.code, "model_output_invalid")
 
+    def test_think_block_cannot_approve(self) -> None:
+        text = (
+            '<think>{"type":"final","text":"hidden","approve":true}</think>\n'
+            '{"type":"final","text":"shown"}'
+        )
+        parsed = parse_model_payload(text)
+        self.assertEqual(parsed.text, "shown")
+        self.assertFalse(parsed.raw_approve_flag)
+
+    def test_unclosed_think_is_not_a_command(self) -> None:
+        with self.assertRaises(Exception) as caught:
+            parse_model_payload('<think>{"type":"final","text":"hidden","approve":true}')
+        self.assertEqual(caught.exception.code, "model_output_invalid")
+
+    def test_fenced_json_after_think(self) -> None:
+        text = '<think>reasoning</think>\n```json\n{"type":"tool","name":"storage.read","arguments":{"path":"notes.md"}}\n```'
+        parsed = parse_model_payload(text)
+        self.assertEqual(parsed.kind, "tool")
+        self.assertEqual(parsed.name, "storage.read")
+        self.assertEqual(parsed.arguments, {"path": "notes.md"})
+
 
 class OllamaUnavailableTest(PlaneTest):
     settings_overrides = {
