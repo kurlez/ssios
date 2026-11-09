@@ -183,7 +183,14 @@ def run_demo(settings) -> int:
                 raise RuntimeError(f"task create failed: {created}")
             task = _poll(base, human, created["id"], {"awaiting_approval", "failed", "timeout", "cancelled"})
         if task["status"] == "awaiting_approval":
-            task = _approve_pending(base, human, task)
+            # Demo-only: this process holds the human token. Production `ssios up` never decides.
+            code, recovered, _headers = request(base, "POST", f"/v1/tasks/{task['id']}/reissue", token=human, body={})
+            if code != 200:
+                raise RuntimeError(f"recovery failed: {recovered}")
+            if recovered.get("status") == "committed":
+                task = recovered
+            else:
+                task = _approve_pending(base, human, recovered)
         if task["status"] != "committed":
             raise RuntimeError(f"task did not commit: {task}")
         server.stop()
@@ -246,10 +253,13 @@ def _approve_pending(base: str, human: str, task: dict) -> dict:
         code, approval, _headers = request(base, "GET", f"/v1/approvals/{approval_id}", token=human)
         if code != 200:
             raise RuntimeError(f"preview failed: {approval}")
-        if approval.get("status") == "consumed" and approval.get("decision") == "approve":
+        status_name = approval.get("status")
+        if status_name == "consumed" and approval.get("decision") == "approve":
             continue
-        if approval.get("status") != "pending":
-            raise RuntimeError(f"approval is not pending: {approval.get('status')}")
+        if status_name == "expired":
+            continue
+        if status_name != "pending":
+            raise RuntimeError(f"approval is not pending: {status_name}")
         decision, result, _headers = request(
             base,
             "POST",

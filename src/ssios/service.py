@@ -420,6 +420,31 @@ class ControlPlane:
             )
             return {"proposal_id": proposal["id"], "approval": approval}
 
+    def reissue_expired(self, token: str, task_id: str) -> dict:
+        """Mint new approvals for expired, unapplied actions. Does not approve them."""
+        with self.lock:
+            self.require_human(token)
+            task = self._require_task(task_id)
+            if task["status"] != "awaiting_approval":
+                raise SsiosError("task_closed", "task is not awaiting approval", 409)
+            issued: list[str] = []
+            for approval_id in list(task["approval_ids"]):
+                current = self.approvals.get(approval_id)
+                if current["status"] == "pending" and self.now() >= float(current["expires_at"]):
+                    self.approvals.mark(approval_id, status="expired", decision=None)
+                    current = self.approvals.get(approval_id)
+                if current["status"] != "expired":
+                    continue
+                if self._open_successor(task, approval_id):
+                    continue
+                if self._effect_already_applied(current):
+                    continue
+                issued.append(self._mint_replacement(task, current))
+            self._refresh_task(task_id)
+            public = self.get_task(token, task_id)
+            public["issued"] = issued
+            return public
+
     def get_approval(self, token: str, approval_id: str) -> dict:
         with self.lock:
             self.require_human(token)
@@ -443,6 +468,23 @@ class ControlPlane:
         with self.lock:
             self.require_human(token, approval=True)
             record = self.approvals.get(approval_id)
+            if record["status"] == "expired" or (
+                record["status"] == "pending" and self.now() >= float(record["expires_at"])
+            ):
+                if record["status"] == "pending":
+                    self.approvals.mark(approval_id, status="expired", decision=None)
+                self.audit.write(
+                    ts=self.now(),
+                    actor_role="human",
+                    action="approval.decide",
+                    result="denied",
+                    approval_id=approval_id,
+                    error_code="approval_expired",
+                    payload_sha256=record["payload_sha256"],
+                    task_id=record["task_id"],
+                    project_id=record["project_id"],
+                )
+                raise SsiosError("approval_expired", "approval expired", 409)
             if record["status"] != "pending":
                 self.audit.write(
                     ts=self.now(),
@@ -455,18 +497,6 @@ class ControlPlane:
                     project_id=record["project_id"],
                 )
                 raise SsiosError("approval_replay_denied", "approval is no longer pending", 409)
-            if self.now() >= float(record["expires_at"]):
-                self.approvals.mark(approval_id, status="expired", decision=None)
-                self.audit.write(
-                    ts=self.now(),
-                    actor_role="human",
-                    action="approval.decide",
-                    result="denied",
-                    approval_id=approval_id,
-                    error_code="approval_expired",
-                    payload_sha256=record["payload_sha256"],
-                )
-                raise SsiosError("approval_expired", "approval expired", 409)
             if not self.approvals.binding_matches(record, body):
                 self.audit.write(
                     ts=self.now(),
@@ -753,20 +783,20 @@ class ControlPlane:
             return
         records = [self.approvals.get(item) for item in task["approval_ids"]]
         if any(item["status"] == "pending" for item in records):
-            if task["status"] not in ("cancelled", "timeout", "failed"):
+            if task["status"] not in ("cancelled", "timeout", "failed", "rejected"):
                 task["status"] = "awaiting_approval"
-        elif all(item["status"] == "consumed" and item["decision"] == "approve" for item in records):
-            task["status"] = "committed"
-            task["error_code"] = None
+        elif any(item["status"] == "denied" for item in records):
+            task["status"] = "rejected"
+            task["error_code"] = "denied"
         elif any(item["status"] == "conflict" for item in records):
             task["status"] = "failed"
             task["error_code"] = "cas_conflict"
         elif any(item["status"] == "tampered" for item in records):
             task["status"] = "failed"
             task["error_code"] = "payload_mismatch"
-        elif any(item["status"] == "denied" for item in records):
-            task["status"] = "rejected"
-            task["error_code"] = "denied"
+        elif records and all(self._approval_satisfied(task, item) for item in records):
+            task["status"] = "committed"
+            task["error_code"] = None
         self._persist_tasks()
 
     def _require_task(self, task_id: str) -> dict:
@@ -777,6 +807,136 @@ class ControlPlane:
 
     def _uses_upstream(self) -> bool:
         return self.settings.memory_mode == "letta-memfs-upstream"
+
+    def _open_successor(self, task: dict, approval_id: str) -> bool:
+        for other in self.approvals.records():
+            if other.get("replaces") != approval_id or other.get("task_id") != task["id"]:
+                continue
+            if other["status"] not in ("pending", "consumed"):
+                continue
+            if other["approval_id"] not in task["approval_ids"]:
+                task["approval_ids"].append(other["approval_id"])
+            return True
+        return False
+
+    def _effect_already_applied(self, record: dict) -> bool:
+        if record["action"] == "storage.publish":
+            return self._published_matches(record["project_id"], record["payload_sha256"])
+        if record["action"] not in ("memory.commit", "memory.forget"):
+            return False
+        proposal = self._load_proposal(record["proposal_id"])
+        if record["action"] == "memory.forget":
+            try:
+                current = self._read_memory_file(record["project_id"], proposal["path"])
+            except SsiosError as exc:
+                return exc.code == "not_found"
+            return bool(current.get("tombstone"))
+        return all(
+            self._memory_file_equals(record["project_id"], item["path"], item["content"])
+            for item in proposal.get("files") or []
+        )
+
+    def _published_matches(self, project_id: str, payload_sha256: str) -> bool:
+        head = self.storage.published_head(project_id)
+        if head in ("", "none"):
+            return False
+        try:
+            body = self.storage.read_published(project_id, head)
+        except SsiosError:
+            return False
+        return body.get("sha256") == payload_sha256
+
+    def _memory_file_equals(self, project_id: str, path: str, content: str) -> bool:
+        try:
+            current = self._read_memory_file(project_id, path)
+        except SsiosError as exc:
+            if exc.code == "not_found":
+                return False
+            raise
+        return current.get("content") == content
+
+    def _read_memory_file(self, project_id: str, path: str) -> dict:
+        if self._uses_upstream():
+            return self.upstream.read_committed(project_id, path)
+        return self.memory.read_file(project_id, path, include_untrusted=True)
+
+    def _load_proposal(self, proposal_id: str) -> dict:
+        if self._uses_upstream():
+            return self.upstream.load_proposal(proposal_id)
+        return self.memory.load_proposal(proposal_id)
+
+    def _mint_replacement(self, task: dict, expired: dict) -> str:
+        if expired["action"] == "storage.publish":
+            staged = self.storage.staged_bytes(task["id"])
+            if sha256_bytes(staged) != expired["payload_sha256"]:
+                raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
+            created = self._approval(
+                action="storage.publish",
+                project_id=expired["project_id"],
+                task_id=task["id"],
+                payload_sha256=expired["payload_sha256"],
+                expected_revision=self.storage.published_head(expired["project_id"]),
+                proposal_id=None,
+            )
+        elif expired["action"] in ("memory.commit", "memory.forget"):
+            proposal = self._load_proposal(expired["proposal_id"])
+            head = self.upstream.head(expired["project_id"]) if self._uses_upstream() else self.memory.head(expired["project_id"])
+            task_label = task["id"]
+            if expired["action"] == "memory.forget":
+                staged = (
+                    self.upstream.stage_forget(expired["project_id"], head, proposal["path"], task_id=task_label)
+                    if self._uses_upstream()
+                    else self.memory.propose_forget(expired["project_id"], head, proposal["path"], task_id=task_label)
+                )
+            else:
+                staged = (
+                    self.upstream.stage_proposal(expired["project_id"], head, proposal["files"], task_id=task_label)
+                    if self._uses_upstream()
+                    else self.memory.propose(expired["project_id"], head, proposal["files"], task_id=task_label)
+                )
+            self._mark_proposal(expired["proposal_id"], "superseded")
+            created = self._approval(
+                action=expired["action"],
+                project_id=expired["project_id"],
+                task_id=task["id"],
+                payload_sha256=staged["payload_sha256"],
+                expected_revision=head,
+                proposal_id=staged["id"],
+            )
+        else:
+            raise SsiosError("approval_invalid", "action rejected", 400)
+        stored = self.approvals.get(created["id"])
+        stored["replaces"] = expired["approval_id"]
+        self.approvals.save()
+        task["approval_ids"].append(created["id"])
+        self.audit.write(
+            ts=self.now(),
+            actor_role="human",
+            action="approval.reissue",
+            result="staged",
+            task_id=task["id"],
+            project_id=expired["project_id"],
+            approval_id=created["id"],
+            replaces=expired["approval_id"],
+            payload_sha256=created["payload_sha256"],
+            revision=created["expected_revision"],
+        )
+        return created["id"]
+
+    def _approval_satisfied(self, task: dict, record: dict) -> bool:
+        if record["status"] == "consumed" and record["decision"] == "approve":
+            return True
+        if record["status"] != "expired":
+            return False
+        for other in self.approvals.records():
+            if (
+                other.get("replaces") == record["approval_id"]
+                and other.get("task_id") == task["id"]
+                and other["status"] == "consumed"
+                and other.get("decision") == "approve"
+            ):
+                return True
+        return self._effect_already_applied(record)
 
     def _mark_proposal(self, proposal_id: str, status: str) -> None:
         if self._uses_upstream():

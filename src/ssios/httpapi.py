@@ -74,6 +74,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if self.command == "POST" and path.startswith("/v1/tasks/") and path.endswith("/cancel"):
             task_id = path.split("/")[-2]
             return 200, plane.cancel_task(token, task_id)
+        if self.command == "POST" and path.startswith("/v1/tasks/") and path.endswith("/reissue"):
+            task_id = path.split("/")[-2]
+            return 200, plane.reissue_expired(token, task_id)
         if self.command == "GET" and path.startswith("/v1/approvals/"):
             return 200, plane.get_approval(token, path.split("/")[-1])
         if self.command == "POST" and path.startswith("/v1/approvals/") and path.endswith("/decide"):

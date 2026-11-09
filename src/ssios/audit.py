@@ -22,6 +22,7 @@ ALLOWED_FIELDS = {
     "query_sha256",
     "revision",
     "error_code",
+    "replaces",
 }
 
 

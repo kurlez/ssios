@@ -59,6 +59,9 @@ class ApprovalStore:
         self.save()
         return self.public(record)
 
+    def records(self) -> list[dict]:
+        return list(self._items.values())
+
     def get(self, approval_id: str) -> dict:
         record = self._items.get(approval_id)
         if record is None:
