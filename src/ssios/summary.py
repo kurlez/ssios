@@ -398,6 +398,13 @@ def _failure_detail(task: dict) -> str:
         return "这台 Ollama 不接受结构化 format。请升级本机 Ollama。没有改用云端，也没有删除状态。"
     if code == "llm_response_unsupported":
         return "Ollama 的响应形状不受支持。没有把未知字段当成批准。失败记录会保留，重试会新建任务。"
+    if code == "microvm_fail_closed":
+        detail = "客户机没有跑完这次任务，所以没有在宿主机上补跑，也没有批准。"
+        if task.get("error_detail"):
+            detail += " " + str(task["error_detail"])
+        if task.get("diagnostic_path"):
+            detail += f" 诊断文件：{task['diagnostic_path']}。"
+        return detail
     if code in ("timeout", "task_timeout"):
         return "任务超时。可以加大 limits.task_timeout_seconds 后，用同一 --state 和 --config 重启服务再试。不要删除状态。"
     return f"任务没有进入待批准：{code}"

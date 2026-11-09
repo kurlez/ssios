@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from ssios.runtime import (
     krunvm_create_command,
     krunvm_delete_command,
     krunvm_echo_command,
+    krunvm_prepare_command,
     krunvm_start_command,
     virtiofsd_share_command,
 )
@@ -39,6 +42,7 @@ class GuestOutcome:
     backend: str
     boot_ms: int | None
     detail: str
+    commands: list | None = None
 
 
 @dataclass
@@ -63,7 +67,13 @@ def execute_guest(plane, task: dict, token: str, cancel, deadline: float) -> dic
     outcome = runtime.run(session, cancel, deadline)
     _stamp(plane, task["id"], outcome.backend, outcome.isolated, outcome.boot_ms)
     if not outcome.isolated:
-        raise SsiosError("microvm_fail_closed", outcome.detail or "the guest did not run", 503)
+        failed = SsiosError("microvm_fail_closed", outcome.detail or "the guest did not run", 503)
+        failed.diagnostic = {
+            "classification": "microvm",
+            "detail": outcome.detail,
+            "commands": outcome.commands or [],
+        }
+        raise failed
     if not outcome.text:
         raise SsiosError("model_output_invalid", "guest returned no summary", 502)
     try:
@@ -92,46 +102,76 @@ def serve_model(plane, session: GuestSession, cancel, deadline: float) -> None:
 
 
 def run_krunvm(runtime, session: GuestSession, cancel, deadline: float) -> GuestOutcome:
+    del deadline
     binary = runtime.binary()
     if not binary:
         return GuestOutcome("", False, runtime.name, None, "krunvm is not installed")
     name = _vm_name(session.task_id)
     image = runtime.settings.guest_image
     started = time.monotonic()
-    thread = _proxy_thread(runtime, session, cancel, deadline)
-    create = krunvm_create_command(
-        binary,
-        name=name,
-        image=image,
-        input_dir=session.root / "input",
-        scratch_dir=session.root / "scratch",
-        cpus=runtime.settings.cpus,
-        memory_mb=runtime.settings.memory_mb,
-    )
+    prepare_timeout = float(getattr(runtime.settings, "guest_prepare_timeout_seconds", 600))
+    run_timeout = float(getattr(runtime.settings, "task_timeout_seconds", 30))
+    thread = _proxy_thread(runtime, session, cancel, time.monotonic() + prepare_timeout + run_timeout)
+    records: list[dict] = []
+    outcome = GuestOutcome("", False, runtime.name, None, "krunvm did not produce guest output", records)
     try:
-        created = _run(create, deadline)
+        created = _run(
+            krunvm_create_command(
+                binary,
+                name=name,
+                image=image,
+                input_dir=session.root / "input",
+                scratch_dir=session.root / "scratch",
+                cpus=runtime.settings.cpus,
+                memory_mb=runtime.settings.memory_mb,
+            ),
+            prepare_timeout,
+        )
+        records.append(_command_record(created))
         if created.returncode != 0:
-            return GuestOutcome("", False, runtime.name, _ms(started), "krunvm create failed")
-        started_guest = _run(krunvm_start_command(binary, name), deadline)
+            outcome = GuestOutcome("", False, runtime.name, _ms(started), _command_detail(created, "krunvm create failed"), records)
+            return outcome
+        started_guest = _run(krunvm_start_command(binary, name), run_timeout)
+        records.append(_command_record(started_guest))
         output = _read_json(session.root / "scratch" / "output.json")
         ran = started_guest.returncode == 0 and isinstance(output, dict) and isinstance(output.get("text"), str)
-        return GuestOutcome(
+        outcome = GuestOutcome(
             output.get("text", "") if ran and isinstance(output, dict) else "",
             ran,
             runtime.name,
             _ms(started),
-            "guest wrote output.json" if ran else "krunvm did not produce guest output",
+            "guest wrote output.json" if ran else _command_detail(started_guest, "krunvm did not produce guest output"),
+            records,
         )
+        return outcome
     finally:
         thread.join(timeout=1)
-        _run(krunvm_delete_command(binary, name), time.monotonic() + 30)
+        deleted = _run(krunvm_delete_command(binary, name), 30)
+        records.append(_command_record(deleted))
+        outcome.commands = records
 
 
 def doctor_krunvm(runtime) -> dict:
     binary = runtime.binary()
-    base = {"backend": runtime.name, "isolated": False, "booted": False, "boot_ms": None, "host_shell_fallback": False}
+    volume = str(getattr(runtime.settings, "macos_vm_volume", "/Volumes/krunvm"))
+    checks = {
+        "krunvm": _tool_version(binary, ["--version"]) if binary else {"ok": False, "detail": "krunvm is not installed"},
+        "buildah": _tool_version(shutil.which("buildah"), ["--version"]),
+        "volume": volume_report(volume),
+    }
+    checks["volume"]["blocking"] = False
+    base = {
+        "backend": runtime.name,
+        "isolated": False,
+        "booted": False,
+        "boot_ms": None,
+        "host_shell_fallback": False,
+        "checks": checks,
+        "detail": "volume check does not block krunvm when the tool already runs",
+    }
     if not binary:
-        return {**base, "detail": "krunvm is not installed"}
+        base["detail"] = "krunvm is not installed"
+        return base
     name = "ssiosdoc" + os.urandom(3).hex()
     image = runtime.settings.guest_image
     for folder in ("doctor-input", "doctor-scratch"):
@@ -147,13 +187,14 @@ def doctor_krunvm(runtime) -> dict:
             cpus=1,
             memory_mb=256,
         ),
-        time.monotonic() + 180,
+        float(getattr(runtime.settings, "guest_prepare_timeout_seconds", 600)),
     )
     try:
         if created.returncode != 0:
-            detail = created.stderr.decode("utf-8", "replace")[-240:]
-            return {**base, "detail": detail or "krunvm create failed"}
-        echoed = _run(krunvm_echo_command(binary, name), time.monotonic() + 60)
+            detail = _command_detail(created, "krunvm create failed")
+            base["commands"] = [_command_record(created)]
+            return {**base, "detail": detail}
+        echoed = _run(krunvm_echo_command(binary, name), 60)
         text = echoed.stdout.decode("utf-8", "replace")
         booted = echoed.returncode == 0 and "ok" in text.split()
         return {
@@ -164,7 +205,7 @@ def doctor_krunvm(runtime) -> dict:
             "detail": "guest printed ok" if booted else "guest did not print ok",
         }
     finally:
-        _run(krunvm_delete_command(binary, name), time.monotonic() + 30)
+        _run(krunvm_delete_command(binary, name), 30)
 
 
 def run_cloud_hypervisor(runtime, session: GuestSession, cancel, deadline: float) -> GuestOutcome:
@@ -197,7 +238,7 @@ def run_cloud_hypervisor(runtime, session: GuestSession, cancel, deadline: float
             filesystems=sockets,
             serial=session.root / "serial.log",
         )
-        completed = _run(command, deadline)
+        completed = _run(command, max(1.0, deadline - time.monotonic()))
         output = _read_json(session.root / "scratch" / "output.json")
         ran = completed.returncode == 0 and isinstance(output, dict) and isinstance(output.get("text"), str)
         return GuestOutcome(
@@ -236,7 +277,7 @@ def doctor_cloud_hypervisor(runtime) -> dict:
         filesystems=[],
         serial=serial,
     )
-    completed = _run(command, time.monotonic() + 30)
+    completed = _run(command, 30)
     text = serial.read_text(encoding="utf-8", errors="replace") if serial.is_file() else ""
     booted = completed.returncode == 0 and any(line.strip() == "ok" for line in text.splitlines())
     return {
@@ -370,12 +411,124 @@ def _vm_name(task_id: str) -> str:
     return "ssios" + "".join(char for char in hex_part if char in "0123456789abcdef")[:12]
 
 
-def _run(command: list[str], deadline: float) -> subprocess.CompletedProcess[bytes]:
-    timeout = max(1.0, deadline - time.monotonic())
+def prepare_guest_image(runtime) -> dict:
+    """Pull the configured OCI image. This is separate from the task timeout."""
+    binary = runtime.binary() if hasattr(runtime, "binary") else None
+    if runtime.name != "macos-vm":
+        return {"ok": False, "backend": runtime.name, "detail": "vm-prepare pulls the krunvm image. This backend does not use it."}
+    if not binary:
+        return {"ok": False, "backend": runtime.name, "detail": "krunvm is not installed"}
+    name = "ssios-prepare"
+    image = runtime.settings.guest_image
+    timeout = float(getattr(runtime.settings, "guest_prepare_timeout_seconds", 600))
+    created = _run(krunvm_prepare_command(binary, name, image), timeout)
+    removed = _run(krunvm_delete_command(binary, name), 30)
+    commands = [_command_record(created), _command_record(removed)]
+    ok = created.returncode == 0 or b"already exists" in (created.stdout or b"") + (created.stderr or b"")
+    return {
+        "ok": ok,
+        "backend": runtime.name,
+        "image": image,
+        "boot_ms": None,
+        "detail": "image is cached" if ok else _command_detail(created, "krunvm create failed"),
+        "commands": commands,
+    }
+
+
+def volume_report(path: str) -> dict:
+    """Read-only check. Never creates or attaches a disk."""
+    if not path.startswith("/"):
+        return {"ok": False, "mounted": False, "case_sensitive": False, "blocking": False, "detail": "macos_vm_volume must be absolute"}
+    if not Path(path).is_dir():
+        return {
+            "ok": False,
+            "mounted": False,
+            "case_sensitive": False,
+            "blocking": False,
+            "path": path,
+            "detail": f"{path} is not mounted. Attach the case-sensitive sparse image yourself. ssios does not run hdiutil.",
+        }
+    if sys.platform != "darwin" or shutil.which("diskutil") is None:
+        return {
+            "ok": None,
+            "mounted": True,
+            "case_sensitive": None,
+            "blocking": False,
+            "path": path,
+            "detail": "diskutil info is only used on macOS",
+        }
+    completed = subprocess.run(["diskutil", "info", path], check=False, capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+    text = ((completed.stdout or b"") + b"\n" + (completed.stderr or b"")).decode("utf-8", "replace")
+    parsed = interpret_diskutil(text, completed.returncode)
+    parsed["path"] = path
+    parsed["blocking"] = False
+    return parsed
+
+
+def interpret_diskutil(text: str, returncode: int) -> dict:
+    if returncode != 0:
+        return {"ok": False, "mounted": False, "case_sensitive": False, "detail": "diskutil info failed"}
+    mounted = any(line.strip().startswith("Mounted:") and "Yes" in line for line in text.splitlines())
+    case_sensitive = "case-sensitive" in text.casefold()
+    if not mounted:
+        detail = "diskutil info does not show the volume as mounted"
+    elif not case_sensitive:
+        detail = "diskutil info does not show Case-sensitive APFS"
+    else:
+        detail = "mounted and case-sensitive"
+    return {"ok": mounted and case_sensitive, "mounted": mounted, "case_sensitive": case_sensitive, "detail": detail}
+
+
+def _run(command: list[str], timeout: float) -> subprocess.CompletedProcess[bytes]:
     try:
-        return subprocess.run(command, check=False, capture_output=True, timeout=timeout, shell=False)
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(command, 124, b"", b"timeout")
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            timeout=max(1.0, timeout),
+            stdin=subprocess.DEVNULL,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr or b""
+        return subprocess.CompletedProcess(command, 124, exc.stdout or b"", stderr + b"\ntimeout")
+
+
+def _command_record(completed: subprocess.CompletedProcess[bytes]) -> dict:
+    return {
+        "argv": [str(part) for part in completed.args],
+        "exit_code": completed.returncode,
+        "stdout_tail": _tail(completed.stdout),
+        "stderr_tail": _tail(completed.stderr),
+    }
+
+
+def _command_detail(completed: subprocess.CompletedProcess[bytes], message: str) -> str:
+    tail = _tail(completed.stderr) or _tail(completed.stdout)
+    text = message if not tail else f"{message}: {tail}"
+    return text[:500]
+
+
+def _tail(raw: bytes | None) -> str:
+    if not raw:
+        return ""
+    return raw.decode("utf-8", "replace")[-400:]
+
+
+def _tool_version(binary: str | None, args: list[str]) -> dict:
+    if not binary:
+        return {"ok": False, "detail": "not installed"}
+    completed = _run([binary, *args], 10)
+    text = _tail(completed.stdout) or _tail(completed.stderr)
+    return {"ok": completed.returncode == 0, "path": binary, "version": text.strip(), "detail": text.strip() or "no version output"}
+
+
+def redact_text(text: str, secrets: list[str]) -> str:
+    cleaned = text
+    for secret in secrets:
+        if secret and len(secret) >= 8:
+            cleaned = cleaned.replace(secret, "[redacted]")
+    return re.sub(r"(?i)(bearer\s+|token[\"']?\s*[:=]\s*)\S+", r"\1[redacted]", cleaned)
 
 
 def _ms(started: float) -> int:

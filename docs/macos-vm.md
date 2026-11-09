@@ -27,19 +27,26 @@ Homebrew tap 仓库也写过 `brew tap libkrun/krun` 和 `brew trust libkrun/kru
 docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
 ```
 
-macOS 的默认 APFS 不区分大小写。buildah 的 overlay 存储经常因此失败。需要的话，由你自己建一个区分大小写的卷，再把 containers 存储指过去。本仓库的脚本不会执行 `hdiutil`，也不会改磁盘分区：
+krunvm 0.2.7 没有用来指定存储卷的环境变量。首次运行时如果自己的配置里 `storage_volume` 还是空的，它会在终端里询问挂载点，提示的默认值是 `/Volumes/krunvm`，然后把答案写进 `~/Library/Application Support/rs.krunvm/krunvm.toml`（confy 0.4）。之后的 `krunvm create` 让 buildah 使用该卷下面的 `root` 和 `runroot`。SSIOS 的 `[runtime] macos_vm_volume` 默认也是 `/Volumes/krunvm`，只给 `vm-doctor` 做只读检查。卷没挂上时，检查结果会写明，但不会拦住已经能跑的 krunvm。
+
+外接磁盘可以用一个区分大小写的稀疏镜像。下面的路径是例子，脚本不会执行这些命令，也不会调用会改磁盘的 `hdiutil` 或 `diskutil`：
 
 ```bash
-hdiutil create -size 20g -fs "Case-sensitive APFS" -type SPARSE -volname ssios-containers "$HOME/ssios-containers.dmg"
-hdiutil attach "$HOME/ssios-containers.dmg"
-mkdir -p /Volumes/ssios-containers/storage /Volumes/ssios-containers/run "$HOME/.config/containers"
-cat > "$HOME/.config/containers/storage.conf" <<'EOF'
-[storage]
-driver = "overlay"
-graphroot = "/Volumes/ssios-containers/storage"
-runroot = "/Volumes/ssios-containers/run"
-EOF
+hdiutil create -size 60g -type SPARSE -fs "Case-sensitive APFS" -volname krunvm /path/to/external/krunvm.sparseimage
+hdiutil attach /path/to/external/krunvm.sparseimage
+diskutil info /Volumes/krunvm
 ```
+
+`volname` 用 `krunvm` 时，挂载点就是 `/Volumes/krunvm`。若 krunvm 还没记住这个路径，在终端里执行一次 `krunvm list`，在它询问时输入该挂载点。
+
+第一次拉取 `python:3.12-alpine` 可能超过任务超时。先准备镜像，再跑冒烟。`vm-prepare` 用和任务相同的镜像字符串执行 `krunvm create`，超时是 `guest_prepare_timeout_seconds`（默认 600），然后删掉名叫 `ssios-prepare` 的虚拟机。镜像留在 buildah 缓存里。任务自己的 create/start 参数不变。
+
+```bash
+PYTHONPATH=src python3 -m ssios vm-prepare --state /tmp/ssios-vm-prepare --config /tmp/ssios-macos.toml
+bash scripts/macos-vm-smoke.sh
+```
+
+失败时冒烟会把 `error_detail`、诊断文件和 `up.log` 打出来，并保留临时状态目录。只有设置 `SSIOS_SMOKE_CLEAN=1` 才删除它。
 
 ## 配置
 

@@ -56,6 +56,7 @@ TASK_FIELDS = (
     "runtime_backend",
     "isolated",
     "boot_ms",
+    "error_detail",
 )
 
 
@@ -403,6 +404,7 @@ class ControlPlane:
                 "runtime_backend": self.settings.runtime_backend,
                 "isolated": False,
                 "boot_ms": None,
+                "error_detail": None,
             }
             self.tasks[task_id] = task
             grant = Grant(
@@ -720,7 +722,10 @@ class ControlPlane:
             self._persist_tasks()
             token = self._tokens[task_id]
             cancel_event = self._cancels[task_id]
-        deadline = time.monotonic() + self.settings.task_timeout_seconds
+        limit = self.settings.task_timeout_seconds
+        if self.settings.runtime_backend != "dev-guard":
+            limit += self.settings.guest_prepare_timeout_seconds
+        deadline = time.monotonic() + limit
         self._arm(cancel_event, deadline)
         try:
             if self.settings.runtime_backend == "dev-guard":
@@ -828,7 +833,14 @@ class ControlPlane:
 
     def _save_diagnostic(self, task_id: str, exc: SsiosError) -> None:
         payload = getattr(exc, "diagnostic", None)
-        if exc.code not in ("model_output_invalid", "model_output_low_quality") or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
+            self._set_error_detail(task_id, exc.detail)
+            return
+        if exc.code == "microvm_fail_closed":
+            self._save_microvm_diagnostic(task_id, exc, payload)
+            return
+        if exc.code not in ("model_output_invalid", "model_output_low_quality"):
+            self._set_error_detail(task_id, exc.detail)
             return
         if not re.fullmatch(r"task-[0-9a-f]{16}", task_id):
             return
@@ -848,6 +860,57 @@ class ControlPlane:
                 return
             task["diagnostic_path"] = str(path)
             task["diagnostic_class"] = body["classification"]
+            self._persist_tasks()
+
+    def _save_microvm_diagnostic(self, task_id: str, exc: SsiosError, payload: dict) -> None:
+        if not re.fullmatch(r"task-[0-9a-f]{16}", task_id):
+            return
+        from ssios.vmguest import redact_text
+
+        secrets = []
+        for name in ("human", "worker"):
+            try:
+                secret = self.auth.read_secret(name)
+            except (SsiosError, OSError):
+                secret = ""
+            if secret:
+                secrets.append(secret)
+        commands = []
+        for item in payload.get("commands") or []:
+            if not isinstance(item, dict):
+                continue
+            commands.append(
+                {
+                    "argv": [redact_text(str(part), secrets) for part in item.get("argv") or []],
+                    "exit_code": item.get("exit_code"),
+                    "stdout_tail": redact_text(str(item.get("stdout_tail") or ""), secrets),
+                    "stderr_tail": redact_text(str(item.get("stderr_tail") or ""), secrets),
+                }
+            )
+        detail = redact_text(str(payload.get("detail") or exc.detail), secrets)[:500]
+        directory = self.settings.state_dir / "diagnostics"
+        secure_mkdir(directory)
+        path = directory / f"{task_id}.json"
+        write_json(
+            path,
+            {"task_id": task_id, "classification": "microvm", "detail": detail, "commands": commands},
+            0o600,
+        )
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                return
+            task["diagnostic_path"] = str(path)
+            task["diagnostic_class"] = "microvm"
+            task["error_detail"] = detail
+            self._persist_tasks()
+
+    def _set_error_detail(self, task_id: str, detail: str) -> None:
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                return
+            task["error_detail"] = str(detail)[:500]
             self._persist_tasks()
 
     def _close_task(self, task_id: str, status: str, code: str) -> None:

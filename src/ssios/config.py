@@ -34,6 +34,8 @@ class Settings:
     echo_initramfs_path: str
     guest_image: str
     krunvm_bin: str
+    macos_vm_volume: str
+    guest_prepare_timeout_seconds: float
     task_timeout_seconds: float
     max_tool_calls: int
     max_output_bytes: int
@@ -112,6 +114,12 @@ def load_settings(
     max_note_chars = int(llm.get("max_note_chars", 6000))
     if not 500 <= max_note_chars <= 20000:
         raise SsiosError("config_invalid", "max_note_chars must be from 500 to 20000", 500)
+    macos_vm_volume = str(runtime.get("macos_vm_volume", "/Volumes/krunvm"))
+    if not macos_vm_volume.startswith("/") or ".." in Path(macos_vm_volume).parts:
+        raise SsiosError("config_invalid", "macos_vm_volume must be an absolute path", 500)
+    guest_prepare_timeout_seconds = float(runtime.get("guest_prepare_timeout_seconds", 600))
+    if guest_prepare_timeout_seconds < 30:
+        raise SsiosError("config_invalid", "guest_prepare_timeout_seconds must be at least 30", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -145,6 +153,8 @@ def load_settings(
             )
         ),
         krunvm_bin=str(runtime.get("krunvm_bin", "krunvm")),
+        macos_vm_volume=macos_vm_volume,
+        guest_prepare_timeout_seconds=guest_prepare_timeout_seconds,
         task_timeout_seconds=float(limits.get("task_timeout_seconds", 30)),
         max_tool_calls=int(limits.get("max_tool_calls", 8)),
         max_output_bytes=int(limits.get("max_output_bytes", 65536)),

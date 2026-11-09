@@ -37,7 +37,7 @@ mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表�
 - 真实 Ollama 进程和真实 7B/8B 模型。适配器会发 `POST /api/chat`。写这份状态时，这台 Linux 机器的 `127.0.0.1:11434` 没有服务，所以没有声称跑过 `deepseek-r1:7b`
 - 默认测试不下载客户机内核。样例配置的 `kernel_path` 为空时，`cloud-hypervisor` 任务仍然失败关闭，不会改在宿主机上跑
 - 这台机器上把 `/dev/kvm` 打开给当前用户之后，用 Cloud Hypervisor v54.0 和 cloud-hypervisor 发布的 Linux 7.2.8 内核（`ch-release-v7.2.8-20261009` 的 `bzImage-x86_64`）启动了 initramfs。`echo ok` 的墙钟是 898 毫秒。带 virtio-fs 输入和 scratch、没有 `--net` 的摘要 worker 用了 1576 毫秒，任务进入 `awaiting_approval`，`isolated` 为 true。模型调用是宿主机上的 mock。krunvm 没有安装，所以没有启动 macOS 那条路径
-- macOS 的 Hypervisor.framework 客户机要在 Mac 上用 `krunvm` 跑 `ssios vm-doctor` 和 `scripts/macos-vm-smoke.sh`。这里没有启动过它
+- Apple M4、macOS、krunvm 0.2.7：镜像还没缓存时，`scripts/macos-vm-smoke.sh` 大约 31 秒后失败，`isolated` 为 false，`error_code` 是 `microvm_fail_closed`。用户先执行 `krunvm create python:3.12-alpine` 之后，同一条冒烟在 `2166525` 通过，结果是 `awaiting_approval`，`runtime_backend` 为 `macos-vm`，`isolated` 为 true，`boot_ms` 为 3513。没有个人数据。这台 Linux 机器没有 krunvm，没有复现那次启动
 - Letta Code 0.34.45 的本地后端。探测函数可选，默认不执行
 
 ## 计划中

@@ -272,6 +272,8 @@ def _task(plane, session: dict, task_id: str) -> str:
         f"<p>隔离：{isolated}</p>"
         f"<p>启动并运行：{html.escape(boot_line)}</p>"
     )
+    if task.get("error_detail"):
+        summary += f"<p>错误：{html.escape(str(task.get('error_detail')))}</p>"
     return _page(session, task_id, summary + f"<pre>{html.escape(json.dumps(task, ensure_ascii=False, indent=2))}</pre>")
 
 

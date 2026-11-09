@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -99,6 +99,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"http://127.0.0.1:{settings.port}/ui/login?code={code}")
         print("这个代码大约两分钟内有效，且只保存在本机状态目录的哈希里。")
         return 0
+    if args.command == "vm-prepare":
+        from ssios.runtime import build_runtime
+        from ssios.vmguest import prepare_guest_image
+
+        runtime = build_runtime(settings)
+        if not hasattr(runtime, "binary"):
+            print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. dev-guard does not use it."}, ensure_ascii=False, indent=2))
+            return 1
+        report = prepare_guest_image(runtime)
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        return 0 if report.get("ok") else 1
     if args.command == "vm-doctor":
         from ssios.runtime import build_runtime
 

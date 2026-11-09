@@ -11,8 +11,15 @@ from dataclasses import replace
 
 from support import ROOT, PlaneTest, wait_task
 
-from ssios.runtime import cloud_hypervisor_guest_command, krunvm_create_command, krunvm_echo_command
-from ssios.vmguest import GuestOutcome, GuestSession, run_worker_subprocess, serve_model
+from ssios.config import load_settings
+from ssios.runtime import (
+    cloud_hypervisor_guest_command,
+    krunvm_create_command,
+    krunvm_echo_command,
+    krunvm_prepare_command,
+    krunvm_start_command,
+)
+from ssios.vmguest import GuestOutcome, GuestSession, interpret_diskutil, redact_text, run_worker_subprocess, serve_model, volume_report
 
 
 class ProtocolTest(unittest.TestCase):
@@ -77,7 +84,17 @@ class CommandTest(unittest.TestCase):
         self.assertNotIn("--net", created)
         self.assertNotIn("--readonly", created)
         echo = krunvm_echo_command("krunvm", "ssiosabc")
-        self.assertEqual(echo[-1], "ok")
+        self.assertEqual(echo[-2:], ["--", "ok"])
+        start = krunvm_start_command("krunvm", "ssiosabc")
+        self.assertEqual(start, ["krunvm", "start", "ssiosabc", "/usr/local/bin/python3", "--", "/scratch/worker.py"])
+        prepared = krunvm_prepare_command(
+            "krunvm",
+            "ssios-prepare",
+            "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7",
+        )
+        self.assertEqual(prepared[:3], ["krunvm", "create", prepared[2]])
+        self.assertNotIn("-v", prepared)
+        self.assertNotIn("--cpus", prepared)
         guest = cloud_hypervisor_guest_command(
             binary="cloud-hypervisor",
             kernel="/tmp/bzImage",
@@ -164,3 +181,61 @@ class ScriptedPlaneTest(PlaneTest):
         self.assertEqual(task["error_code"], "microvm_fail_closed")
         self.assertFalse(task["isolated"])
         self.assertEqual(task["approval_ids"], [])
+
+    def test_microvm_failure_records_redacted_commands(self) -> None:
+        self.plane.settings = replace(self.plane.settings, runtime_backend="macos-vm")
+
+        class Leaky(ScriptedGuest):
+            def run(self, session, cancel, deadline):
+                outcome = super().run(session, cancel, deadline)
+                outcome.isolated = False
+                outcome.detail = "krunvm create failed"
+                outcome.commands = [
+                    {
+                        "argv": ["krunvm", "create", "python:3.12-alpine", "--name", "ssiosabc"],
+                        "exit_code": 1,
+                        "stdout_tail": "",
+                        "stderr_tail": self.plane.auth.read_secret("human"),
+                    }
+                ]
+                return outcome
+
+        self.plane.guest_runtime = Leaky(self.plane, isolated=False)
+        code, created, _headers = self.call(
+            "POST",
+            "/v1/tasks",
+            token=self.human,
+            body={"project_id": "demo-alpha", "kind": "project-summary", "input_revision": "exp-1", "input_path": "notes.md"},
+        )
+        self.assertEqual(code, 202, created)
+        task = wait_task(self.base, self.human, created["id"], {"failed"})
+        self.assertEqual(task["error_code"], "microvm_fail_closed")
+        self.assertNotIn(self.human, str(task.get("error_detail") or ""))
+        diagnostic = Path(task["diagnostic_path"]).read_text(encoding="utf-8")
+        self.assertNotIn(self.human, diagnostic)
+        self.assertIn("[redacted]", diagnostic)
+        self.assertIn("krunvm", diagnostic)
+
+
+class VolumeAndRedactionTest(unittest.TestCase):
+    def test_diskutil_and_unmounted_volume_do_not_ask_ssios_to_attach(self) -> None:
+        mounted = interpret_diskutil("File System Personality: Case-sensitive APFS\nMounted: Yes\n", 0)
+        self.assertTrue(mounted["ok"])
+        plain = interpret_diskutil("File System Personality: APFS\nMounted: Yes\n", 0)
+        self.assertFalse(plain["case_sensitive"])
+        self.assertFalse(plain["ok"])
+        missing = volume_report("/tmp/ssios-not-a-volume")
+        self.assertFalse(missing["mounted"])
+        self.assertFalse(missing["blocking"])
+        self.assertIn("hdiutil", missing["detail"])
+        self.assertNotIn("diskutil apfs addVolume", missing["detail"])
+
+    def test_prepare_timeout_is_longer_than_the_task_timeout(self) -> None:
+        loaded = load_settings(ROOT / "config" / "ssios.example.toml", state_dir=Path("/tmp/ssios-settings"), port=0)
+        self.assertEqual(loaded.macos_vm_volume, "/Volumes/krunvm")
+        self.assertEqual(loaded.guest_prepare_timeout_seconds, 600)
+        self.assertEqual(loaded.task_timeout_seconds, 30)
+
+    def test_failed_guest_detail_redacts_the_human_token(self) -> None:
+        token = "human-token-must-stay-out"
+        self.assertNotIn(token, redact_text(f"stderr {token} bearer abc.def", [token]))

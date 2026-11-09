@@ -78,6 +78,49 @@ def krunvm_delete_command(binary: str, name: str) -> list[str]:
     return [binary, "delete", name]
 
 
+def krunvm_changevm_command(
+    binary: str,
+    name: str,
+    *,
+    input_dir: Path,
+    scratch_dir: Path,
+    cpus: int,
+    memory_mb: int,
+) -> list[str]:
+    """Replace the cached VM's mounts. Do not pass --remove-volumes: 0.2.7 ignores -v when that flag is set."""
+    for value in (name, str(input_dir), str(scratch_dir)):
+        _reject_option_text(value)
+    for value in (str(input_dir), str(scratch_dir)):
+        if ":" in value:
+            raise SsiosError("runtime_invalid", "krunvm path rejected", 400)
+    return [
+        binary,
+        "changevm",
+        name,
+        "--cpus",
+        str(cpus),
+        "--mem",
+        str(memory_mb),
+        "-v",
+        f"{input_dir}:/input",
+        "-v",
+        f"{scratch_dir}:/scratch",
+        "-w",
+        "/scratch",
+    ]
+
+
+def krunvm_list_command(binary: str) -> list[str]:
+    return [binary, "list"]
+
+
+def krunvm_prepare_command(binary: str, name: str, image: str) -> list[str]:
+    """Warm the buildah cache. Same image string the task will create, no extra mounts."""
+    _reject_option_text(name)
+    _reject_option_text(image)
+    return [binary, "create", image, "--name", name]
+
+
 def virtiofsd_share_command(binary: str, socket_path: Path, share: Path) -> list[str]:
     """This virtiofsd build has no read-only flag. The caller passes a fresh copy."""
     _reject_option_text(str(socket_path))

@@ -12,12 +12,17 @@ if ! command -v krunvm >/dev/null 2>&1; then
 fi
 krunvm --version
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vm-smoke.XXXXXX")
+echo "临时状态目录：$STATE" >&2
 cleanup() {
   if [ -n "${PID:-}" ]; then
     kill "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
   fi
-  rm -rf "$STATE"
+  if [ "${SSIOS_SMOKE_CLEAN:-}" = "1" ]; then
+    rm -rf "$STATE"
+  else
+    echo "临时状态保留在 $STATE" >&2
+  fi
 }
 trap cleanup EXIT
 cp config/ssios.example.toml "$STATE/smoke.toml"
@@ -62,7 +67,7 @@ request = urllib.request.Request(url + "/v1/tasks", data=body, headers={"Authori
 with urllib.request.urlopen(request, timeout=30) as response:
     created = json.load(response)
 task_id = created["id"]
-deadline = time.time() + 180
+deadline = time.time() + 900
 while time.time() < deadline:
     req = urllib.request.Request(url + "/v1/tasks/" + task_id, headers={"Authorization": "Bearer " + token})
     with urllib.request.urlopen(req, timeout=10) as response:
@@ -72,13 +77,25 @@ while time.time() < deadline:
     time.sleep(0.5)
 else:
     raise SystemExit("task did not finish")
-print(json.dumps({
+public = {
     "status": task["status"],
     "runtime_backend": task.get("runtime_backend"),
     "isolated": task.get("isolated"),
     "boot_ms": task.get("boot_ms"),
     "error_code": task.get("error_code"),
-}, ensure_ascii=False))
+    "error_detail": task.get("error_detail"),
+    "diagnostic_path": task.get("diagnostic_path"),
+}
+print(json.dumps(public, ensure_ascii=False))
 if not task.get("isolated"):
+    if task.get("error_detail"):
+        sys.stderr.write(str(task["error_detail"]) + "\n")
+    diagnostic = task.get("diagnostic_path")
+    if diagnostic and pathlib.Path(diagnostic).is_file():
+        sys.stderr.write(pathlib.Path(diagnostic).read_text(encoding="utf-8", errors="replace"))
+        sys.stderr.write("\n")
+    log_path = state / "up.log"
+    if log_path.is_file():
+        sys.stderr.write(log_path.read_text(encoding="utf-8", errors="replace"))
     raise SystemExit("guest did not run")
 PY
