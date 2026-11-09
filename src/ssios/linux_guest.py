@@ -43,17 +43,27 @@ def build_codex_initramfs(destination: Path) -> None:
         shutil.rmtree(root)
     _busybox_root(root)
     _copy_python(root)
+    bwrap = Path("/usr/bin/bwrap")
+    if bwrap.is_file():
+        _copy_elf(bwrap, root)
     _write_init(
         root,
         "#!/bin/busybox sh\n"
         "/bin/busybox mount -t proc proc /proc\n"
         "/bin/busybox mount -t sysfs sysfs /sys\n"
         "/bin/busybox mount -t devtmpfs devtmpfs /dev\n"
-        "/bin/busybox mkdir -p /input /scratch /workspace /tools\n"
+        "/bin/busybox mkdir -p /input /scratch /workspace /tools /opt\n"
         "/bin/busybox mount -t virtiofs input /input\n"
         "/bin/busybox mount -t virtiofs scratch /scratch\n"
         "/bin/busybox mount -t virtiofs workspace /workspace\n"
         "/bin/busybox mount -t virtiofs tools /tools\n"
+        "/bin/busybox ln -sf busybox /bin/sh\n"
+        "/bin/busybox cat > /bin/bash <<'EOF'\n"
+        "#!/bin/busybox sh\n"
+        "exec /bin/busybox sh \"$@\"\n"
+        "EOF\n"
+        "/bin/busybox chmod 755 /bin/bash\n"
+        "/bin/busybox mkdir -p /tmp /opt /etc\n"
         "/bin/busybox ip link set lo up\n"
         "/bin/busybox ip addr add 127.0.0.1/8 dev lo\n"
         "export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu\n"

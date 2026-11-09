@@ -407,7 +407,7 @@ hdiutil attach /path/to/external/krunvm.sparseimage
 
 统一内存要同时放 macOS、krunvm 客户机和模型。下面只按公开的体量做选择，没有在这台机器上用 Codex 跑过。
 
-- 原型优先 `qwen2.5-coder:7b` 的量化版。权重大约数 GB，给客户机留出内存后仍比较宽裕。工具调用是否稳，未核实。
+- 原型优先 `qwen2.5-coder:7b` 的量化版。权重大约数 GB，给客户机留出内存后仍比较宽裕。在 Linux 上配合 Ollama 0.40.15，它能发出 `exec_command`，但有时会跳过工具，所以代理把第一轮设成 `tool_choice = required`。`deepseek-r1:7b` 在同样的接口上没有发出工具调用。
 - `qwen3` 的 8B 一带可以作为对照。思考模型会吃输出预算，宿主机代理要保留现在的长度上限。
 - `gpt-oss:20b` 更接近 Codex 文档里的 `--oss` 例子，但 20B 的 Q4 权重大约十多 GB，再加上上下文，24GB 机器上会和系统、客户机抢内存。只能作为可选配置，不能当默认。
 - 14B 以上的 coder 变体同样可能把机器顶满。默认不选。
@@ -430,13 +430,28 @@ M1 的验收用 7B 档。若工具调用不合格，结论是「这个模型不�
 
 ### M1：代理接到本机 Ollama
 
+2026-11-09 在 Linux 上用 Ollama **0.40.15**（`ollama-linux-amd64.tar.zst` 的 SHA256 是 `628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379`）对过 `/v1/responses`。它能发出 Codex 0.167.0 要的那五个 SSE 事件，并且在模型真的调用工具时再发出 `function_call`、`response.function_call_arguments.delta` 和 `response.function_call_arguments.done`。请求是无状态的，没有 `previous_response_id`。Codex 每次都带上完整输入，所以这一条缺口不挡 M1。
+
+仍然要在宿主机代理里做一层很小的整理，而不是把字节原样转发：
+
+- 小模型经常把 `exec_command` 打成正文里的 JSON，而不是 `function_call` 项。`qwen2.5-coder:7b` 会这样。代理只在没有真正的 `function_call` 时，才把正文里的 `cmd` 字符串收成一次 `exec_command`。
+- 可选字段若是 `null`，或带着 `justification` 但没有 `require_escalated`，Codex 会拒绝解析。代理删掉这些字段。
+- 第一轮把 `tool_choice` 改成 `required`。否则 7B 有时直接抄最终那句话，一次工具都不调用。
+- `deepseek-r1:7b` 在 `max_output_tokens` 为 200 时只发出 `response.reasoning_summary_text.*`，没有正文，也没有 `function_call`。工具调用不合格。
+- `qwen2.5-coder:1.5b` 的 `/api/chat` 工具结果是 `null`，打出来的 JSON 把 `cmd` 写成对象而不是字符串。不能当稳定的工具模型。
+- `qwen2.5:0.5b` 在简单 schema 下会发出真正的 `function_call`。面对 Codex 的完整 schema 时不稳定，有一次在客户机里给出空的最终消息。
+- `qwen3:0.6b` 和 `deepseek-r1:1.5b` 把预算花在思考上，没有工具调用。
+
+`workspace-write` 默认允许写 `/tmp`。客户机配置把 `exclude_slash_tmp` 和 `exclude_tmpdir_env_var` 设为 true，并关掉 `network_access`。实测写 `/opt/ssios-outside` 得到只读文件系统，连 `1.1.1.1:443` 得到 `Operation not permitted`。工作区里的 `marker.txt` 能写上。Codex 的 bubblewrap 还要求客户机里有能执行的 `/bin/bash`（不能是没有 bash applet 的 busybox 符号链接），以及事先放好 `.git`、`.agents`、`.codex`、`.aws` 这几个空目录，并把工作区目录设成沙箱用户可写。
+
 验收：
 
-- 宿主机 Ollama 收到的模型名是配置里的那个，地址仍是宿主机环回。
+- 宿主机 Ollama 收到的模型名是配置里的那个，地址仍是宿主机环回。代理不转发客户机的 `Authorization`。
 - 客户机看不到 `11434`，也看不到宿主机的其他地址。
+- 日志只有字节数、SHA256、模型名和决定，不写提示词正文。
 - 输出上限生效：超限的运行失败且没有批准。
 - Ollama 停止时任务失败，错误里没有云端供应商。
-- 若该 Ollama 不支持 Responses，本级标成阻塞，而不是改回未文档化的 chat。
+- 客户机里至少一次 `exec_command` 写到工作区副本。工作区外的写入和对外网络失败，并留在会话日志里。最终消息和质量门、人类批准仍是现有的那条路径。
 
 ### M2a：Drive 只读
 

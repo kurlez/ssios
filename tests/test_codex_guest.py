@@ -14,10 +14,14 @@ from ssios.codex_guest import (
     RequestBudget,
     ResponsesProxy,
     asset_for_machine,
+    clean_tool_arguments,
     codex_config_text,
+    codex_items_from_ollama,
+    exec_commands_from_text,
     guest_entry_source,
     prepare_codex_binary,
     prepared_binary,
+    render_codex_sse,
     sse_response,
     verify_sha256,
     workspace_diff,
@@ -61,7 +65,8 @@ class PinAndConfigTest(unittest.TestCase):
     def test_settings_default_to_the_summary_worker(self) -> None:
         loaded = load_settings(Path("config/ssios.example.toml"), state_dir=Path("/tmp/ssios-codex-settings"), port=0)
         self.assertEqual(loaded.runtime_agent, "summary")
-        self.assertEqual(loaded.codex_model, "mock-summary")
+        self.assertEqual(loaded.codex_model, "qwen2.5-coder:7b")
+        self.assertIn("qwen2.5-coder:1.5b", loaded.codex_allow_models)
         with self.assertRaises(SsiosError):
             load_settings_text('agent = "remote"\n', loaded.state_dir)
 
@@ -147,6 +152,97 @@ def _post(path: Path, payload: dict) -> bytes:
         data += chunk
     client.close()
     return data
+
+
+class TranslateTest(unittest.TestCase):
+    def test_null_fields_are_removed_and_json_text_becomes_a_command(self) -> None:
+        cleaned = clean_tool_arguments('{"cmd":"printf IN > marker.txt","tty":null,"justification":"please","sandbox_permissions":"use_default"}')
+        self.assertEqual(json.loads(cleaned), {"cmd": "printf IN > marker.txt"})
+        text = '```json\n{"name":"exec_command","arguments":{"cmd":"printf IN > marker.txt"}}\n```'
+        self.assertEqual(exec_commands_from_text(text), ["printf IN > marker.txt"])
+        raw = (
+            'event: response.output_item.done\n'
+            'data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"{\\"name\\": \\"exec_command\\", \\"arguments\\": {\\"cmd\\": \\"printf IN > marker.txt\\"}}"}]}}\n\n'
+            'event: response.completed\n'
+            'data: {"type":"response.completed","response":{"usage":{"output_tokens":12}}}\n\n'
+        ).encode()
+        items, tokens = codex_items_from_ollama(raw)
+        self.assertEqual(tokens, 12)
+        self.assertEqual(items[0]["name"], "exec_command")
+        rendered = render_codex_sse(items)
+        self.assertIn(b"response.function_call_arguments.done", rendered)
+        self.assertNotIn(b"tty", rendered)
+
+    def test_proxy_strips_auth_and_does_not_log_the_prompt(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen["auth"] = self.headers.get("Authorization")
+                n = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(n)
+                body = (
+                    'event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"The workspace copy kept the marker. Outside write and network were refused."}\n\n'
+                    'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"The workspace copy kept the marker. Outside write and network were refused."}]}}\n\n'
+                    'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"output_tokens":16}}}\n\n'
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = __import__("threading").Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        root = Path("/tmp/ssios-codex-forward")
+        if root.exists():
+            import shutil
+
+            shutil.rmtree(root)
+        root.mkdir()
+        port = server.server_address[1]
+        proxy = ResponsesProxy(
+            root / "vsock.sock",
+            "",
+            "qwen2.5-coder:7b",
+            RequestBudget(2, 4000),
+            root / "proxy.log",
+            upstream=f"http://127.0.0.1:{port}/v1/responses",
+            max_output_tokens=64,
+        )
+        proxy.start()
+        try:
+            payload = {"model": "qwen2.5-coder:7b", "stream": True, "input": "SECRET-PROMPT-BODY"}
+            body = json.dumps(payload).encode()
+            request = (
+                f"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ya29.secret-token\r\n"
+                f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+            ).encode() + body
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(str(proxy.listen_path))
+            client.sendall(request)
+            data = b""
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            client.close()
+            self.assertIsNone(seen["auth"])
+            self.assertIn(b"Outside write and network were refused", data)
+            log = (root / "proxy.log").read_text(encoding="utf-8")
+            self.assertNotIn("SECRET-PROMPT-BODY", log)
+            self.assertIn('"sha256"', log)
+            self.assertNotIn("ya29.", log)
+        finally:
+            proxy.close()
+            server.shutdown()
 
 
 class CommandTest(unittest.TestCase):

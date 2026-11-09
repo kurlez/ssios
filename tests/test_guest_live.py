@@ -131,3 +131,57 @@ class LiveCloudHypervisorTest(unittest.TestCase):
         except Exception:
             print("LIVE codex state kept at", tmp)
             raise
+
+    @unittest.skipUnless(os.environ.get("SSIOS_OLLAMA_LIVE") == "1", "real ollama not requested")
+    def test_codex_uses_ollama_and_the_sandbox_blocks_escape(self) -> None:
+        from ssios.codex_guest import prepare_codex_binary
+        import shutil
+
+        tmp = "/tmp/ssios-codex-ollama"
+        if Path(tmp).exists():
+            shutil.rmtree(tmp)
+        Path(tmp).mkdir()
+        prepare = prepare_codex_binary(Path(tmp), timeout=180)
+        self.assertTrue(prepare["ok"], prepare)
+        loaded = load_settings(Path("config/ssios.example.toml"), state_dir=Path(tmp), port=0)
+        settings = replace(
+            loaded,
+            llm_provider="ollama",
+            ollama_base_url=os.environ.get("SSIOS_OLLAMA_URL", "http://127.0.0.1:11434"),
+            runtime_backend="cloud-hypervisor",
+            runtime_agent="codex",
+            codex_model=os.environ.get("SSIOS_CODEX_MODEL", "qwen2.5-coder:7b"),
+            cloud_hypervisor_bin=str(HYPERVISOR),
+            virtiofsd_bin=str(VIRTIOFSD),
+            kernel_path=str(KERNEL),
+            memory_mb=2048,
+            task_timeout_seconds=240,
+            max_output_tokens=2048,
+            codex_max_requests=8,
+        )
+        plane = ControlPlane(settings)
+        plane.open()
+        human = plane.auth.read_secret("human")
+        created = plane.create_task(
+            human,
+            {"project_id": "demo-alpha", "kind": "project-summary", "input_revision": "exp-1", "input_path": "notes.md"},
+        )
+        plane._threads[created["id"]].join(timeout=300)
+        task = plane.tasks[created["id"]]
+        self.assertEqual(task["status"], "awaiting_approval", task)
+        self.assertTrue(task["isolated"], task)
+        self.assertEqual(task["tool_trace"], ["guest.codex", "host.ollama-responses"])
+        guest = Path(tmp) / "storage" / "tasks" / created["id"] / "guest"
+        self.assertNotIn("--net", (guest / "hypervisor.argv").read_text(encoding="utf-8"))
+        net = json.loads((guest / "scratch" / "netcheck.json").read_text(encoding="utf-8"))
+        self.assertEqual(net["interfaces"], ["lo"])
+        self.assertFalse(net["outbound"])
+        boundary = json.loads((guest / "scratch" / "boundary.json").read_text(encoding="utf-8"))
+        self.assertTrue(boundary["marker"], boundary)
+        self.assertFalse(boundary["outside"], boundary)
+        self.assertTrue(boundary["denied"], boundary)
+        log = (guest / "proxy.log").read_text(encoding="utf-8")
+        self.assertIn('"sha256"', log)
+        self.assertNotIn("SSIOS-IN", log)
+        self.assertNotIn(human, log)
+        print(f"LIVE ollama_codex_ms={task['boot_ms']} boundary={boundary}")

@@ -46,7 +46,8 @@ guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e3
 
 [agent.codex]
 # 提供方名字在客户机配置里固定为 ssios，不是 ollama。这里只是模型名。
-model = "mock-summary"
+model = "qwen2.5-coder:7b"
+allow_models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
 max_requests = 4
 max_request_bytes = 200000
 

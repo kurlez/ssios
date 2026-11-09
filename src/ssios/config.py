@@ -38,6 +38,7 @@ class Settings:
     guest_prepare_timeout_seconds: float
     runtime_agent: str
     codex_model: str
+    codex_allow_models: tuple[str, ...]
     codex_max_requests: int
     codex_max_request_bytes: int
     task_timeout_seconds: float
@@ -132,8 +133,18 @@ def load_settings(
         codex = {}
     if not isinstance(codex, dict):
         raise SsiosError("config_invalid", "agent.codex must be a table", 500)
-    codex_model = str(codex.get("model", "mock-summary"))
+    codex_model = str(codex.get("model", "qwen2.5-coder:7b"))
     if codex_model == "ollama" or any(char in codex_model for char in "\n\r\"/"):
+        raise SsiosError("config_invalid", "codex model name is rejected", 500)
+    raw_allow = codex.get("allow_models", [codex_model])
+    if isinstance(raw_allow, str):
+        raw_allow = [raw_allow]
+    if not isinstance(raw_allow, list) or not raw_allow:
+        raise SsiosError("config_invalid", "codex allow_models must be a list", 500)
+    codex_allow_models = tuple(str(item) for item in raw_allow)
+    if codex_model not in codex_allow_models:
+        raise SsiosError("config_invalid", "codex model must be in allow_models", 500)
+    if any(item == "ollama" or any(char in item for char in "\n\r\"/") for item in codex_allow_models):
         raise SsiosError("config_invalid", "codex model name is rejected", 500)
     codex_max_requests = int(codex.get("max_requests", 4))
     if not 1 <= codex_max_requests <= 8:
@@ -178,6 +189,7 @@ def load_settings(
         guest_prepare_timeout_seconds=guest_prepare_timeout_seconds,
         runtime_agent=runtime_agent,
         codex_model=codex_model,
+        codex_allow_models=codex_allow_models,
         codex_max_requests=codex_max_requests,
         codex_max_request_bytes=codex_max_request_bytes,
         task_timeout_seconds=float(limits.get("task_timeout_seconds", 30)),

@@ -27,6 +27,7 @@ import socket
 import tarfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -35,6 +36,13 @@ from ssios.errors import SsiosError
 PIN_PATH = Path(__file__).resolve().parents[2] / "third_party" / "codex.pin.json"
 VSOCK_PORT = 19090
 MIN_MEMORY_MB = 1536
+OLLAMA_TASK_PROMPT = (
+    "Use exec_command three times. Put only a cmd string in each call.\n"
+    "1. printf 'SSIOS-IN\\n' > marker.txt\n"
+    "2. printf 'SSIOS-OUT\\n' > /opt/ssios-outside\n"
+    "3. python3 -c 'import socket; socket.create_connection((\"1.1.1.1\",443),2)'\n"
+    "Then reply with exactly this sentence: The workspace copy kept the marker. Outside write and network were refused.\n"
+)
 _MACHINE = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 
 
@@ -149,6 +157,11 @@ def codex_config_text(port: int, model: str) -> str:
         f'base_url = "http://127.0.0.1:{port}/v1"\n'
         'wire_api = "responses"\n'
         "requires_openai_auth = false\n"
+        "\n"
+        "[sandbox_workspace_write]\n"
+        "network_access = false\n"
+        "exclude_slash_tmp = true\n"
+        "exclude_tmpdir_env_var = true\n"
     )
 
 
@@ -213,6 +226,153 @@ def sse_response(text: str) -> bytes:
     return header.encode("ascii") + body
 
 
+def clean_tool_arguments(raw: str) -> str:
+    """Drop nulls and approval fields Codex rejects on a normal sandboxed command."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(parsed, dict):
+        return raw
+    cleaned = {}
+    for key, value in parsed.items():
+        if value is None:
+            continue
+        if key == "justification" and parsed.get("sandbox_permissions") != "require_escalated":
+            continue
+        if key == "sandbox_permissions" and value in ("use_default", ""):
+            continue
+        cleaned[key] = value
+    return json.dumps(cleaned, separators=(",", ":"))
+
+
+def exec_commands_from_text(text: str) -> list[str]:
+    """Some local models print a tool call as JSON instead of a function_call item."""
+    found: list[str] = []
+    start = 0
+    while start < len(text) and len(found) < 3:
+        brace = text.find("{", start)
+        if brace < 0:
+            break
+        try:
+            parsed, used = json.JSONDecoder().raw_decode(text[brace:])
+        except json.JSONDecodeError:
+            start = brace + 1
+            continue
+        start = brace + max(used, 1)
+        if not isinstance(parsed, dict):
+            continue
+        arguments = parsed.get("arguments") if parsed.get("name") == "exec_command" else parsed
+        if isinstance(arguments, dict) and isinstance(arguments.get("cmd"), str) and arguments["cmd"].strip():
+            found.append(arguments["cmd"].strip())
+    return found
+
+
+def parse_sse_events(raw: bytes) -> list[dict]:
+    events = []
+    for block in raw.decode("utf-8", "replace").split("\n\n"):
+        name = None
+        data = None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                name = line[6:].strip()
+            elif line.startswith("data:"):
+                data = line[5:].strip()
+        if not name or not data:
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payload["type"] = payload.get("type") or name
+            events.append(payload)
+    return events
+
+
+def codex_items_from_ollama(raw: bytes) -> tuple[list[dict], int]:
+    calls: list[dict] = []
+    texts: list[str] = []
+    tokens = 0
+    for event in parse_sse_events(raw):
+        kind = str(event.get("type") or "")
+        if kind == "response.completed":
+            usage = (event.get("response") or {}).get("usage") or {}
+            if isinstance(usage, dict) and isinstance(usage.get("output_tokens"), int):
+                tokens += usage["output_tokens"]
+        if kind != "response.output_item.done":
+            continue
+        item = event.get("item") or {}
+        if item.get("type") == "function_call" and item.get("name") == "exec_command":
+            calls.append({"name": "exec_command", "arguments": clean_tool_arguments(str(item.get("arguments") or ""))})
+        elif item.get("type") == "message":
+            parts = item.get("content") or []
+            if isinstance(parts, list):
+                texts.append("".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)))
+    if not calls:
+        for text in texts:
+            for cmd in exec_commands_from_text(text):
+                calls.append({"name": "exec_command", "arguments": json.dumps({"cmd": cmd}, separators=(",", ":"))})
+    if calls:
+        return calls[:3], tokens
+    text = texts[-1] if texts else ""
+    return [{"name": "", "arguments": "", "text": text}], tokens
+
+
+def render_codex_sse(items: list[dict]) -> bytes:
+    if items and items[0].get("text") is not None and not items[0].get("name"):
+        return sse_response(str(items[0].get("text") or "")).split(b"\r\n\r\n", 1)[1]
+    events: list[dict] = [
+        {"type": "response.created", "response": {"id": "resp_ollama", "object": "response", "status": "in_progress", "output": []}}
+    ]
+    output = []
+    for index, item in enumerate(items):
+        call_id = f"call_{index}"
+        rendered = {
+            "id": f"fc_{index}",
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": item["arguments"],
+            "status": "completed",
+        }
+        output.append(rendered)
+        events.append({"type": "response.output_item.added", "output_index": index, "item": {**rendered, "status": "in_progress", "arguments": ""}})
+        events.append({"type": "response.function_call_arguments.delta", "item_id": rendered["id"], "output_index": index, "delta": item["arguments"]})
+        events.append({"type": "response.function_call_arguments.done", "item_id": rendered["id"], "output_index": index, "arguments": item["arguments"]})
+        events.append({"type": "response.output_item.done", "output_index": index, "item": rendered})
+    events.append({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ollama",
+            "object": "response",
+            "status": "completed",
+            "output": output,
+            "usage": {"input_tokens": 1, "output_tokens": 8, "total_tokens": 9},
+        },
+    })
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events).encode("utf-8")
+
+
+def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> bytes:
+    host = urllib.request.urlparse(url).hostname
+    if host not in ("127.0.0.1", "localhost"):
+        raise SsiosError("network_denied", "ollama must stay on loopback", 403)
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise SsiosError("llm_unavailable", "local model rejected the request", 502) from exc
+    except urllib.error.URLError as exc:
+        raise SsiosError("llm_unavailable", "local model is not reachable", 502) from exc
+
+
 def error_response(status: int, reason: str) -> bytes:
     body = json.dumps({"error": reason}).encode("utf-8")
     header = (
@@ -227,11 +387,25 @@ def error_response(status: int, reason: str) -> bytes:
 class ResponsesProxy:
     """Host side of the vsock. Cloud Hypervisor connects to ``socket``_``port``."""
 
-    def __init__(self, socket_path: Path, text: str, model: str, budget: RequestBudget, log_path: Path) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        text: str,
+        model: str,
+        budget: RequestBudget,
+        log_path: Path,
+        upstream: str | None = None,
+        allow_models: tuple[str, ...] | None = None,
+        max_output_tokens: int = 1024,
+    ) -> None:
         self.socket_path = socket_path
         self.listen_path = Path(str(socket_path) + f"_{VSOCK_PORT}")
         self.text = text
         self.model = model
+        self.allow_models = allow_models or (model,)
+        self.upstream = upstream
+        self.max_output_tokens = max_output_tokens
+        self.output_tokens = 0
         self.budget = budget
         self.log_path = log_path
         self.stop = threading.Event()
@@ -276,7 +450,7 @@ class ResponsesProxy:
         from ssios.vmguest import redact_text
 
         try:
-            request_line, _headers, body = _read_http(conn, self.budget.max_bytes)
+            request_line, headers, body = _read_http(conn, self.budget.max_bytes)
         except ValueError as exc:
             self.rejected = True
             self._log(redact_text(str(exc), []), "rejected")
@@ -294,25 +468,70 @@ class ResponsesProxy:
             self._log(model, decision)
             conn.sendall(error_response(429, decision))
             return
-        if not isinstance(payload, dict) or model != self.model or payload.get("stream") is not True:
+        if not isinstance(payload, dict) or model not in self.allow_models or payload.get("stream") is not True:
             self.rejected = True
-            self._log(model, "model_rejected")
+            self._log(model, "model_rejected", len(body), hashlib.sha256(body).hexdigest())
             conn.sendall(error_response(400, "model_rejected"))
             return
-        if "POST" not in request_line or not request_line.split(" ", 1)[0] == "POST":
+        if request_line.split(" ", 1)[0] != "POST":
             self.rejected = True
-            self._log(model, "method_rejected")
+            self._log(model, "method_rejected", len(body), hashlib.sha256(body).hexdigest())
             conn.sendall(error_response(405, "method_rejected"))
             return
+        # Guest Authorization is never forwarded. headers is read so a test can see it was dropped.
+        del headers
+        if self.upstream:
+            self._forward(conn, payload, body, model)
+            return
         self.served += 1
-        self._log(model, "ok")
+        self._log(model, "ok", len(body), hashlib.sha256(body).hexdigest())
         conn.sendall(sse_response(self.text))
 
-    def _log(self, model: str, decision: str) -> None:
+    def _forward(self, conn: socket.socket, payload: dict, body: bytes, model: str) -> None:
+        digest = hashlib.sha256(body).hexdigest()
+        # The first turn of this prototype has to exercise the shell. Local models
+        # otherwise skip the tool and copy the final sentence.
+        if self.budget.requests == 1:
+            payload = dict(payload)
+            payload["tool_choice"] = "required"
+        try:
+            raw = fetch_ollama_responses(self.upstream or "", payload, 120)
+        except SsiosError:
+            self.rejected = True
+            self._log(model, "local_model_unavailable", len(body), digest)
+            conn.sendall(error_response(502, "local_model_unavailable"))
+            return
+        items, tokens = codex_items_from_ollama(raw)
+        self.output_tokens += tokens
+        if self.output_tokens > self.max_output_tokens:
+            self.rejected = True
+            self._log(model, "output_budget", len(body), digest, tokens)
+            conn.sendall(error_response(429, "output_budget"))
+            return
+        rendered = render_codex_sse(items)
+        self.served += 1
+        self._log(model, "ok", len(body), digest, tokens)
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            f"Content-Length: {len(rendered)}\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        conn.sendall(header.encode("ascii") + rendered)
+
+    def _log(self, model: str, decision: str, nbytes: int = 0, digest: str = "", output_tokens: int = 0) -> None:
         from ssios.vmguest import redact_text
 
         line = json.dumps(
-            {"requests": self.budget.requests, "model": model, "decision": decision},
+            {
+                "requests": self.budget.requests,
+                "model": model,
+                "decision": decision,
+                "bytes": nbytes,
+                "sha256": digest,
+                "output_tokens": output_tokens,
+            },
             ensure_ascii=False,
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -353,8 +572,8 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
             "codex M0 runs only in Cloud Hypervisor without a NIC; macos-vm cannot disable networking and is not claimed",
             503,
         )
-    if plane.llm.provider != "mock":
-        raise SsiosError("microvm_fail_closed", "codex M0 proxy is the in-process mock and does not call another model", 503)
+    if plane.llm.provider not in ("mock", "ollama"):
+        raise SsiosError("microvm_fail_closed", "codex proxy only accepts the in-process mock or local ollama", 503)
     if plane.settings.memory_mb < MIN_MEMORY_MB:
         raise SsiosError("microvm_fail_closed", "codex guest needs at least 1536 MB", 503)
     try:
@@ -367,27 +586,34 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
         _stamp(plane, task["id"], runtime.name, False, None)
         raise SsiosError("microvm_fail_closed", report["detail"], 503)
     grant, _plain = _grant(plane, task, token, deadline)
-    messages = [{"role": "system", "content": grant["system"]}, {"role": "user", "content": grant["user"]}]
-    response = plane.llm.complete(messages, kind=task["kind"], cancel_event=cancel, deadline=deadline)
-    if response.raw_approve_flag:
-        plane.audit.write(
-            ts=plane.now(),
-            actor_role="task",
-            actor_id=task["id"],
-            action="model_approve_flag_ignored",
-            result="ignored",
-            task_id=task["id"],
-            project_id=task["project_id"],
-        )
-    if response.kind != "final" or not response.text:
-        raise SsiosError("microvm_fail_closed", "mock proxy has no final text", 503)
+    upstream = None
+    answer = ""
+    if plane.llm.provider == "ollama":
+        grant = {"system": grant["system"], "user": OLLAMA_TASK_PROMPT}
+        upstream = plane.settings.ollama_base_url.rstrip("/") + "/v1/responses"
+    else:
+        messages = [{"role": "system", "content": grant["system"]}, {"role": "user", "content": grant["user"]}]
+        response = plane.llm.complete(messages, kind=task["kind"], cancel_event=cancel, deadline=deadline)
+        if response.raw_approve_flag:
+            plane.audit.write(
+                ts=plane.now(),
+                actor_role="task",
+                actor_id=task["id"],
+                action="model_approve_flag_ignored",
+                result="ignored",
+                task_id=task["id"],
+                project_id=task["project_id"],
+            )
+        if response.kind != "final" or not response.text:
+            raise SsiosError("microvm_fail_closed", "mock proxy has no final text", 503)
+        answer = response.text
     from ssios.linux_guest import build_codex_initramfs
 
     initramfs = plane.settings.state_dir / "storage" / "codex-initrd.img"
     if not initramfs.is_file():
         build_codex_initramfs(initramfs)
     session = _prepare_codex(plane, task, token, grant, binary)
-    outcome = _boot_codex(runtime, session, response.text, cancel, deadline, initramfs)
+    outcome = _boot_codex(runtime, session, answer, cancel, deadline, initramfs, upstream)
     _stamp(plane, task["id"], outcome.backend, outcome.isolated, outcome.boot_ms)
     if not outcome.isolated:
         failed = SsiosError("microvm_fail_closed", outcome.detail or "the codex guest did not run", 503)
@@ -401,7 +627,7 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
         exc.diagnostic = {"classification": "low_quality", "content": outcome.text, "thinking": ""}
         raise
     return {
-        "trace": ["guest.codex", "host.mock-responses"],
+        "trace": ["guest.codex", "host.ollama-responses" if upstream else "host.mock-responses"],
         "final_text": outcome.text,
         "runtime_backend": outcome.backend,
         "isolated": True,
@@ -420,7 +646,7 @@ def _hypervisor_ready(runtime) -> dict:
     return {"ok": not missing, "detail": "; ".join(missing) if missing else "codex guest can start"}
 
 
-def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs: Path):
+def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs: Path, upstream: str | None = None):
     from ssios.runtime import cloud_hypervisor_guest_command, virtiofsd_share_command
     from ssios.vmguest import GuestOutcome, _ms, _read_json, _run, _wait_sockets
 
@@ -432,6 +658,9 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
         runtime.settings.codex_model,
         budget,
         session.root / "proxy.log",
+        upstream=upstream,
+        allow_models=tuple(getattr(runtime.settings, "codex_allow_models", (runtime.settings.codex_model,))),
+        max_output_tokens=runtime.settings.max_output_tokens,
     )
     before = _snapshot(session.root / "workspace")
     sockets = []
@@ -687,7 +916,7 @@ def main():
     env = os.environ.copy()
     env["CODEX_HOME"] = "/scratch/codex-home"
     env["HOME"] = "/scratch"
-    env["PATH"] = "/tools:/bin"
+    env["PATH"] = "/usr/bin:/bin:/tools"
     with open("/input/prompt.txt", "rb") as stdin, open("/scratch/events.jsonl", "wb") as stdout, open("/scratch/codex.err", "wb") as stderr:
         completed = subprocess.run(
             [
@@ -719,6 +948,23 @@ def main():
         text = ""
     with open("/scratch/output.json", "w", encoding="utf-8") as handle:
         handle.write(json.dumps({"text": text, "exit_code": completed.returncode, "net_ok": net_ok}))
+    denied = False
+    for folder, _dirs, files in os.walk("/scratch/codex-home"):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            try:
+                blob = open(os.path.join(folder, name), encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            if "Operation not permitted" in blob or "Read-only file system" in blob or "Permission denied" in blob:
+                denied = True
+    with open("/scratch/boundary.json", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "marker": os.path.exists("/workspace/marker.txt"),
+            "outside": os.path.exists("/opt/ssios-outside"),
+            "denied": denied,
+        }))
 
 
 if __name__ == "__main__":

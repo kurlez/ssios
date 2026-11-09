@@ -558,6 +558,11 @@ def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> 
     (input_dir / "grant.json").write_text(json.dumps(grant, ensure_ascii=False), encoding="utf-8")
     (input_dir / "prompt.txt").write_text(grant["user"], encoding="utf-8")
     (workspace / "notes.md").write_text(grant["user"], encoding="utf-8")
+    # Codex's bubblewrap setup mounts these paths even for a throwaway workspace.
+    for name in (".git", ".agents", ".codex", ".aws"):
+        (workspace / name).mkdir()
+    # The Codex sandbox runs the command as a user that is not the directory owner.
+    workspace.chmod(0o777)
     from ssios.codex_guest import VSOCK_PORT, codex_config_text, guest_entry_source
 
     (home / "config.toml").write_text(codex_config_text(VSOCK_PORT, plane.settings.codex_model), encoding="utf-8")
