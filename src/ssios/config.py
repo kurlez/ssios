@@ -34,6 +34,7 @@ class Settings:
     echo_initramfs_path: str
     guest_image: str
     krunvm_bin: str
+    vfkit_bin: str
     macos_vm_volume: str
     guest_prepare_timeout_seconds: float
     runtime_agent: str
@@ -91,7 +92,7 @@ def load_settings(
     if provider not in ("mock", "ollama"):
         raise SsiosError("config_invalid", "llm provider must be mock or ollama", 500)
     backend = str(runtime.get("backend", "dev-guard"))
-    if backend not in ("dev-guard", "cloud-hypervisor", "macos-vm"):
+    if backend not in ("dev-guard", "cloud-hypervisor", "macos-vm", "macos-vz"):
         raise SsiosError("config_invalid", "runtime backend is not recognized", 500)
     if chosen_profile == "production":
         backend = "cloud-hypervisor"
@@ -185,6 +186,7 @@ def load_settings(
             )
         ),
         krunvm_bin=str(runtime.get("krunvm_bin", "krunvm")),
+        vfkit_bin=str(runtime.get("vfkit_bin", "vfkit")),
         macos_vm_volume=macos_vm_volume,
         guest_prepare_timeout_seconds=guest_prepare_timeout_seconds,
         runtime_agent=runtime_agent,

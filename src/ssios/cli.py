@@ -152,6 +152,14 @@ def run_vm_prepare(settings) -> int:
     runtime = build_runtime(settings)
     if settings.runtime_backend == "macos-vm":
         reports.append(prepare_guest_image(runtime))
+    elif settings.runtime_backend == "macos-vz":
+        from ssios.macos_vz import prepare_macos_vz
+
+        try:
+            reports.append(prepare_macos_vz(settings.state_dir, timeout=settings.guest_prepare_timeout_seconds))
+        except SsiosError as exc:
+            print(json.dumps({"ok": False, "detail": exc.detail}, ensure_ascii=False, indent=2))
+            return 1
     elif settings.runtime_agent != "codex":
         print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. This backend does not use it."}, ensure_ascii=False, indent=2))
         return 1

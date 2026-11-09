@@ -216,6 +216,7 @@ class ControlPlane:
                 "dev_guard": self.dev.describe(),
                 "cloud_hypervisor": self.cloud.preflight(),
                 "macos_vm": MacOSVMRuntime(self.settings).preflight() if self.settings.runtime_backend == "macos-vm" else {"backend": "macos-vm", "active": False},
+                "macos_vz": build_runtime(self.settings).preflight() if self.settings.runtime_backend == "macos-vz" else {"backend": "macos-vz", "active": False},
             },
             "approvals": "separate-human-token",
             "identity": self.service_identity(),

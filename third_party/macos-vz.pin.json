@@ -1,0 +1,36 @@
+{
+  "vfkit": {
+    "version": "0.6.4",
+    "license": "Apache-2.0",
+    "usage": "https://github.com/crc-org/vfkit/blob/v0.6.4/doc/usage.md",
+    "brew": "brew install vfkit",
+    "note": "Reviewed 2026-11-09. Devices are explicit. Omitting virtio-net leaves the guest without a NIC. vsock listen mode exposes the guest port as a host Unix socket."
+  },
+  "kernel": {
+    "name": "Image-arm64",
+    "version": "ch-release-v7.2.8-20261009",
+    "url": "https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v7.2.8-20261009/Image-arm64",
+    "sha256": "8f8f3d5a983809f87a4e1e9a13053a3361fda47ef04e09c771a41c5e037cb6c2",
+    "note": "Uncompressed arm64 Image, the sibling of the x86_64 kernel already used with Cloud Hypervisor. virtio-fs and vsock on this build are not booted from Linux CI."
+  },
+  "alpine_minirootfs": {
+    "name": "alpine-minirootfs-3.22.1-aarch64.tar.gz",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.1-aarch64.tar.gz",
+    "sha256": "188416d41f9f0c9a6e9427b75149e43ccf3a89587b2d27c9ad506e7ffca78d1c"
+  },
+  "python": {
+    "name": "cpython-3.12.16+20261026-aarch64-unknown-linux-musl-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-unknown-linux-musl-install_only_stripped.tar.gz",
+    "sha256": "e113f8b1f02cb886ed40ee5ea6665cd407f4e7b6e2097f61c0b3cdf8c1776c65"
+  },
+  "bubblewrap": {
+    "name": "bubblewrap-0.12.0-r0.apk",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/bubblewrap-0.12.0-r0.apk",
+    "sha256": "b462e8a98f67ffb3fdc714d3c8ee0663cced8bf45c92b574a945effa854cdbbb"
+  },
+  "libcap2": {
+    "name": "libcap2-2.78-r0.apk",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libcap2-2.78-r0.apk",
+    "sha256": "de209aee8b76946849bff6bd97151c6af20889be5a96a2e28f9899255e252e3f"
+  }
+}

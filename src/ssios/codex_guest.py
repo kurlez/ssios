@@ -397,9 +397,10 @@ class ResponsesProxy:
         upstream: str | None = None,
         allow_models: tuple[str, ...] | None = None,
         max_output_tokens: int = 1024,
+        listen_path: Path | None = None,
     ) -> None:
         self.socket_path = socket_path
-        self.listen_path = Path(str(socket_path) + f"_{VSOCK_PORT}")
+        self.listen_path = listen_path or Path(str(socket_path) + f"_{VSOCK_PORT}")
         self.text = text
         self.model = model
         self.allow_models = allow_models or (model,)
@@ -565,11 +566,11 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
     from ssios.vmguest import _grant, _prepare_codex, _runtime, _stamp
 
     runtime = _runtime(plane)
-    if runtime.name != "cloud-hypervisor":
+    if runtime.name not in ("cloud-hypervisor", "macos-vz"):
         _stamp(plane, task["id"], runtime.name, False, None)
         raise SsiosError(
             "microvm_fail_closed",
-            "codex M0 runs only in Cloud Hypervisor without a NIC; macos-vm cannot disable networking and is not claimed",
+            "codex runs in Cloud Hypervisor or macos-vz, both without a NIC; macos-vm cannot disable networking and is not claimed",
             503,
         )
     if plane.llm.provider not in ("mock", "ollama"):
@@ -581,7 +582,7 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
     except SsiosError as exc:
         _stamp(plane, task["id"], runtime.name, False, None)
         raise SsiosError("microvm_fail_closed", exc.detail, 503) from exc
-    report = _hypervisor_ready(runtime)
+    report = runtime.requirements() if runtime.name == "macos-vz" else _hypervisor_ready(runtime)
     if not report["ok"]:
         _stamp(plane, task["id"], runtime.name, False, None)
         raise SsiosError("microvm_fail_closed", report["detail"], 503)
@@ -607,13 +608,27 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
         if response.kind != "final" or not response.text:
             raise SsiosError("microvm_fail_closed", "mock proxy has no final text", 503)
         answer = response.text
-    from ssios.linux_guest import build_codex_initramfs
-
-    initramfs = plane.settings.state_dir / "storage" / "codex-initrd.img"
-    if not initramfs.is_file():
-        build_codex_initramfs(initramfs)
     session = _prepare_codex(plane, task, token, grant, binary)
-    outcome = _boot_codex(runtime, session, answer, cancel, deadline, initramfs, upstream)
+    if runtime.name == "macos-vz":
+        from ssios.macos_vz import boot_vfkit, prepared_initramfs, prepared_kernel
+
+        outcome = boot_vfkit(
+            runtime,
+            session,
+            answer,
+            cancel,
+            deadline,
+            prepared_kernel(plane.settings.state_dir),
+            prepared_initramfs(plane.settings.state_dir),
+            upstream,
+        )
+    else:
+        from ssios.linux_guest import build_codex_initramfs
+
+        initramfs = plane.settings.state_dir / "storage" / "codex-initrd.img"
+        if not initramfs.is_file():
+            build_codex_initramfs(initramfs)
+        outcome = _boot_codex(runtime, session, answer, cancel, deadline, initramfs, upstream)
     _stamp(plane, task["id"], outcome.backend, outcome.isolated, outcome.boot_ms)
     if not outcome.isolated:
         failed = SsiosError("microvm_fail_closed", outcome.detail or "the codex guest did not run", 503)

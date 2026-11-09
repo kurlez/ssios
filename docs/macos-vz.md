@@ -1,0 +1,28 @@
+# macOS 上没有网卡的 Codex 客户机
+
+`agent = "codex"` 在 Apple Silicon 上用 `macos-vz`，不走 krunvm。摘要 worker 仍用 `macos-vm`。这篇说明核对的是 2026-11-09 的上游文档。Linux 云环境不能启动 Virtualization.framework，所以这里没有 Mac 启动结果。
+
+## 为什么是 vfkit
+
+| 方案 | 没有网卡 | vsock | virtio-fs | 安装 | 不选的原因 |
+| --- | --- | --- | --- | --- | --- |
+| vfkit 0.6.4 | 不写 `--device virtio-net` 就没有网卡。设备是逐个声明的 | `--device virtio-vsock,port=…,socketURL=…,listen`，宿主机是 Unix 套接字 | `--device virtio-fs,sharedDir=…,mountTag=…` | `brew install vfkit`。Apache-2.0。签名过的发布物带 `com.apple.security.virtualization` | 选定 |
+| Apple `container` 0.6.0 的 `--network none` | 例子里 `ip addr` 只剩 `lo` | 文档没有把 vsock 暴露成我们能接的宿主机套接字 | 容器根文件系统，不是这次的 virtio-fs 副本 | `brew` 不一定是主路径 | 关网卡不等于能接现有的 vsock 代理 |
+| 自己写的 Swift 助手 | 可以不添加 `VZVirtioNetworkDeviceConfiguration` | 可以 | 可以 | 要自己签名和维持 entitlement | 多一份要维护的二进制 |
+| libkrun / krunvm 0.2.7 / krunkit | 没有 virtio-net 时，libkrun 仍会打开 TSI，套接字由宿主机代发 | 有，但是 TSI 的通道 | krunvm 的 `-v` | 已用于摘要 | 不能保证没有出网 |
+| Lima `vz`、Tart | 能配成无网卡，但默认镜像和网络栈都比较重 | 有 | 有 | `brew` | 启动和镜像都比 vfkit 厚，不适合这个只读边界 |
+
+vfkit 的用法说明：<https://github.com/crc-org/vfkit/blob/v0.6.4/doc/usage.md>。直接启动要用未压缩的 arm64 `Image`。内核钉在 cloud-hypervisor 的 `ch-release-v7.2.8-20261009` `Image-arm64`，和这台 Linux 上已经用过的 x86_64 内核是同一次发布。arm64 这份有没有 virtio-fs 和 vsock，要等 Mac 上的第一次启动。
+
+## 在 M4 上跑
+
+不要改 `.ssios`、`.ssios-demo` 或 `.ssios-memfs`。脚本用临时目录，失败时保留它。它不创建磁盘卷。
+
+```bash
+brew install vfkit
+ollama --version
+ollama pull qwen2.5-coder:7b
+bash scripts/macos-vz-codex-smoke.sh
+```
+
+把打印出来的 `status`、`isolated`、`boot_ms`、`nic`、`outbound`、`marker`、`outside_write` 和 `sandbox_denied` 发回来。`nic` 应该只有 `lo`，`outbound` 为 false，`outside_write` 为 false，`argv_has_virtio_net` 为 false。在收到这台 Mac 的输出之前，仓库不把这次路径记成已经成功。

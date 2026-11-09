@@ -9,7 +9,7 @@ SSIOS 控制面留在宿主机。人类令牌、工作者令牌、审批（动�
 两条运行路径不一样：
 
 - Linux 上的 Cloud Hypervisor 不传 `--net`。这是硬隔离目标。客户机没有常规网络，只能走设计里选定的 vsock。
-- macOS 上的 krunvm 0.2.7 没有关闭客户机网络的参数。它适合开发和对照，隔离弱于 Cloud Hypervisor。krunvm 的 TSI 仍可能让客户机里的进程自己去连网。设计不能把这条路径说成没有网络。
+- macOS 上的 krunvm 0.2.7 没有关闭客户机网络的参数。它只留给现在的摘要 worker。`agent = "codex"` 在 Apple Silicon 上改用 `macos-vz`（vfkit 0.6.4，不添加 `virtio-net`）。这条路径还没有在 Mac 上启动过，见 `docs/macos-vz.md`。
 
 已有的 `guest_worker.py` 继续负责「读授权、写一次模型请求、写出摘要」。Codex 是另一种客户机代理，由配置 `[runtime] agent = "codex"` 选中。`agent` 缺省时仍走现在的 worker，不改变已在 Apple M4 上通过的 krunvm 摘要路径。
 

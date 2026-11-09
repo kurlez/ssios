@@ -247,11 +247,75 @@ class MacOSVMRuntime:
         return doctor_krunvm(self)
 
 
+class MacOSVZRuntime:
+    """vfkit on Virtualization.framework. Used only for the Codex guest, with no NIC."""
+
+    name = "macos-vz"
+
+    def __init__(self, settings) -> None:
+        self.settings = settings
+        self.plane = None
+
+    def binary(self) -> str | None:
+        configured = getattr(self.settings, "vfkit_bin", "") or "vfkit"
+        return shutil.which(configured)
+
+    def requirements(self) -> dict:
+        from ssios.errors import SsiosError
+        from ssios.macos_vz import prepared_initramfs, prepared_kernel
+
+        if not self.binary():
+            return {"ok": False, "detail": "vfkit is not installed"}
+        try:
+            prepared_kernel(self.settings.state_dir)
+            prepared_initramfs(self.settings.state_dir)
+        except SsiosError as exc:
+            return {"ok": False, "detail": exc.detail}
+        return {"ok": True, "detail": "vfkit and the pinned aarch64 guest are present"}
+
+    def can_launch(self) -> bool:
+        return self.requirements()["ok"]
+
+    def preflight(self) -> dict:
+        return {
+            "ok": False,
+            "backend": self.name,
+            "microvm": True,
+            "isolated": False,
+            "host_shell_fallback": False,
+            "network": "deny",
+            "binary": self.binary(),
+            "detail": "preflight does not boot. Virtualization.framework is macOS only.",
+        }
+
+    def doctor(self) -> dict:
+        present = self.binary()
+        return {
+            "backend": self.name,
+            "booted": False,
+            "isolated": False,
+            "boot_ms": None,
+            "network": "deny",
+            "vfkit": present,
+            "detail": "vfkit is on PATH" if present else "vfkit is not installed. brew install vfkit. This check does not boot a guest.",
+        }
+
+    def run(self, session, cancel, deadline):
+        del session, cancel, deadline
+        raise SsiosError(
+            "microvm_fail_closed",
+            "macos-vz only runs the codex agent. The summary worker stays on macos-vm or cloud-hypervisor",
+            503,
+        )
+
+
 def build_runtime(settings):
     if settings.runtime_backend == "dev-guard":
         return DevGuardRuntime()
     if settings.runtime_backend == "macos-vm":
         return MacOSVMRuntime(settings)
+    if settings.runtime_backend == "macos-vz":
+        return MacOSVZRuntime(settings)
     if settings.runtime_backend == "cloud-hypervisor":
         return CloudHypervisorRuntime(settings)
     raise SsiosError("config_invalid", "runtime backend is not recognized", 500)
