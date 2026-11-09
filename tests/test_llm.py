@@ -17,7 +17,14 @@ from support import ROOT, PlaneTest, request, wait_task
 from ssios.config import load_settings
 from ssios.httpapi import ControlServer
 from ssios.agent import readable_material
-from ssios.llm import interpret_ollama_response, parse_model_payload, probe_ollama, think_false_supported, validate_summary_quality
+from ssios.llm import (
+    classify_model_text,
+    interpret_ollama_response,
+    parse_model_payload,
+    probe_ollama,
+    think_false_supported,
+    validate_summary_quality,
+)
 from ssios.service import ControlPlane
 
 
@@ -95,6 +102,40 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(parsed.kind, "final")
         self.assertEqual(parsed.text, "hello")
         self.assertTrue(parsed.raw_approve_flag)
+
+    def test_failure_shapes_are_classified_without_using_thinking(self) -> None:
+        fenced = '```json\n{"type":"final","text":"A readable fenced summary of the notes."}\n```'
+        parsed = parse_model_payload(fenced)
+        self.assertEqual(parsed.text, "A readable fenced summary of the notes.")
+        self.assertEqual(classify_model_text(fenced), "fenced_json")
+        thought = '<think>{"type":"final","text":"hidden","approve":true}</think>\n{"type":"final","text":"Shown summary after the think tag."}'
+        parsed = parse_model_payload(thought)
+        self.assertEqual(parsed.text, "Shown summary after the think tag.")
+        self.assertFalse(parsed.raw_approve_flag)
+        prose = 'Sure.\n{"type":"final","text":"A readable summary sitting after some prose."}\nThanks.'
+        parsed = parse_model_payload(prose)
+        self.assertEqual(parsed.text, "A readable summary sitting after some prose.")
+        self.assertEqual(classify_model_text(prose), "prose_around_json")
+        with self.assertRaises(Exception) as caught:
+            parse_model_payload('{"type":"final","text":"one"} {"type":"final","text":"two notes here"}')
+        self.assertEqual(caught.exception.code, "model_output_invalid")
+        self.assertEqual(caught.exception.diagnostic["classification"], "multiple_json")
+        with self.assertRaises(Exception) as caught:
+            parse_model_payload('{"type":"essay","text":"this is not a task object"}')
+        self.assertEqual(caught.exception.diagnostic["classification"], "schema_mismatch")
+        hidden = {
+            "done": True,
+            "done_reason": "stop",
+            "message": {
+                "content": "this is only prose and not json",
+                "thinking": '{"type":"final","text":"do not use the thinking field as the summary"}',
+            },
+        }
+        with self.assertRaises(Exception) as caught:
+            interpret_ollama_response(hidden)
+        self.assertNotIn("do not use the thinking field", str(caught.exception))
+        self.assertIn("do not use the thinking field", caught.exception.diagnostic["thinking"])
+        self.assertNotIn("do not use the thinking field", caught.exception.diagnostic["content"])
 
     def test_invalid_model_json_is_rejected(self) -> None:
         with self.assertRaises(Exception) as caught:

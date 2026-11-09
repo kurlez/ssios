@@ -45,20 +45,106 @@ class ModelResponse:
     raw_approve_flag: bool = False
 
 
+def classify_model_text(text: str) -> str:
+    """Privacy-safe label for a failed model answer. Does not decide the command."""
+    if not isinstance(text, str) or not text.strip():
+        return "empty"
+    lowered = text.casefold()
+    if "<think" in lowered:
+        return "think_tags"
+    if "```" in text:
+        return "fenced_json"
+    visible = _visible_answer(text)
+    objects = _top_level_objects(visible)
+    if len(objects) > 1:
+        return "multiple_json"
+    if len(objects) == 1 and visible.strip() != json.dumps(objects[0]):
+        try:
+            loaded = json.loads(visible)
+        except json.JSONDecodeError:
+            loaded = None
+        if not isinstance(loaded, dict):
+            try:
+                _validate_task_object(objects[0])
+            except SsiosError:
+                return "schema_mismatch"
+            return "prose_around_json"
+    if _looks_truncated(visible):
+        return "truncated"
+    if objects:
+        try:
+            _validate_task_object(objects[0])
+        except SsiosError:
+            return "schema_mismatch"
+        return "json"
+    return "not_json"
+
+
 def parse_model_payload(text: str) -> ModelResponse:
-    """Validate one task object. Think tags are removed and are not commands."""
-    visible = _strip_fence(_strip_think(text)).strip()
-    if not visible:
-        raise SsiosError("model_output_empty", "model returned no answer content", 502)
+    """Validate one task object. Think tags and surrounding prose are not commands."""
+    visible = _visible_answer(text)
+    if not visible.strip():
+        raise _invalid_output(text, "model_output_empty", "model returned no answer content")
     try:
-        obj = json.loads(visible)
-    except json.JSONDecodeError as exc:
-        if _looks_truncated(visible):
-            raise SsiosError("model_output_truncated", "model output was truncated", 502) from exc
-        raise SsiosError("model_output_invalid", "model output is not JSON", 502) from exc
-    if not isinstance(obj, dict):
-        raise SsiosError("model_output_invalid", "model output is not an object", 502)
-    return _validate_task_object(obj)
+        loaded = json.loads(visible)
+    except json.JSONDecodeError:
+        loaded = None
+    if isinstance(loaded, dict):
+        chosen = loaded
+    else:
+        objects = _top_level_objects(visible)
+        if len(objects) > 1:
+            raise _invalid_output(text, "model_output_invalid", "model output has more than one JSON object")
+        if len(objects) == 1:
+            chosen = objects[0]
+        elif _looks_truncated(visible):
+            raise _invalid_output(text, "model_output_truncated", "model output was truncated")
+        else:
+            raise _invalid_output(text, "model_output_invalid", "model output is not JSON")
+    try:
+        return _validate_task_object(chosen)
+    except SsiosError as exc:
+        exc.diagnostic = _diagnostic(text, "schema_mismatch")
+        raise
+
+
+def _invalid_output(text: str, code: str, detail: str) -> SsiosError:
+    exc = SsiosError(code, detail, 502)
+    exc.diagnostic = _diagnostic(text, classify_model_text(text))
+    return exc
+
+
+def _diagnostic(content: str, classification: str, thinking: str = "") -> dict:
+    return {
+        "classification": classification,
+        "content": content if isinstance(content, str) else "",
+        "thinking": thinking if isinstance(thinking, str) else "",
+    }
+
+
+def _visible_answer(text: str) -> str:
+    return _strip_fences(_strip_think(text)).strip()
+
+
+def _top_level_objects(text: str) -> list[dict]:
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+            index = max(end, start + 1)
+        else:
+            index = start + 1
+    return found
 
 
 def interpret_ollama_response(body: dict) -> ModelResponse:
@@ -67,10 +153,22 @@ def interpret_ollama_response(body: dict) -> ModelResponse:
         raise SsiosError("llm_response_unsupported", "ollama response is unsupported", 502)
     if body.get("done") is False or body.get("done_reason") == "length":
         raise SsiosError("model_output_truncated", "model output was truncated", 502)
-    content = body["message"].get("content", "")
+    message = body["message"]
+    content = message.get("content", "")
+    thinking = message.get("thinking", "")
+    thinking_text = thinking if isinstance(thinking, str) else ""
     if not isinstance(content, str) or not content.strip():
-        raise SsiosError("model_output_empty", "model returned no answer content", 502)
-    return parse_model_payload(content)
+        exc = SsiosError("model_output_empty", "model returned no answer content", 502)
+        exc.diagnostic = _diagnostic("" if not isinstance(content, str) else content, "empty", thinking_text)
+        raise exc
+    try:
+        return parse_model_payload(content)
+    except SsiosError as exc:
+        diagnostic = getattr(exc, "diagnostic", None)
+        if isinstance(diagnostic, dict):
+            diagnostic["thinking"] = thinking_text
+            exc.diagnostic = diagnostic
+        raise
 
 
 def _validate_task_object(obj: dict) -> ModelResponse:
@@ -177,23 +275,32 @@ def _strip_think(text: str) -> str:
     return stripped
 
 
+def _strip_fences(text: str) -> str:
+    return re.sub(r"```(?:json|JSON)?[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
+
+
 def _strip_fence(text: str) -> str:
-    cleaned = text.strip()
-    if not cleaned.startswith("```"):
-        return cleaned
-    lines = cleaned.splitlines()
-    lines = lines[1:]
-    if lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
+    return _strip_fences(text).strip()
 
 
-def _chat_payload(model: str, messages: list[dict], fmt: dict | str, *, num_predict: int, think: bool | None) -> dict:
+def _chat_payload(
+    model: str,
+    messages: list[dict],
+    fmt: dict | str | None,
+    *,
+    num_predict: int,
+    think: bool | None,
+    num_ctx: int = 8192,
+    schema_hint: bool = True,
+) -> dict:
     grounded = []
     schema_note = "JSON schema for the answer content: " + json.dumps(TASK_OUTPUT_SCHEMA, separators=(",", ":"))
     for message in _to_ollama(messages):
+        content = message["content"]
+        if schema_hint and not grounded and message.get("role") == "system":
+            content = content + "\n" + schema_note
         if not grounded and message.get("role") == "system":
-            grounded.append({**message, "content": message["content"] + "\n" + schema_note})
+            grounded.append({**message, "content": content})
         else:
             grounded.append(message)
     if not grounded:
@@ -202,9 +309,15 @@ def _chat_payload(model: str, messages: list[dict], fmt: dict | str, *, num_pred
         "model": model,
         "messages": grounded,
         "stream": False,
-        "format": fmt,
-        "options": {"temperature": 0, "num_predict": num_predict, "repeat_penalty": 1.15},
+        "options": {
+            "temperature": 0,
+            "num_predict": num_predict,
+            "num_ctx": num_ctx,
+            "repeat_penalty": 1.15,
+        },
     }
+    if fmt is not None:
+        payload["format"] = fmt
     if think is False:
         payload["think"] = False
     return payload
@@ -427,12 +540,24 @@ class OllamaLLM:
     deterministic = False
     uses_network = True
 
-    def __init__(self, base_url: str, model: str, timeout: float, max_output_tokens: int = 1024) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float,
+        max_output_tokens: int = 1024,
+        num_ctx: int = 8192,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
+        self.num_ctx = num_ctx
         self._think_false: bool | None = None
+
+    def wants_plain_summary(self, deadline: float) -> bool:
+        """Thinking models summarize in prose. JSON is retried only for other models."""
+        return self._supports_think_false(deadline)
 
     def complete(self, messages: list[dict], *, kind: str, cancel_event, deadline: float) -> ModelResponse:
         if kind != "project-summary":
@@ -459,7 +584,14 @@ class OllamaLLM:
 
     def _ask(self, messages: list[dict], think: bool | None, num_predict: int, deadline: float) -> dict:
         timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
-        payload = _chat_payload(self.model, messages, TASK_OUTPUT_SCHEMA, num_predict=num_predict, think=think)
+        payload = _chat_payload(
+            self.model,
+            messages,
+            TASK_OUTPUT_SCHEMA,
+            num_predict=num_predict,
+            think=think,
+            num_ctx=self.num_ctx,
+        )
         try:
             body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
         except SsiosError as exc:
@@ -468,6 +600,64 @@ class OllamaLLM:
             raise
         if think is False and payload.get("think") is not False:
             self._think_false = False
+        return body
+
+    def complete_prose(self, messages: list[dict], *, kind: str, cancel_event, deadline: float) -> str:
+        """Summary prose. A schema-valid final object is accepted; thinking text is not."""
+        if kind != "project-summary":
+            raise SsiosError("task_rejected", "this task kind requires the mock provider", 400)
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        think = False if self._supports_think_false(deadline) else None
+        body = self._ask_prose(messages, think, self.max_output_tokens, deadline)
+        if _needs_budget_retry(body):
+            body = self._ask_prose(messages, False if self._think_false else None, min(self.max_output_tokens * 2, 8192), deadline)
+        if body.get("done") is False or body.get("done_reason") == "length":
+            raise SsiosError("model_output_truncated", "model output was truncated", 502)
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        thinking = message.get("thinking") if isinstance(message.get("thinking"), str) else ""
+        visible = _visible_answer(content)
+        try:
+            parsed = parse_model_payload(content)
+        except SsiosError as exc:
+            if exc.code == "model_output_truncated":
+                raise
+            if visible.strip() and not visible.strip().startswith("{") and not visible.strip().startswith("["):
+                return visible.strip()
+            diagnostic = getattr(exc, "diagnostic", None)
+            if isinstance(diagnostic, dict):
+                diagnostic["thinking"] = thinking
+                exc.diagnostic = diagnostic
+            raise
+        if parsed.kind == "final":
+            return parsed.text
+        exc = SsiosError("model_output_invalid", "model output is not a summary", 502)
+        exc.diagnostic = _diagnostic(content, "schema_mismatch", thinking)
+        raise exc
+
+    def _ask_prose(self, messages: list[dict], think: bool | None, num_predict: int, deadline: float) -> dict:
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = _chat_payload(
+            self.model,
+            messages,
+            None,
+            num_predict=num_predict,
+            think=think,
+            num_ctx=self.num_ctx,
+            schema_hint=False,
+        )
+        try:
+            body = _post_json(self.base_url + "/api/chat", payload, timeout)
+        except SsiosError as exc:
+            if exc.code == "ollama_rejected" and payload.get("think") is False:
+                payload.pop("think", None)
+                self._think_false = False
+                body = _post_json(self.base_url + "/api/chat", payload, timeout)
+            elif exc.code == "llm_unavailable" and "timed out" in exc.detail and time.monotonic() >= deadline:
+                raise FlowInterrupt("timeout") from exc
+            else:
+                raise
         return body
 
 
@@ -492,5 +682,6 @@ def build_llm(settings):
             settings.ollama_model,
             settings.llm_timeout_seconds,
             settings.max_output_tokens,
+            settings.num_ctx,
         )
     raise SsiosError("config_invalid", "llm provider rejected", 500)

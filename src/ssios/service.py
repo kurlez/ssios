@@ -51,6 +51,8 @@ TASK_FIELDS = (
     "memory_revision",
     "output_sha256",
     "topic",
+    "diagnostic_path",
+    "diagnostic_class",
 )
 
 
@@ -223,6 +225,9 @@ class ControlPlane:
             "ollama_base_url": self.settings.ollama_base_url,
             "llm_timeout_seconds": self.settings.llm_timeout_seconds,
             "max_output_tokens": self.settings.max_output_tokens,
+            "num_ctx": self.settings.num_ctx,
+            "summary_repair_retries": self.settings.summary_repair_retries,
+            "max_note_chars": self.settings.max_note_chars,
             "task_timeout_seconds": self.settings.task_timeout_seconds,
             "letta_bin": self.settings.letta_bin,
             "bind": f"{self.settings.host}:{self.bound_port}",
@@ -375,6 +380,8 @@ class ControlPlane:
                 "memory_revision": None,
                 "output_sha256": None,
                 "topic": _optional_topic(body.get("topic")),
+                "diagnostic_path": None,
+                "diagnostic_class": None,
             }
             self.tasks[task_id] = task
             grant = Grant(
@@ -701,6 +708,7 @@ class ControlPlane:
             kind = "cancelled" if self.user_cancelled(task_id) else "timeout"
             self._close_task(task_id, kind, kind)
         except SsiosError as exc:
+            self._save_diagnostic(task_id, exc)
             self._close_task(task_id, "failed", exc.code)
         except Exception:
             traceback.print_exc()
@@ -788,6 +796,30 @@ class ControlPlane:
                 payload_sha256=staged["sha256"],
             )
             del token
+
+    def _save_diagnostic(self, task_id: str, exc: SsiosError) -> None:
+        payload = getattr(exc, "diagnostic", None)
+        if exc.code not in ("model_output_invalid", "model_output_low_quality") or not isinstance(payload, dict):
+            return
+        if not re.fullmatch(r"task-[0-9a-f]{16}", task_id):
+            return
+        directory = self.settings.state_dir / "diagnostics"
+        secure_mkdir(directory)
+        path = directory / f"{task_id}.json"
+        body = {
+            "task_id": task_id,
+            "classification": str(payload.get("classification") or "not_json"),
+            "content": str(payload.get("content") or ""),
+            "thinking": str(payload.get("thinking") or ""),
+        }
+        write_json(path, body, 0o600)
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                return
+            task["diagnostic_path"] = str(path)
+            task["diagnostic_class"] = body["classification"]
+            self._persist_tasks()
 
     def _close_task(self, task_id: str, status: str, code: str) -> None:
         with self.lock:

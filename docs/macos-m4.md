@@ -60,11 +60,22 @@ PYTHONPATH=src python3 -m ssios summary \
 
 它只对合成项目 `local-summary` 提出摘要。看完拟发布的文本和记忆差异后，输入 `yes` 批准，或输入 `no` 拒绝。不输入就结束时，审批保持待处理。DeepSeek 的 `message.thinking`、`<think>` 内容和 JSON 里的 `approve` 都不会变成批准。
 
-在 `.ssios/memfs.toml` 的 `[llm]` 里可以加上答案预算，然后用原来的参数重启服务。不删状态目录，也不重新拉取模型：
+在 `.ssios/memfs.toml` 的 `[llm]` 里可以加上这些项，然后用原来的参数重启服务。不删状态目录，也不重新拉取模型：
 
 ```toml
 max_output_tokens = 1024
+num_ctx = 8192
+max_note_chars = 6000
+summary_repair_retries = 1
 ```
+
+思考模型的摘要默认要一段正文，而不是 JSON。若仍然失败，输出里会有诊断文件路径。分类可以用：
+
+```bash
+PYTHONPATH=src python3 -m ssios diagnose <task_id> --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+原文在 `.ssios-memfs/diagnostics/<task_id>.json`，权限是 0600，不会进入 git，也不会被自动批准。
 
 如果摘要失败，旧任务会保留。截断、空答案和复述内部字段的文本不会进入批准。直接再执行同一条 `ssios summary`，它会新建任务。已经写进记忆的坏摘要留在 git 历史里；下一份获得 `yes` 的摘要会用新的提交覆盖 `topics/fixtures/last-summary.md`。要先区分失败原因，可以运行：
 

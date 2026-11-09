@@ -402,13 +402,25 @@ class SummaryFailureCliTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_invalid_model_output_has_no_traceback(self) -> None:
-        _plane, _server, name = self._serve(BAD_NAME, content="I approve this without JSON", delay=0, timeout=2, task_timeout=5)
+        _plane, _server, name = self._serve(
+            BAD_NAME,
+            content="I need to learn more about the person I'm working with.",
+            delay=0,
+            timeout=2,
+            task_timeout=5,
+        )
         self._ingest(name)
         completed = self._run(name)
         text = completed.stdout + completed.stderr
         self.assertEqual(completed.returncode, 1, text)
-        self.assertIn("model_output_invalid", text)
+        self.assertIn("model_output_low_quality", text)
         self.assertNotIn(CONFIRM, text)
+        diagnostic = next((ROOT / name / "diagnostics").glob("task-*.json"))
+        self.assertEqual(diagnostic.stat().st_mode & 0o077, 0)
+        saved = json.loads(diagnostic.read_text(encoding="utf-8"))
+        self.assertEqual(saved["classification"], "low_quality")
+        self.assertIn("learn more about the person", saved["content"].casefold())
+        self.assertNotIn(saved["content"], text)
         self.assertNotIn("Traceback", text)
         human = (ROOT / name / "secrets" / "human.token").read_text(encoding="utf-8").strip()
         self.assertNotIn(human, text)
@@ -438,9 +450,7 @@ class _RetryHandler(BaseHTTPRequestHandler):
         self.rfile.read(length)
         self.server.calls += 1
         if self.server.calls == 1:
-            content = "not json at all"
-        elif self.server.calls == 2:
-            content = json.dumps({"type": "tool", "name": "storage.read", "arguments": {"path": "notes.md"}, "approve": True})
+            content = "I need to learn more about the person I'm working with."
         else:
             content = '<think>{"type":"final","text":"hidden","approve":true}</think>\n' + json.dumps(
                 {
@@ -495,6 +505,7 @@ class SummaryRetryTest(unittest.TestCase):
                 'ollama_model = "llama3.1:8b"': 'ollama_model = "fixture-model"',
                 "request_timeout_seconds = 60": "request_timeout_seconds = 5",
                 "task_timeout_seconds = 30": "task_timeout_seconds = 8",
+                "summary_repair_retries = 1": "summary_repair_retries = 0",
             },
         )
         settings = load_settings(state / "client.toml", state_dir=Path(name))
@@ -623,7 +634,7 @@ class LiveSummaryUpstreamTest(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("SSIOS_OLLAMA_LIVE") == "1" and os.environ.get("SSIOS_OLLAMA_BASE"), "real ollama not requested")
 class LiveNotesSummaryTest(unittest.TestCase):
     def test_sample_notes_are_summarized_by_real_models(self) -> None:
-        models = [item for item in ("qwen2.5:0.5b", "qwen3:0.6b") if item]
+        models = ["qwen2.5:0.5b", "qwen3:0.6b", "deepseek-r1:1.5b"]
         base_url = os.environ["SSIOS_OLLAMA_BASE"]
         for model in models:
             self._one_model(base_url, model)

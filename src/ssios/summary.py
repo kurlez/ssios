@@ -43,6 +43,8 @@ def run_summary(settings, *, project_id: str = SUMMARY_PROJECT, topic: str = "")
                 "detail": _failure_detail(task),
                 "task_id": task.get("id"),
                 "retry": "new-task",
+                "diagnostic_path": task.get("diagnostic_path"),
+                "diagnostic_class": task.get("diagnostic_class"),
             }
         )
         return 1
@@ -132,6 +134,9 @@ def _require_identity(settings, base: str, token: str) -> None:
         "ollama_base_url": settings.ollama_base_url,
         "llm_timeout_seconds": settings.llm_timeout_seconds,
         "max_output_tokens": settings.max_output_tokens,
+        "num_ctx": settings.num_ctx,
+        "summary_repair_retries": settings.summary_repair_retries,
+        "max_note_chars": settings.max_note_chars,
         "task_timeout_seconds": settings.task_timeout_seconds,
         "letta_bin": settings.letta_bin,
         "bind": f"{settings.host}:{settings.port}",
@@ -155,7 +160,14 @@ def _require_identity(settings, base: str, token: str) -> None:
 
 
 def _same(key: str, expected, actual) -> bool:
-    if key in ("llm_timeout_seconds", "task_timeout_seconds", "max_output_tokens"):
+    if key in (
+        "llm_timeout_seconds",
+        "task_timeout_seconds",
+        "max_output_tokens",
+        "num_ctx",
+        "summary_repair_retries",
+        "max_note_chars",
+    ):
         try:
             return float(expected) == float(actual)
         except (TypeError, ValueError):
@@ -345,10 +357,13 @@ def _failure_detail(task: dict) -> str:
     if code == "llm_unavailable":
         return "模型没有完成这次任务。Ollama 命令能回答只说明进程在听，不代表任务成功。没有云端回退。"
     if code == "model_output_invalid":
-        return (
-            "模型输出不是要求的 JSON。思考过程和 approve 字段都不会被当成批准。"
+        detail = (
+            "模型输出不是要求的 JSON。思考文本没有被当成摘要，也没有被批准。"
             "这次失败的任务会保留。再次运行 ssios summary 会新建任务，不会删除已有状态。"
         )
+        if task.get("diagnostic_path"):
+            detail += f" 诊断文件：{task['diagnostic_path']}（{task.get('diagnostic_class')}）。可用 ssios diagnose {task.get('id')} 查看分类。"
+        return detail
     if code == "model_output_empty":
         return (
             "模型没有返回可用的答案内容。message.thinking 和 think 标签里的文字没有被执行。"

@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "ingest":
             command.add_argument("source")
             command.add_argument("--project", required=True)
+        if name == "diagnose":
+            command.add_argument("task_id")
         if name == "memfs-info":
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
@@ -77,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_demo(settings)
     if args.command == "ollama-probe":
         return run_ollama_probe(settings)
+    if args.command == "diagnose":
+        return run_diagnose(settings, args.task_id)
     if args.command == "ingest":
         try:
             return run_ingest(settings, Path(args.source), args.project)
@@ -102,6 +106,35 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
             return 1
     return 2
+
+
+def run_diagnose(settings, task_id: str) -> int:
+    import re
+
+    if not re.fullmatch(r"task-[0-9a-f]{16}", task_id):
+        print(json.dumps({"error": "task_invalid", "detail": "task id rejected"}, ensure_ascii=False))
+        return 1
+    path = settings.state_dir / "diagnostics" / f"{task_id}.json"
+    if not path.is_file():
+        print(json.dumps({"error": "not_found", "detail": "diagnostic file was not found", "path": str(path)}, ensure_ascii=False))
+        return 1
+    data = json.loads(path.read_text(encoding="utf-8"))
+    content = data.get("content") if isinstance(data.get("content"), str) else ""
+    thinking = data.get("thinking") if isinstance(data.get("thinking"), str) else ""
+    print(
+        json.dumps(
+            {
+                "path": str(path),
+                "classification": data.get("classification"),
+                "content_bytes": len(content.encode("utf-8")),
+                "thinking_bytes": len(thinking.encode("utf-8")),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
+    return 0
 
 
 def run_ollama_probe(settings) -> int:

@@ -19,6 +19,9 @@ class Settings:
     ollama_model: str
     llm_timeout_seconds: float
     max_output_tokens: int
+    num_ctx: int
+    summary_repair_retries: int
+    max_note_chars: int
     runtime_backend: str
     cpus: int
     memory_mb: int
@@ -96,6 +99,15 @@ def load_settings(
     max_output_tokens = int(llm.get("max_output_tokens", 1024))
     if not 64 <= max_output_tokens <= 8192:
         raise SsiosError("config_invalid", "max_output_tokens must be from 64 to 8192", 500)
+    num_ctx = int(llm.get("num_ctx", 8192))
+    if not 2048 <= num_ctx <= 32768:
+        raise SsiosError("config_invalid", "num_ctx must be from 2048 to 32768", 500)
+    summary_repair_retries = int(llm.get("summary_repair_retries", 1))
+    if summary_repair_retries not in (0, 1):
+        raise SsiosError("config_invalid", "summary_repair_retries must be 0 or 1", 500)
+    max_note_chars = int(llm.get("max_note_chars", 6000))
+    if not 500 <= max_note_chars <= 20000:
+        raise SsiosError("config_invalid", "max_note_chars must be from 500 to 20000", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -109,6 +121,9 @@ def load_settings(
         ollama_model=str(llm.get("ollama_model", "llama3.1:8b")),
         llm_timeout_seconds=float(llm.get("request_timeout_seconds", 60)),
         max_output_tokens=max_output_tokens,
+        num_ctx=num_ctx,
+        summary_repair_retries=summary_repair_retries,
+        max_note_chars=max_note_chars,
         runtime_backend=backend,
         cpus=int(runtime.get("cpus", 1)),
         memory_mb=int(runtime.get("memory_mb", 512)),
