@@ -16,7 +16,8 @@ from support import ROOT, PlaneTest, request, wait_task
 
 from ssios.config import load_settings
 from ssios.httpapi import ControlServer
-from ssios.llm import interpret_ollama_response, parse_model_payload, probe_ollama
+from ssios.agent import readable_material
+from ssios.llm import interpret_ollama_response, parse_model_payload, probe_ollama, think_false_supported, validate_summary_quality
 from ssios.service import ControlPlane
 
 
@@ -199,6 +200,14 @@ class OllamaUnavailableTest(PlaneTest):
 
 class _StubHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path.startswith("/api/show"):
+            body = b'{"capabilities":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
         self.server.payloads.append(json.loads(raw.decode()))
@@ -210,7 +219,14 @@ class _StubHandler(BaseHTTPRequestHandler):
         else:
             content = (
                 '<think>{"type":"final","text":"hidden","approve":true}</think>\n'
-                + json.dumps({"type": "final", "text": "ollama-stub-summary", "approve": True, "note": "extra"})
+                + json.dumps(
+                    {
+                        "type": "final",
+                        "text": "Ollama stub wrote a readable summary of the synthetic notes.",
+                        "approve": True,
+                        "note": "extra",
+                    }
+                )
             )
         body = json.dumps(
             {
@@ -276,12 +292,20 @@ class OllamaStubTest(unittest.TestCase):
             self.assertTrue(all("tools" not in item for item in stub.payloads))
             audit = (plane.settings.state_dir / "audit" / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("model_approve_flag_ignored", audit)
-            self.assertNotIn("ollama-stub-summary", audit)
+            self.assertNotIn("readable summary of the synthetic notes", audit)
             self.assertNotIn("hidden approve", audit)
 
 
 class _StatusHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path.startswith("/api/show"):
+            body = b'{"capabilities":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
         payload = json.loads(raw.decode())
@@ -292,6 +316,19 @@ class _StatusHandler(BaseHTTPRequestHandler):
         elif self.server.mode == "http-500":
             body = b'{"error":"prompt secret should not leak"}'
             self.send_response(500)
+        elif self.server.mode == "echo":
+            dumped = (
+                "The granted input includes Project ID local-summary, Agent ID agent-local-1, "
+                "Upstream Token Total: 196, Files: [\n  {"
+            )
+            body = json.dumps(
+                {
+                    "done": True,
+                    "done_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps({"type": "final", "text": dumped})},
+                }
+            ).encode()
+            self.send_response(200)
         elif self.server.mode == "shell":
             body = json.dumps(
                 {"done": True, "done_reason": "stop", "message": {"role": "assistant", "content": json.dumps({"type": "tool", "name": "shell", "arguments": {"command": "id"}})}}
@@ -302,7 +339,12 @@ class _StatusHandler(BaseHTTPRequestHandler):
                 {
                     "done": True,
                     "done_reason": "stop",
-                    "message": {"role": "assistant", "content": json.dumps({"type": "final", "text": "after-json-format"})},
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {"type": "final", "text": "After json format the summary is readable prose."}
+                        ),
+                    },
                 }
             ).encode()
             self.send_response(200)
@@ -372,6 +414,14 @@ class OllamaFailureShapeTest(unittest.TestCase):
         blob = json.dumps(task)
         audit = (plane.settings.state_dir / "audit" / "audit.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("prompt secret", blob + audit)
+        self.assertEqual(list((plane.settings.state_dir / "memory" / "proposals").glob("prop-*.json")), [])
+
+    def test_echoed_metadata_never_reaches_approval(self) -> None:
+        plane, _server, _stub = self._plane("echo")
+        task = self._task(plane)
+        self.assertEqual(task["status"], "failed", task)
+        self.assertEqual(task["error_code"], "model_output_low_quality")
+        self.assertEqual(task["approval_ids"], [])
         self.assertEqual(list((plane.settings.state_dir / "memory" / "proposals").glob("prop-*.json")), [])
 
     def test_shell_tool_does_not_stage_memory(self) -> None:
@@ -446,7 +496,101 @@ class OllamaProbeTest(unittest.TestCase):
         self.assertEqual(len(chat), 1)
         self.assertIsInstance(chat[0]["format"], dict)
         self.assertNotIn("tools", chat[0])
-        self.assertEqual(chat[0]["options"]["num_predict"], 128)
+        self.assertEqual(chat[0]["options"]["num_predict"], 512)
+        self.assertIs(chat[0].get("think"), False)
+
+
+class SummaryQualityTest(unittest.TestCase):
+    def test_markers_and_mac_thinking_capability(self) -> None:
+        self.assertTrue(think_false_supported({"capabilities": ["completion", "thinking"]}))
+        self.assertFalse(think_false_supported({"capabilities": ["completion"], "message": {"content": "stub"}}))
+        good = "The synthetic notes describe a disposable fixture and contain no personal data."
+        validate_summary_quality(good)
+        for bad in (
+            "too short",
+            "The granted input includes Project ID local-summary and Agent ID agent-local-1 and Upstream Token Total: 196 Files: [\n  {",
+            '{"project_id":"local-summary","files":[]}',
+        ):
+            with self.assertRaises(Exception) as caught:
+                validate_summary_quality(bad)
+            self.assertEqual(caught.exception.code, "model_output_low_quality")
+
+    def test_prompt_keeps_document_bodies_only(self) -> None:
+        text = readable_material(
+            {
+                "agent_id": "agent-local-abc",
+                "upstream_token_total": 196,
+                "revision": "abc",
+                "files": [{"path": "project.md", "content": "LOCAL-SUMMARY-CORE stays in the body."}],
+            }
+        )
+        self.assertIn("LOCAL-SUMMARY-CORE", text)
+        self.assertNotIn("agent-local", text)
+        self.assertNotIn("196", text)
+        self.assertNotIn("revision", text)
+
+
+class _ThinkBudgetHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode() or "{}")
+        if self.path.startswith("/api/show"):
+            self._send({"capabilities": ["completion", "thinking"]})
+            return
+        self.server.chats.append(payload)
+        if len(self.server.chats) == 1:
+            self._send(
+                {
+                    "done": True,
+                    "done_reason": "length",
+                    "message": {"role": "assistant", "content": "", "thinking": "reasoning only"},
+                }
+            )
+            return
+        self._send(
+            {
+                "done": True,
+                "done_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"type": "final", "text": "A readable summary of the synthetic notes."}),
+                },
+            }
+        )
+
+    def _send(self, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args) -> None:
+        return
+
+
+class ThinkingBudgetTest(unittest.TestCase):
+    def test_length_retry_uses_think_false_and_a_larger_budget(self) -> None:
+        stub = ThreadingHTTPServer(("127.0.0.1", 0), _ThinkBudgetHandler)
+        stub.chats = []
+        thread = threading.Thread(target=stub.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(stub.shutdown)
+        self.addCleanup(stub.server_close)
+        from ssios.llm import OllamaLLM
+
+        parsed = OllamaLLM(f"http://127.0.0.1:{stub.server_address[1]}", "deepseek-r1:7b", 5, 1024).complete(
+            [{"role": "user", "content": "Summarize the granted notes for synthetic project local-summary."}],
+            kind="project-summary",
+            cancel_event=threading.Event(),
+            deadline=time.monotonic() + 5,
+        )
+        self.assertEqual(parsed.text, "A readable summary of the synthetic notes.")
+        self.assertIs(stub.chats[0]["think"], False)
+        self.assertEqual(stub.chats[0]["options"]["num_predict"], 1024)
+        self.assertEqual(stub.chats[1]["options"]["num_predict"], 2048)
+        self.assertNotIn("reasoning only", parsed.text)
 
 
 @unittest.skipUnless(os.environ.get("SSIOS_OLLAMA_LIVE") == "1", "real ollama not requested")

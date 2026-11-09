@@ -210,6 +210,7 @@ class ControlPlane:
             "ollama_model": self.settings.ollama_model,
             "ollama_base_url": self.settings.ollama_base_url,
             "llm_timeout_seconds": self.settings.llm_timeout_seconds,
+            "max_output_tokens": self.settings.max_output_tokens,
             "task_timeout_seconds": self.settings.task_timeout_seconds,
             "letta_bin": self.settings.letta_bin,
             "bind": f"{self.settings.host}:{self.bound_port}",

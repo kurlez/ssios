@@ -98,7 +98,12 @@ def run_ollama_probe(settings) -> int:
             )
         )
         return 2
-    report = probe_ollama(settings.ollama_base_url, settings.ollama_model, float(settings.llm_timeout_seconds))
+    report = probe_ollama(
+        settings.ollama_base_url,
+        settings.ollama_model,
+        float(settings.llm_timeout_seconds),
+        max_output_tokens=settings.max_output_tokens,
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     if report.get("error") or not report.get("structured_output"):
         return 1

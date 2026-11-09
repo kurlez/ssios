@@ -91,7 +91,9 @@ PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/mem
 
 命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve`、`message.thinking` 和 `<think>` 都不会被当成批准。Ollama 请求带有 JSON schema；答案只从 `message.content` 读取。
 
-失败的任务会留在状态目录里。再次执行上面的 `ssios summary` 会新建一个任务，不会删除旧任务或记忆。可以先看本机 Ollama 是否接受结构化输出，这一步不创建任务：
+失败的任务会留在状态目录里。截断的输出、只含思考过程的输出，以及复述内部字段的摘要都不会进入批准。再次执行 `ssios summary` 会新建一个任务。如果之前已经批准过一份坏摘要，新的 `yes` 会再做一次 git 提交，覆盖 `topics/fixtures/last-summary.md`，旧提交还在，状态目录不用删。
+
+思考模型会收到 `think: false`。答案预算是配置里的 `max_output_tokens`（默认 1024）。可以先看本机 Ollama 是否接受结构化输出，这一步不创建任务：
 
 ```bash
 PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml

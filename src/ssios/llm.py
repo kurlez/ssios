@@ -101,6 +101,50 @@ def _looks_truncated(text: str) -> bool:
     return text.count("{") > text.count("}") or text.count("[") > text.count("]")
 
 
+_LOW_QUALITY_MARKERS = (
+    "agent id",
+    "agent_id",
+    "agent-local-",
+    "upstream token",
+    "upstream_token",
+    "token_estimate",
+    "token total",
+    "payload_sha256",
+    "core_token_budget",
+    "project id",
+)
+
+
+def validate_summary_quality(text: str) -> None:
+    """Reject summaries that are too thin, truncated, or just an internal dump."""
+    stripped = text.strip()
+    if len(stripped) < 20:
+        raise SsiosError("model_output_low_quality", "summary is too short", 502)
+    if stripped.count("```") % 2 == 1 or _looks_truncated(stripped):
+        raise SsiosError("model_output_low_quality", "summary is truncated", 502)
+    if stripped.startswith("{") or stripped.startswith("["):
+        raise SsiosError("model_output_low_quality", "summary is raw JSON", 502)
+    folded = stripped.casefold()
+    if any(marker in folded for marker in _LOW_QUALITY_MARKERS):
+        raise SsiosError("model_output_low_quality", "summary echoes internal metadata", 502)
+
+
+def think_false_supported(shown: dict) -> bool:
+    """True when /api/show says the model can be asked not to spend tokens on reasoning."""
+    if not isinstance(shown, dict):
+        return False
+    if isinstance(shown.get("message"), dict) and "capabilities" not in shown and "thinking" not in shown:
+        return False
+    capabilities = shown.get("capabilities")
+    if isinstance(capabilities, list) and "thinking" in capabilities:
+        return True
+    thinking = shown.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    values = thinking.get("values")
+    return isinstance(values, list) and (False in values or "false" in values)
+
+
 def _strip_think(text: str) -> str:
     """Drop reasoning tags. JSON inside them is not a command and cannot approve."""
     stripped = _THINK_BLOCK.sub("", text)
@@ -121,7 +165,7 @@ def _strip_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _chat_payload(model: str, messages: list[dict], fmt: dict | str) -> dict:
+def _chat_payload(model: str, messages: list[dict], fmt: dict | str, *, num_predict: int, think: bool | None) -> dict:
     grounded = []
     schema_note = "JSON schema for the answer content: " + json.dumps(TASK_OUTPUT_SCHEMA, separators=(",", ":"))
     for message in _to_ollama(messages):
@@ -131,13 +175,16 @@ def _chat_payload(model: str, messages: list[dict], fmt: dict | str) -> dict:
             grounded.append(message)
     if not grounded:
         grounded.append({"role": "system", "content": schema_note})
-    return {
+    payload = {
         "model": model,
         "messages": grounded,
         "stream": False,
         "format": fmt,
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_predict": num_predict},
     }
+    if think is False:
+        payload["think"] = False
+    return payload
 
 
 def _post_json(url: str, payload: dict, timeout: float) -> dict:
@@ -168,7 +215,41 @@ def _post_json(url: str, payload: dict, timeout: float) -> dict:
     return body
 
 
-def probe_ollama(base_url: str, model: str, timeout: float) -> dict:
+def _needs_budget_retry(body: dict) -> bool:
+    if body.get("done") is False or body.get("done_reason") == "length":
+        return True
+    message = body.get("message") if isinstance(body.get("message"), dict) else {}
+    content = message.get("content")
+    thinking = message.get("thinking")
+    return (not isinstance(content, str) or not content.strip()) and isinstance(thinking, str) and bool(thinking.strip())
+
+
+def _chat_with_fallback(url: str, payload: dict, timeout: float) -> dict:
+    """Schema first, then json. Drop think=false if the server rejects it. At most those retries."""
+    try:
+        return _post_json(url, payload, timeout)
+    except SsiosError as exc:
+        if exc.code != "ollama_rejected":
+            raise
+    if payload.get("think") is False:
+        payload.pop("think", None)
+        try:
+            return _post_json(url, payload, timeout)
+        except SsiosError as exc:
+            if exc.code != "ollama_rejected":
+                raise
+    if isinstance(payload.get("format"), dict):
+        payload["format"] = "json"
+        try:
+            return _post_json(url, payload, timeout)
+        except SsiosError as exc:
+            if exc.code == "ollama_rejected":
+                raise SsiosError("model_format_unsupported", "ollama rejected structured format", 502) from exc
+            raise
+    raise SsiosError("model_format_unsupported", "ollama rejected structured format", 502)
+
+
+def probe_ollama(base_url: str, model: str, timeout: float, *, max_output_tokens: int = 512) -> dict:
     """Bounded local capability check. Does not create a task or read memory."""
     base = base_url.rstrip("/")
     report: dict = {
@@ -185,6 +266,7 @@ def probe_ollama(base_url: str, model: str, timeout: float) -> dict:
         "thinking_present": False,
         "structured_output": False,
         "output_kind": None,
+        "think_requested": None,
         "error": None,
         "detail": "",
     }
@@ -213,28 +295,30 @@ def probe_ollama(base_url: str, model: str, timeout: float) -> dict:
     if isinstance(capabilities, list):
         report["capabilities"] = [item for item in capabilities if isinstance(item, str) and len(item) <= 40][:12]
     chat_timeout = min(45.0, timeout)
+    think = False if think_false_supported(shown) else None
+    report["think_requested"] = think
     messages = [
         {"role": "system", "content": "Return one JSON object and no personal data."},
-        {"role": "user", "content": 'Set type to final and text to probe-ok.'},
+        {"role": "user", "content": "Set type to final and text to probe-ok."},
     ]
-    payload = _chat_payload(model, messages, TASK_OUTPUT_SCHEMA)
-    payload["options"] = {"temperature": 0, "num_predict": 128}
+    budget = max(64, min(int(max_output_tokens), 8192))
+    payload = _chat_payload(model, messages, TASK_OUTPUT_SCHEMA, num_predict=budget, think=think)
     try:
-        body = _post_json(base + "/api/chat", payload, chat_timeout)
-        report["format_accepted"] = "schema"
+        body = _chat_with_fallback(base + "/api/chat", payload, chat_timeout)
+        report["format_accepted"] = "schema" if isinstance(payload.get("format"), dict) else "json"
+        report["think_requested"] = False if payload.get("think") is False else None
     except SsiosError as exc:
-        if exc.code != "ollama_rejected":
+        report["error"] = exc.code
+        report["detail"] = exc.detail
+        return report
+    if _needs_budget_retry(body):
+        payload["options"]["num_predict"] = min(budget * 2, 8192)
+        try:
+            body = _chat_with_fallback(base + "/api/chat", payload, chat_timeout)
+        except SsiosError as exc:
             report["error"] = exc.code
             report["detail"] = exc.detail
             return report
-        payload["format"] = "json"
-        try:
-            body = _post_json(base + "/api/chat", payload, chat_timeout)
-        except SsiosError as second:
-            report["error"] = "model_format_unsupported" if second.code == "ollama_rejected" else second.code
-            report["detail"] = "ollama rejected structured format" if second.code == "ollama_rejected" else second.detail
-            return report
-        report["format_accepted"] = "json"
     message = body.get("message") if isinstance(body.get("message"), dict) else {}
     content = message.get("content")
     thinking_text = message.get("thinking")
@@ -313,36 +397,48 @@ class OllamaLLM:
     deterministic = False
     uses_network = True
 
-    def __init__(self, base_url: str, model: str, timeout: float) -> None:
+    def __init__(self, base_url: str, model: str, timeout: float, max_output_tokens: int = 1024) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.max_output_tokens = max_output_tokens
+        self._think_false: bool | None = None
 
     def complete(self, messages: list[dict], *, kind: str, cancel_event, deadline: float) -> ModelResponse:
         if kind != "project-summary":
             raise SsiosError("task_rejected", "this task kind requires the mock provider", 400)
         if cancel_event.is_set() or time.monotonic() >= deadline:
             raise FlowInterrupt("timeout")
-        remaining = deadline - time.monotonic()
-        payload = _chat_payload(self.model, messages, TASK_OUTPUT_SCHEMA)
-        timeout = min(self.timeout, remaining)
+        think = False if self._supports_think_false(deadline) else None
+        body = self._ask(messages, think, self.max_output_tokens, deadline)
+        if _needs_budget_retry(body):
+            body = self._ask(messages, False if self._think_false else None, min(self.max_output_tokens * 2, 8192), deadline)
+        return interpret_ollama_response(body)
+
+    def _supports_think_false(self, deadline: float) -> bool:
+        if self._think_false is not None:
+            return self._think_false
+        timeout = min(10.0, self.timeout, max(0.1, deadline - time.monotonic()))
         try:
-            body = _post_json(self.base_url + "/api/chat", payload, timeout)
+            shown = _post_json(self.base_url + "/api/show", {"model": self.model}, timeout)
+        except SsiosError:
+            self._think_false = False
+            return False
+        self._think_false = think_false_supported(shown)
+        return self._think_false
+
+    def _ask(self, messages: list[dict], think: bool | None, num_predict: int, deadline: float) -> dict:
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = _chat_payload(self.model, messages, TASK_OUTPUT_SCHEMA, num_predict=num_predict, think=think)
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
         except SsiosError as exc:
             if exc.code == "llm_unavailable" and "timed out" in exc.detail and time.monotonic() >= deadline:
                 raise FlowInterrupt("timeout") from exc
-            if exc.code != "ollama_rejected":
-                raise
-            payload["format"] = "json"
-            try:
-                body = _post_json(self.base_url + "/api/chat", payload, timeout)
-            except SsiosError as second:
-                if second.code == "ollama_rejected":
-                    raise SsiosError("model_format_unsupported", "ollama rejected structured format", 502) from second
-                if second.code == "llm_unavailable" and "timed out" in second.detail and time.monotonic() >= deadline:
-                    raise FlowInterrupt("timeout") from second
-                raise
-        return interpret_ollama_response(body)
+            raise
+        if think is False and payload.get("think") is not False:
+            self._think_false = False
+        return body
 
 
 def _to_ollama(messages: list[dict]) -> list[dict]:
@@ -361,5 +457,10 @@ def build_llm(settings):
     if settings.llm_provider == "mock":
         return MockLLM()
     if settings.llm_provider == "ollama":
-        return OllamaLLM(settings.ollama_base_url, settings.ollama_model, settings.llm_timeout_seconds)
+        return OllamaLLM(
+            settings.ollama_base_url,
+            settings.ollama_model,
+            settings.llm_timeout_seconds,
+            settings.max_output_tokens,
+        )
     raise SsiosError("config_invalid", "llm provider rejected", 500)

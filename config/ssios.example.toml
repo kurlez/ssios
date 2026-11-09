@@ -13,6 +13,8 @@ provider = "mock"
 ollama_base_url = "http://127.0.0.1:11434"
 ollama_model = "llama3.1:8b"
 request_timeout_seconds = 60
+# 答案 token 上限。思考模型会先请求 think=false，避免推理吃光这份预算。
+max_output_tokens = 1024
 
 [runtime]
 # dev-guard 是进程内限制，不是 microVM。

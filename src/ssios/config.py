@@ -18,6 +18,7 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     llm_timeout_seconds: float
+    max_output_tokens: int
     runtime_backend: str
     cpus: int
     memory_mb: int
@@ -92,6 +93,9 @@ def load_settings(
     ttl = float(limits.get("approval_ttl_seconds", 600))
     if ttl < 0:
         raise SsiosError("config_invalid", "approval ttl must be >= 0", 500)
+    max_output_tokens = int(llm.get("max_output_tokens", 1024))
+    if not 64 <= max_output_tokens <= 8192:
+        raise SsiosError("config_invalid", "max_output_tokens must be from 64 to 8192", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -104,6 +108,7 @@ def load_settings(
         ollama_base_url=ollama_base.rstrip("/"),
         ollama_model=str(llm.get("ollama_model", "llama3.1:8b")),
         llm_timeout_seconds=float(llm.get("request_timeout_seconds", 60)),
+        max_output_tokens=max_output_tokens,
         runtime_backend=backend,
         cpus=int(runtime.get("cpus", 1)),
         memory_mb=int(runtime.get("memory_mb", 512)),

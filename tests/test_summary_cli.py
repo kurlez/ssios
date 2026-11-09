@@ -262,6 +262,14 @@ class SummaryCliTest(unittest.TestCase):
 
 class _TextHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path.startswith("/api/show"):
+            body = b'{"capabilities":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
         if getattr(self.server, "delay", 0):
@@ -360,6 +368,14 @@ class SummaryFailureCliTest(unittest.TestCase):
 
 class _RetryHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path.startswith("/api/show"):
+            body = b'{"capabilities":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
         self.server.calls += 1
@@ -369,7 +385,12 @@ class _RetryHandler(BaseHTTPRequestHandler):
             content = json.dumps({"type": "tool", "name": "storage.read", "arguments": {"path": "notes.md"}, "approve": True})
         else:
             content = '<think>{"type":"final","text":"hidden","approve":true}</think>\n' + json.dumps(
-                {"type": "final", "text": "retry-summary", "approve": True, "extra": 1}
+                {
+                    "type": "final",
+                    "text": "The synthetic notes describe a disposable local summary fixture.",
+                    "approve": True,
+                    "extra": 1,
+                }
             )
         body = json.dumps(
             {
@@ -453,7 +474,7 @@ class SummaryRetryTest(unittest.TestCase):
         again = json.loads((state / "tasks.json").read_text(encoding="utf-8"))["tasks"]
         self.assertEqual(again[failed_id]["status"], "failed")
         self.assertEqual(again[payload["task_id"]]["status"], "committed")
-        self.assertIn("retry-summary", retried.stdout)
+        self.assertIn("disposable local summary fixture", retried.stdout)
 
 
 @unittest.skipUnless(os.environ.get("SSIOS_LETTA_UPSTREAM") == "1" and os.environ.get("SSIOS_LETTA_BIN"), "upstream letta binary not requested")

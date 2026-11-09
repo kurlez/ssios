@@ -131,6 +131,7 @@ def _require_identity(settings, base: str, token: str) -> None:
         "ollama_model": settings.ollama_model,
         "ollama_base_url": settings.ollama_base_url,
         "llm_timeout_seconds": settings.llm_timeout_seconds,
+        "max_output_tokens": settings.max_output_tokens,
         "task_timeout_seconds": settings.task_timeout_seconds,
         "letta_bin": settings.letta_bin,
         "bind": f"{settings.host}:{settings.port}",
@@ -154,7 +155,7 @@ def _require_identity(settings, base: str, token: str) -> None:
 
 
 def _same(key: str, expected, actual) -> bool:
-    if key in ("llm_timeout_seconds", "task_timeout_seconds"):
+    if key in ("llm_timeout_seconds", "task_timeout_seconds", "max_output_tokens"):
         try:
             return float(expected) == float(actual)
         except (TypeError, ValueError):
@@ -354,8 +355,13 @@ def _failure_detail(task: dict) -> str:
         )
     if code == "model_output_truncated":
         return (
-            "模型输出被截断。可以加大 request_timeout_seconds 或 task_timeout_seconds 后，用同一配置重启服务再运行 ssios summary。"
+            "模型输出被截断，没有进入批准。可以在 [llm] 里加大 max_output_tokens 后，用同一 --state 和 --config 重启服务，再运行 ssios summary。"
             "失败记录会保留，重试会新建任务。"
+        )
+    if code == "model_output_low_quality":
+        return (
+            "模型摘要只是在复述内部字段、截断的 JSON，或短到不能用，所以没有创建批准。"
+            "再次运行 ssios summary 会新建任务。若之前已经批准过一份坏摘要，新的 yes 会用一次新的 git 提交覆盖 topics/fixtures/last-summary.md，不删除状态目录，也不改写旧历史。"
         )
     if code == "model_format_unsupported":
         return "这台 Ollama 不接受结构化 format。请升级本机 Ollama。没有改用云端，也没有删除状态。"
