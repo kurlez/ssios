@@ -36,6 +36,10 @@ class Settings:
     krunvm_bin: str
     macos_vm_volume: str
     guest_prepare_timeout_seconds: float
+    runtime_agent: str
+    codex_model: str
+    codex_max_requests: int
+    codex_max_request_bytes: int
     task_timeout_seconds: float
     max_tool_calls: int
     max_output_bytes: int
@@ -120,6 +124,23 @@ def load_settings(
     guest_prepare_timeout_seconds = float(runtime.get("guest_prepare_timeout_seconds", 600))
     if guest_prepare_timeout_seconds < 30:
         raise SsiosError("config_invalid", "guest_prepare_timeout_seconds must be at least 30", 500)
+    runtime_agent = str(runtime.get("agent", "summary"))
+    if runtime_agent not in ("summary", "codex"):
+        raise SsiosError("config_invalid", "runtime agent must be summary or codex", 500)
+    codex = _section(data, "agent").get("codex", {})
+    if codex is None:
+        codex = {}
+    if not isinstance(codex, dict):
+        raise SsiosError("config_invalid", "agent.codex must be a table", 500)
+    codex_model = str(codex.get("model", "mock-summary"))
+    if codex_model == "ollama" or any(char in codex_model for char in "\n\r\"/"):
+        raise SsiosError("config_invalid", "codex model name is rejected", 500)
+    codex_max_requests = int(codex.get("max_requests", 4))
+    if not 1 <= codex_max_requests <= 8:
+        raise SsiosError("config_invalid", "codex max_requests must be from 1 to 8", 500)
+    codex_max_request_bytes = int(codex.get("max_request_bytes", 200000))
+    if not 1024 <= codex_max_request_bytes <= 2000000:
+        raise SsiosError("config_invalid", "codex max_request_bytes is out of range", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -155,6 +176,10 @@ def load_settings(
         krunvm_bin=str(runtime.get("krunvm_bin", "krunvm")),
         macos_vm_volume=macos_vm_volume,
         guest_prepare_timeout_seconds=guest_prepare_timeout_seconds,
+        runtime_agent=runtime_agent,
+        codex_model=codex_model,
+        codex_max_requests=codex_max_requests,
+        codex_max_request_bytes=codex_max_request_bytes,
         task_timeout_seconds=float(limits.get("task_timeout_seconds", 30)),
         max_tool_calls=int(limits.get("max_tool_calls", 8)),
         max_output_bytes=int(limits.get("max_output_bytes", 65536)),

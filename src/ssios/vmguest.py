@@ -53,9 +53,14 @@ class GuestSession:
     task_id: str
     kind: str
     project_id: str
+    mode: str = "summary"
 
 
 def execute_guest(plane, task: dict, token: str, cancel, deadline: float) -> dict:
+    if getattr(plane.settings, "runtime_agent", "summary") == "codex":
+        from ssios.codex_guest import execute_codex
+
+        return execute_codex(plane, task, token, cancel, deadline)
     if task.get("kind") != "project-summary":
         raise SsiosError("microvm_fail_closed", "this task kind is not run inside the guest", 503)
     runtime = _runtime(plane)
@@ -528,7 +533,51 @@ def redact_text(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         if secret and len(secret) >= 8:
             cleaned = cleaned.replace(secret, "[redacted]")
-    return re.sub(r"(?i)(bearer\s+|token[\"']?\s*[:=]\s*)\S+", r"\1[redacted]", cleaned)
+    cleaned = re.sub(r"(?i)(bearer\s+|token[\"']?\s*[:=]\s*)\S+", r"\1[redacted]", cleaned)
+    cleaned = re.sub(r"ya29\.[0-9A-Za-z._\-]+", "[redacted]", cleaned)
+    cleaned = re.sub(r"1//[0-9A-Za-z._\-]+", "[redacted]", cleaned)
+    cleaned = re.sub(
+        r"(?i)(\"(?:refresh_token|client_secret|access_token)\"\s*:\s*\")[^\"]+",
+        r"\1[redacted]",
+        cleaned,
+    )
+    return cleaned
+
+
+def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> GuestSession:
+    root = plane.settings.state_dir / "storage" / "tasks" / task["id"] / "guest"
+    if root.exists():
+        shutil.rmtree(root)
+    input_dir = root / "input"
+    scratch = root / "scratch"
+    workspace = root / "workspace"
+    tools = root / "tools"
+    home = scratch / "codex-home"
+    for path in (input_dir, scratch, workspace, tools, home):
+        path.mkdir(parents=True, mode=0o755)
+    (input_dir / "grant.json").write_text(json.dumps(grant, ensure_ascii=False), encoding="utf-8")
+    (input_dir / "prompt.txt").write_text(grant["user"], encoding="utf-8")
+    (workspace / "notes.md").write_text(grant["user"], encoding="utf-8")
+    from ssios.codex_guest import VSOCK_PORT, codex_config_text, guest_entry_source
+
+    (home / "config.toml").write_text(codex_config_text(VSOCK_PORT, plane.settings.codex_model), encoding="utf-8")
+    (scratch / "entry.py").write_text(guest_entry_source(VSOCK_PORT), encoding="utf-8")
+    destination = tools / "codex"
+    shutil.copy2(binary, destination)
+    destination.chmod(0o755)
+    leaked = token.encode("utf-8")
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink() and leaked in path.read_bytes():
+            raise SsiosError("guest_rejected", "guest directory contained the task token", 500)
+    return GuestSession(
+        root=root,
+        plain=False,
+        grant=grant,
+        task_id=task["id"],
+        kind=task["kind"],
+        project_id=task["project_id"],
+        mode="codex",
+    )
 
 
 def _ms(started: float) -> int:

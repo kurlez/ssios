@@ -100,16 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         print("这个代码大约两分钟内有效，且只保存在本机状态目录的哈希里。")
         return 0
     if args.command == "vm-prepare":
-        from ssios.runtime import build_runtime
-        from ssios.vmguest import prepare_guest_image
-
-        runtime = build_runtime(settings)
-        if not hasattr(runtime, "binary"):
-            print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. dev-guard does not use it."}, ensure_ascii=False, indent=2))
-            return 1
-        report = prepare_guest_image(runtime)
-        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
-        return 0 if report.get("ok") else 1
+        return run_vm_prepare(settings)
     if args.command == "vm-doctor":
         from ssios.runtime import build_runtime
 
@@ -144,6 +135,29 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
             return 1
     return 2
+
+
+def run_vm_prepare(settings) -> int:
+    from ssios.codex_guest import prepare_codex_binary
+    from ssios.runtime import build_runtime
+    from ssios.vmguest import prepare_guest_image
+
+    reports = []
+    if settings.runtime_agent == "codex":
+        try:
+            reports.append(prepare_codex_binary(settings.state_dir, timeout=settings.guest_prepare_timeout_seconds))
+        except SsiosError as exc:
+            print(json.dumps({"ok": False, "detail": exc.detail}, ensure_ascii=False, indent=2))
+            return 1
+    runtime = build_runtime(settings)
+    if settings.runtime_backend == "macos-vm":
+        reports.append(prepare_guest_image(runtime))
+    elif settings.runtime_agent != "codex":
+        print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. This backend does not use it."}, ensure_ascii=False, indent=2))
+        return 1
+    ok = all(item.get("ok") for item in reports)
+    print(json.dumps({"ok": ok, "steps": reports}, ensure_ascii=False, indent=2), flush=True)
+    return 0 if ok else 1
 
 
 def run_gc(settings, *, dry_run: bool) -> int:

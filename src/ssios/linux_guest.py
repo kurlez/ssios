@@ -32,6 +32,38 @@ def build_echo_initramfs(destination: Path) -> None:
     shutil.rmtree(root)
 
 
+def build_codex_initramfs(destination: Path) -> None:
+    """Initramfs that only mounts the task shares and runs /scratch/entry.py.
+
+    The Codex binary is not inside this image. The host places the checked
+    binary on the tools share before boot.
+    """
+    root = destination.parent / (destination.name + ".root")
+    if root.exists():
+        shutil.rmtree(root)
+    _busybox_root(root)
+    _copy_python(root)
+    _write_init(
+        root,
+        "#!/bin/busybox sh\n"
+        "/bin/busybox mount -t proc proc /proc\n"
+        "/bin/busybox mount -t sysfs sysfs /sys\n"
+        "/bin/busybox mount -t devtmpfs devtmpfs /dev\n"
+        "/bin/busybox mkdir -p /input /scratch /workspace /tools\n"
+        "/bin/busybox mount -t virtiofs input /input\n"
+        "/bin/busybox mount -t virtiofs scratch /scratch\n"
+        "/bin/busybox mount -t virtiofs workspace /workspace\n"
+        "/bin/busybox mount -t virtiofs tools /tools\n"
+        "/bin/busybox ip link set lo up\n"
+        "/bin/busybox ip addr add 127.0.0.1/8 dev lo\n"
+        "export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu\n"
+        "/usr/bin/python3 /scratch/entry.py\n"
+        "/bin/busybox poweroff -f\n",
+    )
+    _pack(root, destination)
+    shutil.rmtree(root)
+
+
 def build_worker_initramfs(destination: Path) -> None:
     root = destination.parent / (destination.name + ".root")
     if root.exists():

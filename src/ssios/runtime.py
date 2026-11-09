@@ -148,6 +148,7 @@ def cloud_hypervisor_guest_command(
     memory_mb: int,
     filesystems: list[tuple[str, Path]],
     serial: Path | None = None,
+    vsock: Path | None = None,
 ) -> list[str]:
     if cpus < 1 or memory_mb < 128:
         raise SsiosError("runtime_invalid", "microvm size rejected", 400)
@@ -179,6 +180,9 @@ def cloud_hypervisor_guest_command(
         _reject_option_text(tag)
         _reject_option_text(str(socket))
         argv.extend(["--fs", f"tag={tag},socket={socket}"])
+    if vsock is not None:
+        _reject_option_text(str(vsock))
+        argv.extend(["--vsock", f"cid=3,socket={vsock}"])
     if "--net" in argv:
         raise SsiosError("network_denied", "guest network is denied", 403)
     return argv
@@ -288,6 +292,14 @@ class CloudHypervisorRuntime:
         self.plane = None
 
     def can_launch(self) -> bool:
+        if getattr(self.settings, "runtime_agent", "summary") == "codex":
+            checks = (
+                self._kvm(),
+                self._binary(self.settings.cloud_hypervisor_bin),
+                self._binary(self.settings.virtiofsd_bin),
+                self._regular_file("kernel", self.settings.kernel_path),
+            )
+            return all(item["ok"] for item in checks)
         return self.worker_requirements()["ok"]
 
     def worker_requirements(self) -> dict:

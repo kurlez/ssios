@@ -69,3 +69,9 @@ PYTHONPATH=src python3 -m ssios vm-doctor --state /tmp/ssios-vm-doctor --config 
 确认 `krunvm` 可用之后，再把正在跑的服务停掉，用原来的状态目录和新的 `backend` 启动。启动失败时任务失败关闭，不会改在 Mac 宿主机上跑摘要。
 
 这台 Linux 机器没有 krunvm。在把 `/dev/kvm` 交给当前用户之后，Cloud Hypervisor v54.0 配 Linux 7.2.8 内核实测：`echo ok` 898 毫秒；摘要 worker（virtio-fs，无 `--net`，模型在宿主机 mock）1576 毫秒，`isolated` 为 true。这不是 Mac 上的数字。
+
+## Codex 客户机
+
+`[runtime] agent = "codex"` 在 Linux 上用 Cloud Hypervisor，不给客户机网卡。Mac 上的 krunvm 关不掉网络，所以这条路径不把 `isolated` 标成 true，脚本也不声称跑通过。
+
+`scripts/macos-codex-smoke.sh` 只在 Apple Silicon 上、由宿主机下载并核对 `rust-v0.167.0` 的 aarch64 musl 包（哈希在 `third_party/codex.pin.json`）。它不启动虚拟机。客户机里不会再下载。没有在这台 Linux 机器上执行过该脚本的成功路径。
