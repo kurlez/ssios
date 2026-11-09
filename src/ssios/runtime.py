@@ -24,6 +24,56 @@ class Share:
     readonly: bool
 
 
+class MacOSVMRuntime:
+    """Preflight and argv for krunvm. This build does not boot a guest."""
+
+    name = "macos-vm"
+    tool = "krunvm"
+    pinned_note = "Install with Homebrew and check the version before trusting it: brew install krunvm. This repository does not vendor krunvm."
+
+    def __init__(self, settings) -> None:
+        self.settings = settings
+
+    def preflight(self) -> dict:
+        binary = shutil.which(self.tool)
+        return {
+            "ok": False,
+            "backend": self.name,
+            "microvm": True,
+            "execution_implemented": False,
+            "isolated": False,
+            "host_shell_fallback": False,
+            "tool": self.tool,
+            "binary": binary,
+            "binary_found": binary is not None,
+            "framework": "Hypervisor.framework via libkrun",
+            "note": self.pinned_note,
+            "detail": "macOS guest execution is not performed by this process. Run ssios vm-doctor on the Mac.",
+        }
+
+    def command(self) -> list[str]:
+        binary = shutil.which(self.tool) or self.tool
+        return [binary, "list"]
+
+    def launch(self, host_workload=None) -> None:
+        del host_workload
+        raise SsiosError(
+            "microvm_fail_closed",
+            "macos-vm did not start a guest; the task was not run on the host",
+            503,
+        )
+
+
+def build_runtime(settings):
+    if settings.runtime_backend == "dev-guard":
+        return DevGuardRuntime()
+    if settings.runtime_backend == "macos-vm":
+        return MacOSVMRuntime(settings)
+    if settings.runtime_backend == "cloud-hypervisor":
+        return CloudHypervisorRuntime(settings)
+    raise SsiosError("config_invalid", "runtime backend is not recognized", 500)
+
+
 class DevGuardRuntime:
     name = "dev-guard"
 

@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 from ssios.errors import SsiosError
@@ -142,7 +143,10 @@ class UpstreamLettaBridge:
     def core(self, project_id: str, *, budget: int) -> dict:
         agent_id = self.ensure_agent(project_id)
         tokens = self.tokens(agent_id)
-        exported = self.export_tree(agent_id)
+        with self.export_tree(agent_id) as exported:
+            return self._core_from_export(project_id, agent_id, tokens, exported, budget)
+
+    def _core_from_export(self, project_id: str, agent_id: str, tokens: dict, exported: Path, budget: int) -> dict:
         revision = self.head(project_id)
         selected = []
         used = 0
@@ -195,12 +199,12 @@ class UpstreamLettaBridge:
         shown = self._git(memory, ["show", f"HEAD:{rel}"], check=False)
         if shown.returncode != 0:
             raise SsiosError("not_found", "not found", 404)
-        exported = self.export_tree(agent_id)
-        exported_file = exported / rel
-        if exported_file.is_symlink() or not exported_file.is_file():
-            raise SsiosError("upstream_invalid", "export does not contain the committed file", 500)
-        if exported_file.read_bytes() != shown.stdout:
-            raise SsiosError("upstream_invalid", "export bytes do not match git HEAD", 500)
+        with self.export_tree(agent_id) as exported:
+            exported_file = exported / rel
+            if exported_file.is_symlink() or not exported_file.is_file():
+                raise SsiosError("upstream_invalid", "export does not contain the committed file", 500)
+            if exported_file.read_bytes() != shown.stdout:
+                raise SsiosError("upstream_invalid", "export bytes do not match git HEAD", 500)
         tokens = self.tokens(agent_id)
         core_paths = {str(item["path"]) for item in tokens["files"]}
         return {
@@ -218,7 +222,10 @@ class UpstreamLettaBridge:
         if not query or len(query) > 200:
             raise SsiosError("search_invalid", "query rejected", 400)
         agent_id = self.ensure_agent(project_id)
-        exported = self.export_tree(agent_id)
+        with self.export_tree(agent_id) as exported:
+            return self._search_export(project_id, query, exported)
+
+    def _search_export(self, project_id: str, query: str, exported: Path) -> dict:
         needle = query.casefold()
         hits = []
         for path in sorted(exported.rglob("*")):
@@ -334,11 +341,11 @@ class UpstreamLettaBridge:
             raise SsiosError("upstream_invalid", "letta memory status is still dirty after commit", 500)
         revision = self._git(memory, ["rev-parse", "HEAD"]).stdout.decode().strip()
         if proposal["kind"] == "commit":
-            exported = self.export_tree(agent_id)
-            for item in proposal["files"]:
-                exported_file = exported / item["path"]
-                if exported_file.read_text(encoding="utf-8") != item["content"]:
-                    raise SsiosError("upstream_invalid", "letta memory export does not match the approved bytes", 500)
+            with self.export_tree(agent_id) as exported:
+                for item in proposal["files"]:
+                    exported_file = exported / item["path"]
+                    if exported_file.read_text(encoding="utf-8") != item["content"]:
+                        raise SsiosError("upstream_invalid", "letta memory export does not match the approved bytes", 500)
         proposal["status"] = "committed"
         proposal["committed_revision"] = revision
         proposal["approval_id"] = approval_id
@@ -363,8 +370,12 @@ class UpstreamLettaBridge:
         )
         return _json_object(completed.stdout)
 
-    def export_tree(self, agent_id: str) -> Path:
-        out = self.exports / agent_id / secrets.token_hex(4)
+    @contextmanager
+    def export_tree(self, agent_id: str):
+        """One scratch export. It is removed after the read; git history stays in memfs."""
+        out = self.exports / agent_id / "scratch"
+        if out.exists():
+            self._drop_export(out)
         completed = self._run(
             [self._resolve_bin(), "--backend", "local", "memory", "export", "--agent", agent_id, "--out", str(out)],
             timeout=30,
@@ -372,10 +383,24 @@ class UpstreamLettaBridge:
         payload = _json_object(completed.stdout)
         exported_from = Path(str(payload.get("exportedFrom", "")))
         if exported_from.resolve() != self._memory_dir(agent_id):
+            self._drop_export(out)
             raise SsiosError("upstream_invalid", "letta export source is not the agent memory directory", 500)
         if Path(str(payload.get("exportedTo", ""))).resolve() != out.resolve():
+            self._drop_export(out)
             raise SsiosError("upstream_invalid", "letta export destination mismatch", 500)
-        return out
+        try:
+            yield out
+        finally:
+            self._drop_export(out)
+
+    def _drop_export(self, out: Path) -> None:
+        root = self.exports.resolve()
+        resolved = out.resolve()
+        if root != resolved and root not in resolved.parents:
+            raise SsiosError("upstream_rejected", "export cleanup escaped the export directory", 500)
+        if resolved == root or resolved.parent == root:
+            raise SsiosError("upstream_rejected", "export cleanup refused the agent directory", 500)
+        shutil.rmtree(resolved, ignore_errors=True)
 
     def _memory_dir(self, agent_id: str) -> Path:
         if not AGENT_ID_RE.fullmatch(agent_id):

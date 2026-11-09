@@ -105,7 +105,23 @@ PYTHONPATH=src python3 -m ssios summary \
 PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-microVM 不参与这条路径。`dev-guard` 只是进程内限制。
+microVM 不参与这条路径。`dev-guard` 只是进程内限制。`macos-vm` 和 `cloud-hypervisor` 会在创建任务时失败关闭，不会改在宿主机上跑。状态里的 `isolated` 在这两种后端上仍是 false。
+
+Letta 每次 `memory export` 会在状态目录留下一份完整副本。读完后会删掉当次的 `exports/<agent>/scratch`。已经积累的 `exports/<agent>/<四位十六进制>/` 不会自动删。先停掉 `ssios up`，再看清单：
+
+```bash
+PYTHONPATH=src python3 -m ssios gc --dry-run --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+确认清单里只有导出副本后，去掉 `--dry-run` 并输入 `yes`。这条命令不删除 `backend/memfs` 里的 Git 历史。
+
+本机页面只监听 `127.0.0.1`。API 仍使用 Bearer 令牌。浏览器先登录：
+
+```bash
+PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+打印的地址带一次性代码，大约两分钟有效。也可以打开 `http://127.0.0.1:8765/ui/login` 粘贴人类令牌。令牌不会出现在会话文件里。
 
 Linux 客户机访问不到 macOS 宿主机的 `127.0.0.1`。默认不要把 Ollama 绑到 `0.0.0.0`。如果必须从客户机调用宿主机模型，只为该客户机地址做显式转发，并在防火墙上收紧来源。详见 [docs/macos-m4.md](docs/macos-m4.md)。
 
@@ -116,6 +132,7 @@ Linux 客户机访问不到 macOS 宿主机的 `127.0.0.1`。默认不要把 Oll
 - [实现状态](docs/status.md)
 - [威胁模型](docs/security.md)
 - [Mac mini M4 24GB](docs/macos-m4.md)
+- [macOS 客户机预检](docs/macos-vm.md)
 - [Ubuntu 与 Cloud Hypervisor](docs/deployment-ubuntu.md)
 - [许可证](docs/licenses.md)
 - 样例配置：[config/ssios.example.toml](config/ssios.example.toml)

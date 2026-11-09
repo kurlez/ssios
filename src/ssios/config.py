@@ -80,7 +80,7 @@ def load_settings(
     if provider not in ("mock", "ollama"):
         raise SsiosError("config_invalid", "llm provider must be mock or ollama", 500)
     backend = str(runtime.get("backend", "dev-guard"))
-    if backend not in ("dev-guard", "cloud-hypervisor"):
+    if backend not in ("dev-guard", "cloud-hypervisor", "macos-vm"):
         raise SsiosError("config_invalid", "runtime backend is not recognized", 500)
     if chosen_profile == "production":
         backend = "cloud-hypervisor"

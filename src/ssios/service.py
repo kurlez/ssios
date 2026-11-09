@@ -19,7 +19,7 @@ from ssios.letta_upstream import UpstreamLettaBridge
 from ssios.llm import build_llm, is_template_boilerplate
 from ssios.memory_store import MemoryStore, validate_document
 from ssios.paths import fixtures_dir
-from ssios.runtime import CloudHypervisorRuntime, DevGuardRuntime
+from ssios.runtime import CloudHypervisorRuntime, DevGuardRuntime, MacOSVMRuntime, build_runtime
 from ssios.storage import ProjectStorage
 from ssios.upstream import describe_memfs
 from ssios.util import assert_private, atomic_write, read_json, secure_mkdir, sha256_bytes, write_json
@@ -207,8 +207,11 @@ class ControlPlane:
             },
             "runtime": {
                 "active_backend": self.settings.runtime_backend,
+                "isolated": False,
+                "execution_implemented": self.settings.runtime_backend == "dev-guard",
                 "dev_guard": self.dev.describe(),
                 "cloud_hypervisor": self.cloud.preflight(),
+                "macos_vm": MacOSVMRuntime(self.settings).preflight() if self.settings.runtime_backend == "macos-vm" else {"backend": "macos-vm", "active": False},
             },
             "approvals": "separate-human-token",
             "identity": self.service_identity(),
@@ -351,8 +354,8 @@ class ControlPlane:
     def create_task(self, token: str, body: dict) -> dict:
         with self.lock:
             self.require_human(token)
-            if self.settings.profile != "dev" or self.settings.runtime_backend != "dev-guard":
-                self.cloud.launch()
+            if self.settings.runtime_backend != "dev-guard":
+                build_runtime(self.settings).launch()
             project_id = str(body.get("project_id", ""))
             kind = str(body.get("kind", ""))
             revision = str(body.get("input_revision", ""))

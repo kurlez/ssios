@@ -136,6 +136,33 @@ class CommandBuilderTest(PlaneTest):
             self.assertNotIn("id", command[1:])
 
 
+class MacOSRuntimeTest(unittest.TestCase):
+    def test_macos_vm_refuses_to_run_on_the_host(self) -> None:
+        import tempfile
+
+        from ssios.errors import SsiosError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = load_settings(ROOT / "config" / "ssios.example.toml", state_dir=Path(tmp) / "state", port=0)
+            plane = ControlPlane(replace(loaded, runtime_backend="macos-vm"))
+            plane.open()
+            status = plane.status(plane.auth.read_secret("human"))
+            self.assertEqual(status["runtime"]["active_backend"], "macos-vm")
+            self.assertFalse(status["runtime"]["isolated"])
+            with self.assertRaises(SsiosError) as caught:
+                plane.create_task(
+                    plane.auth.read_secret("human"),
+                    {
+                        "project_id": "demo-alpha",
+                        "kind": "project-summary",
+                        "input_revision": "exp-1",
+                        "input_path": "notes.md",
+                    },
+                )
+            self.assertEqual(caught.exception.code, "microvm_fail_closed")
+            self.assertEqual(plane.tasks, {})
+
+
 class SourceGuardTest(unittest.TestCase):
     def test_python_sources_do_not_shell_out(self) -> None:
         banned = ("shell=True", "os.system(", "subprocess.getoutput", "subprocess.getstatusoutput")

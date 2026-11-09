@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from ssios.errors import SsiosError
+from ssios.ui import Page, handle as handle_ui
 
 
 class AppHTTPServer(ThreadingHTTPServer):
@@ -45,6 +46,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if self.command not in ("GET", "POST"):
                 raise SsiosError("method_not_allowed", "method rejected", 405)
             self._check_host()
+            parts = urlsplit(self.path)
+            if parts.path == "/ui" or parts.path.startswith("/ui/"):
+                self._ui()
+                return
             if self.headers.get("Origin"):
                 raise SsiosError("cors_denied", "browser origins are rejected", 403)
             token = self._bearer()
@@ -97,6 +102,40 @@ class AppHandler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/v1/storage/published":
             return 200, plane.read_published(token, query.get("project_id", ""), query.get("revision", "HEAD"))
         raise SsiosError("not_found", "route not found", 404)
+
+    def _ui(self) -> None:
+        body = self._form() if self.command == "POST" else {}
+        page = handle_ui(self.server.plane, self.command, self.path, self.headers, body)
+        if not isinstance(page, Page):
+            raise SsiosError("internal", "internal error", 500)
+        data = page.body.encode("utf-8")
+        self.send_response(page.status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if page.cookie:
+            self.send_header("Set-Cookie", page.cookie)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _form(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise SsiosError("bad_request", "length rejected", 400) from exc
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+        if "application/json" in self.headers.get("Content-Type", ""):
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise SsiosError("bad_request", "json object required", 400)
+            return data
+        parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        return {key: values[-1] for key, values in parsed.items()}
 
     def _bearer(self) -> str:
         header = self.headers.get("Authorization", "")

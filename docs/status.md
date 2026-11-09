@@ -18,7 +18,9 @@
 - shell 工具被拒绝，实际拉起的进程只有 Git，没有 shell
 - Ollama 适配器对环回桩的 `/api/chat` 请求，以及连不上 `127.0.0.1:9` 时的 `llm_unavailable`
 - 生产档 CLI 在创建令牌之前以失败关闭退出
-- 选择 cloud-hypervisor 后端时不执行宿主机任务函数
+- 选择 `cloud-hypervisor` 或 `macos-vm` 后端时，创建任务会失败关闭，不在宿主机执行。`macos-vm` 只检查 `krunvm` 是否在 PATH 上，本机没有启动过客户机
+- `ssios gc --dry-run` 只列出 `upstream-letta/exports/<agent>/` 下的一次性导出副本。真正删除需要再输入 `yes`，并且拒绝删除 `backend/memfs` 里的 Git 记忆
+- 本机 `/ui` 页面：登录后会话 cookie 是 HttpOnly 且 SameSite=Strict，每次 POST 校验 CSRF，批准按钮带上同一组载荷哈希、修订和 bound hash。笔记里的 `<script>` 会转义。人类令牌不写入会话文件
 - 快照策略拒绝 vault，干净任务目录也返回未实现且不复制文件
 - 令牌文件权限，以及权限被放宽后拒绝启动
 - 源码中不存在 `shell=True` 或 `os.system`
@@ -34,7 +36,8 @@ mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表�
 
 - 真实 Ollama 进程和真实 7B/8B 模型。适配器会发 `POST /api/chat`。写这份状态时，这台 Linux 机器的 `127.0.0.1:11434` 没有服务，所以没有声称跑过 `deepseek-r1:7b`
 - 可打开的 `/dev/kvm`、`cloud-hypervisor`、`virtiofsd`、客户机内核和根磁盘。缺任何一项时预检失败
-- 即使上述文件都存在，`execution_implemented` 仍是 false，因为仓库没有客户机代理协议，也没有测试过启动时延
+- 即使上述文件都存在，`execution_implemented` 仍是 false，因为仓库没有客户机代理协议，也没有测试过启动时延。这台 Linux 机器上的 `/dev/kvm` 当前用户打不开。没有测量客户机冷启动时间
+- macOS 的 Hypervisor.framework 客户机。`docs/macos-vm.md` 里的 `krunvm` 只是预检和失败关闭，不是已经跑起来的隔离
 - Letta Code 0.34.45 的本地后端。探测函数可选，默认不执行
 
 ## 计划中

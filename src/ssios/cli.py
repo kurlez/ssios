@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from dataclasses import replace
 from ssios.client import request
 from ssios.config import load_settings
 from ssios.errors import SsiosError
+from ssios.gc import collect as collect_leftovers
 from ssios.httpapi import ControlServer
 from ssios.ingest import run_ingest
 from ssios.letta_upstream import UpstreamLettaBridge
@@ -28,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -41,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--project", required=True)
         if name == "diagnose":
             command.add_argument("task_id")
+        if name == "gc":
+            command.add_argument("--dry-run", action="store_true")
+        if name == "ui-login":
+            pass
         if name == "memfs-info":
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
@@ -79,6 +85,22 @@ def main(argv: list[str] | None = None) -> int:
         return run_demo(settings)
     if args.command == "ollama-probe":
         return run_ollama_probe(settings)
+    if args.command == "ui-login":
+        from ssios.ui import issue_login_code
+
+        plane = ControlPlane(settings)
+        plane.open()
+        code = issue_login_code(plane)
+        print(f"http://{settings.host}:{settings.port}/ui/login?code={code}")
+        print("这个代码大约两分钟内有效，且只保存在本机状态目录的哈希里。")
+        return 0
+    if args.command == "vm-doctor":
+        from ssios.runtime import build_runtime
+
+        print(json.dumps(build_runtime(settings).preflight() if settings.runtime_backend != "dev-guard" else {"backend": "dev-guard", "isolated": False, "microvm": False, "detail": "dev-guard is not a microVM"}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "gc":
+        return run_gc(settings, dry_run=args.dry_run)
     if args.command == "diagnose":
         return run_diagnose(settings, args.task_id)
     if args.command == "ingest":
@@ -106,6 +128,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
             return 1
     return 2
+
+
+def run_gc(settings, *, dry_run: bool) -> int:
+    if dry_run:
+        print(json.dumps(collect_leftovers(settings.state_dir, apply=False), ensure_ascii=False, indent=2))
+        return 0
+    preview = collect_leftovers(settings.state_dir, apply=False)
+    print(json.dumps(preview, ensure_ascii=False, indent=2), flush=True)
+    if preview["count"] == 0:
+        return 0
+    print("删除这些一次性导出副本请输入 yes。git 记忆仓库不会被删除。", flush=True)
+    line = sys.stdin.readline()
+    if line.strip() != "yes":
+        print(json.dumps({"result": "pending", "detail": "未输入 yes，没有删除任何文件。"}, ensure_ascii=False))
+        return 2
+    print(json.dumps(collect_leftovers(settings.state_dir, apply=True), ensure_ascii=False, indent=2))
+    return 0
 
 
 def run_diagnose(settings, task_id: str) -> int:

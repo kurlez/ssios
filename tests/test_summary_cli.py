@@ -629,6 +629,9 @@ class LiveSummaryUpstreamTest(unittest.TestCase):
         self.assertIn("HARBOR-LOCK", topic["content"])
         self.assertNotIn("learn more about the person", topic["content"].casefold())
         self.assertFalse(topic["core"])
+        exports = state / "upstream-letta" / "exports"
+        copies = list(exports.rglob("last-summary.md")) if exports.is_dir() else []
+        self.assertEqual(copies, [], "export copies must be removed after each read")
 
 
 @unittest.skipUnless(os.environ.get("SSIOS_OLLAMA_LIVE") == "1" and os.environ.get("SSIOS_OLLAMA_BASE"), "real ollama not requested")

@@ -85,6 +85,27 @@ PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssio
 
 这条命令走开发档控制面。它不是 microVM，也没有把“模型端口通了”当成任务成功。
 
+`find .ssios-memfs -path '*topics/fixtures/last-summary.md'` 出现多份，是因为每次读取都会留下一份 Letta `memory export`。新代码读完会删掉当次的 `exports/<agent>/scratch`。已经留下的四位十六进制目录要用清理命令，先看再删。停掉 `ssios up` 之后：
+
+```bash
+PYTHONPATH=src python3 -m ssios gc --dry-run --state .ssios-memfs --config .ssios/memfs.toml
+PYTHONPATH=src python3 -m ssios gc --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+第二条会先打印清单，输入 `yes` 才删除。它不会删除 `backend/memfs` 里的 Git 历史。
+
+本机页面和客户机预检：
+
+```bash
+brew install krunvm
+krunvm --version
+PYTHONPATH=src python3 -m ssios vm-doctor --state .ssios-memfs --config .ssios/memfs.toml
+bash scripts/macos-vm-smoke.sh
+PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
+```
+
+`vm-doctor` 只报告 `krunvm` 是否存在。`isolated` 仍是 false：仓库还没有真正启动并销毁一个客户机，也没有测量冷启动时间。把配置里的 `backend` 改成 `macos-vm` 后，任务会失败关闭，不会改在 Mac 宿主机上跑。页面地址由 `ui-login` 打印，只在 `127.0.0.1` 上有效。也可以打开 `http://127.0.0.1:8765/ui/login`，把 `.ssios-memfs/secrets/human.token` 粘贴一次。不要把令牌发到仓库或聊天里。
+
 ## 本环境没有覆盖的内容
 
 - 没有 macOS 版本号，因此没有验证某个虚拟化产品的兼容矩阵
