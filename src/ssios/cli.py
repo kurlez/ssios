@@ -40,12 +40,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "memfs-upstream-smoke":
         return run_upstream_smoke(Path(args.state), args.config, args.letta_bin)
-    settings = load_settings(
-        Path(args.config),
-        state_dir=Path(args.state),
-        profile=getattr(args, "profile", None),
-        port=getattr(args, "port", None),
-    )
+    try:
+        settings = load_settings(
+            Path(args.config),
+            state_dir=Path(args.state),
+            profile=getattr(args, "profile", None),
+            port=getattr(args, "port", None),
+        )
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        return 1
     if args.command == "init":
         ControlPlane(settings).open()
         print(f"状态目录已就绪：{settings.state_dir}")
@@ -59,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("health", "status"):
         return _get(settings, "/v1/health" if args.command == "health" else "/v1/status")
     if args.command == "demo":
+        if getattr(args, "port", None) is None:
+            settings = replace(settings, port=0)
         return run_demo(settings)
     return 2
 
@@ -68,9 +74,13 @@ def _up(settings) -> int:
         report = CloudHypervisorRuntime(settings).preflight()
         print(json.dumps({"error": "microvm_fail_closed", "preflight": report}, indent=2, ensure_ascii=False))
         return 2
-    plane = ControlPlane(settings)
-    plane.open()
-    server = ControlServer(plane)
+    try:
+        plane = ControlPlane(settings)
+        plane.open()
+        server = ControlServer(plane)
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        return 1
     server.start()
     print(f"SSIOS 开发配置已在 http://{settings.host}:{plane.bound_port} 监听")
     print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：{settings.memory_mode}")
@@ -144,7 +154,10 @@ def _get(settings, path: str) -> int:
 def run_demo(settings) -> int:
     plane = ControlPlane(settings)
     plane.open()
-    server = ControlServer(plane)
+    try:
+        server = ControlServer(plane)
+    except SsiosError as exc:
+        raise RuntimeError(f"{exc.code}: {exc.detail}") from exc
     server.start()
     base = f"http://127.0.0.1:{plane.bound_port}"
     human = plane.auth.read_secret("human")
@@ -152,43 +165,25 @@ def run_demo(settings) -> int:
         status, health, _headers = request(base, "GET", "/v1/health", token=human)
         if status != 200 or health.get("llm_provider") != "mock":
             raise RuntimeError("health check failed")
-        status, created, _headers = request(
-            base,
-            "POST",
-            "/v1/tasks",
-            token=human,
-            body={
-                "project_id": "demo-alpha",
-                "kind": "project-summary",
-                "input_revision": "exp-1",
-                "input_path": "notes.md",
-            },
-        )
-        if status != 202:
-            raise RuntimeError(f"task create failed: {created}")
-        task = _poll(base, human, created["id"], {"awaiting_approval", "failed", "timeout", "cancelled"})
-        if task["status"] != "awaiting_approval":
-            raise RuntimeError(f"task did not reach approval: {task}")
-        for approval_id in task["approval_ids"]:
-            code, approval, _headers = request(base, "GET", f"/v1/approvals/{approval_id}", token=human)
-            if code != 200:
-                raise RuntimeError(f"preview failed: {approval}")
-            decision, result, _headers = request(
+        task = _existing_demo_task(plane)
+        if task is None or task["status"] not in ("awaiting_approval", "committed"):
+            status, created, _headers = request(
                 base,
                 "POST",
-                f"/v1/approvals/{approval_id}/decide",
+                "/v1/tasks",
                 token=human,
                 body={
-                    "decision": "approve",
-                    "action": approval["action"],
-                    "payload_sha256": approval["payload_sha256"],
-                    "expected_revision": approval["expected_revision"],
-                    "bound_hash": approval["bound_hash"],
+                    "project_id": "demo-alpha",
+                    "kind": "project-summary",
+                    "input_revision": "exp-1",
+                    "input_path": "notes.md",
                 },
             )
-            if decision != 200:
-                raise RuntimeError(f"approval failed: {result}")
-        task = _poll(base, human, created["id"], {"committed", "failed", "rejected"})
+            if status != 202:
+                raise RuntimeError(f"task create failed: {created}")
+            task = _poll(base, human, created["id"], {"awaiting_approval", "failed", "timeout", "cancelled"})
+        if task["status"] == "awaiting_approval":
+            task = _approve_pending(base, human, task)
         if task["status"] != "committed":
             raise RuntimeError(f"task did not commit: {task}")
         server.stop()
@@ -231,6 +226,46 @@ def run_demo(settings) -> int:
         return 0
     finally:
         server.stop()
+
+
+def _existing_demo_task(plane) -> dict | None:
+    matches = [
+        task
+        for task in plane.tasks.values()
+        if task.get("project_id") == "demo-alpha" and task.get("kind") == "project-summary"
+    ]
+    for status in ("awaiting_approval", "committed"):
+        found = [task for task in matches if task.get("status") == status]
+        if found:
+            return found[-1]
+    return None
+
+
+def _approve_pending(base: str, human: str, task: dict) -> dict:
+    for approval_id in task["approval_ids"]:
+        code, approval, _headers = request(base, "GET", f"/v1/approvals/{approval_id}", token=human)
+        if code != 200:
+            raise RuntimeError(f"preview failed: {approval}")
+        if approval.get("status") == "consumed" and approval.get("decision") == "approve":
+            continue
+        if approval.get("status") != "pending":
+            raise RuntimeError(f"approval is not pending: {approval.get('status')}")
+        decision, result, _headers = request(
+            base,
+            "POST",
+            f"/v1/approvals/{approval_id}/decide",
+            token=human,
+            body={
+                "decision": "approve",
+                "action": approval["action"],
+                "payload_sha256": approval["payload_sha256"],
+                "expected_revision": approval["expected_revision"],
+                "bound_hash": approval["bound_hash"],
+            },
+        )
+        if decision != 200:
+            raise RuntimeError(f"approval failed: {result}")
+    return _poll(base, human, task["id"], {"committed", "failed", "rejected"})
 
 
 def _poll(base: str, token: str, task_id: str, terminal: set[str], timeout: float = 10) -> dict:

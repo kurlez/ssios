@@ -146,7 +146,14 @@ class ControlServer:
         host = plane.settings.host
         if host == "localhost":
             host = "127.0.0.1"
-        self.httpd = AppHTTPServer((host, plane.settings.port), plane)
+        try:
+            self.httpd = AppHTTPServer((host, plane.settings.port), plane)
+        except OSError as exc:
+            raise SsiosError(
+                "port_unavailable",
+                f"cannot bind {host}:{plane.settings.port} ({exc.errno})",
+                500,
+            ) from exc
         plane.bound_port = self.httpd.server_address[1]
         self._thread = None
         self._stopped = False

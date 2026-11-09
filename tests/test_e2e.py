@@ -12,6 +12,8 @@ from support import ROOT, PlaneTest, request, wait_task
 
 from ssios.cli import run_demo
 from ssios.config import load_settings
+from ssios.errors import SsiosError
+from ssios.httpapi import ControlServer
 from ssios.service import ControlPlane
 
 
@@ -132,17 +134,102 @@ class DemoApiTest(PlaneTest):
 
 
 class DemoCommandTest(unittest.TestCase):
+    def _settings(self, tmp: str):
+        return replace(
+            load_settings(ROOT / "config" / "ssios.example.toml", state_dir=Path(tmp) / "state", port=0),
+            llm_provider="mock",
+        )
+
     def test_run_demo_command(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            settings = load_settings(
-                ROOT / "config" / "ssios.example.toml",
-                state_dir=Path(tmp) / "state",
-                port=0,
-            )
-            settings = replace(settings, llm_provider="mock")
+            self.assertEqual(run_demo(self._settings(tmp)), 0)
+
+    def test_demo_rerun_keeps_existing_state(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(tmp)
             self.assertEqual(run_demo(settings), 0)
+            memory = settings.state_dir / "memory" / "demo-alpha" / "repo"
+            before = memory.stat().st_mtime
+            self.assertEqual(run_demo(settings), 0)
+            self.assertTrue(memory.exists())
+            self.assertGreaterEqual(memory.stat().st_mtime, before)
+
+    def test_demo_resumes_after_partial_approval(self) -> None:
+        import tempfile
+
+        from ssios.client import request
+        from ssios.httpapi import ControlServer
+        from ssios.service import ControlPlane
+        from support import wait_task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(tmp)
+            plane = ControlPlane(settings)
+            plane.open()
+            server = ControlServer(plane)
+            server.start()
+            base = f"http://127.0.0.1:{plane.bound_port}"
+            human = plane.auth.read_secret("human")
+            code, created, _headers = request(
+                base,
+                "POST",
+                "/v1/tasks",
+                token=human,
+                body={
+                    "project_id": "demo-alpha",
+                    "kind": "project-summary",
+                    "input_revision": "exp-1",
+                    "input_path": "notes.md",
+                },
+            )
+            self.assertEqual(code, 202, created)
+            task = wait_task(base, human, created["id"], {"awaiting_approval", "failed"})
+            self.assertEqual(task["status"], "awaiting_approval", task)
+            storage = next(item for item in task["approvals"] if item["action"] == "storage.publish")
+            code, result, _headers = request(
+                base,
+                "POST",
+                f"/v1/approvals/{storage['id']}/decide",
+                token=human,
+                body={
+                    "decision": "approve",
+                    "action": storage["action"],
+                    "payload_sha256": storage["payload_sha256"],
+                    "expected_revision": storage["expected_revision"],
+                    "bound_hash": storage["bound_hash"],
+                },
+            )
+            self.assertEqual(code, 200, result)
+            server.stop()
+            for thread in plane._threads.values():
+                thread.join(timeout=3)
+            self.assertEqual(run_demo(settings), 0)
+
+
+class PortConflictTest(unittest.TestCase):
+    def test_busy_port_names_the_failure(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = replace(
+                load_settings(ROOT / "config" / "ssios.example.toml", state_dir=Path(tmp) / "state", port=0),
+                llm_provider="mock",
+            )
+            plane = ControlPlane(settings)
+            plane.open()
+            server = ControlServer(plane)
+            server.start()
+            self.addCleanup(server.stop)
+            second = ControlPlane(replace(settings, port=plane.bound_port))
+            second.open()
+            with self.assertRaises(SsiosError) as caught:
+                ControlServer(second)
+            self.assertEqual(caught.exception.code, "port_unavailable")
+            self.assertIn(str(plane.bound_port), caught.exception.detail)
 
 
 if __name__ == "__main__":

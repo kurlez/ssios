@@ -22,6 +22,7 @@
 - 快照策略拒绝 vault，干净任务目录也返回未实现且不复制文件
 - 令牌文件权限，以及权限被放宽后拒绝启动
 - 源码中不存在 `shell=True` 或 `os.system`
+- 内部 Git 仓库不继承外部签名、钩子、身份、属性或 `*.md` 排除规则；重复提交已存在的批准内容不会再报空的 `git command failed`。这是 Linux 上的回归，不是 Mac 实测
 - 钉住的 Letta Code 0.34.45：`agents create --backend local --personality blank` 不需要账号或模型，会生成 `memfs/<agent-id>/memory` 的 Git 仓库；`memory tokens` 把根目录 Markdown 标为核心；批准后的 git 提交能被 `memory export` 读回，且新主题不进入核心列表。该测试由 `SSIOS_LETTA_UPSTREAM=1` 打开，默认 CI 不安装这个包
 
 mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表明对方不是真正的 Ollama 守护进程。

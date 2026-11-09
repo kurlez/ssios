@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 from ssios.errors import SsiosError
+from ssios.gitio import GitRunner
 from ssios.memory_store import MemoryStore, validate_document
 from ssios.util import canonical_json, sha256_bytes, validate_rel_parts, write_json, write_nofollow
 
@@ -61,6 +62,7 @@ class UpstreamLettaBridge:
         self.exports = self.root / "exports"
         self.map_path = self.root / "projects.json"
         self.letta_bin = letta_bin
+        self.git_runner = GitRunner(self.hooks_dir, self.empty_gitconfig)
         self._projects: dict[str, str] = {}
 
     def ensure_layout(self) -> None:
@@ -313,13 +315,11 @@ class UpstreamLettaBridge:
                 validate_document(item["path"], item["content"])
                 write_nofollow(memory, item["path"], item["content"].encode("utf-8"))
                 paths.append(item["path"])
-            self._git(memory, ["add", "--", *paths])
-            self._git(memory, ["commit", "-m", f"ssios: approved upstream memory {proposal_id}", "--", *paths])
+            self.git_runner.commit_paths(memory, paths, f"ssios: approved upstream memory {proposal_id}")
         elif proposal["kind"] == "forget":
             rel = proposal["path"]
             validate_rel_parts(rel)
-            self._git(memory, ["rm", "-f", "--", rel])
-            self._git(memory, ["commit", "-m", f"ssios: forget upstream memory {proposal_id}", "--", rel])
+            self.git_runner.remove_path(memory, rel, f"ssios: forget upstream memory {proposal_id}")
         else:
             raise SsiosError("memory_invalid", "unknown proposal kind", 400)
         status = self.status(agent_id)
@@ -421,35 +421,7 @@ class UpstreamLettaBridge:
             or not AGENT_ID_RE.fullmatch(relative.parts[1])
         ):
             raise SsiosError("upstream_rejected", "git is confined to the Letta memory directory", 403)
-        cmd = [
-            "git",
-            "--no-pager",
-            "-C",
-            str(allowed),
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "user.name=SSIOS",
-            "-c",
-            "user.email=ssios-local@example.invalid",
-            "-c",
-            f"core.hooksPath={self.hooks_dir}",
-            "-c",
-            "core.symlinks=false",
-            *args,
-        ]
-        completed = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            shell=False,
-            cwd=str(self.work_dir),
-            env=self._env(),
-        )
-        if check and completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="replace").strip()[:240]
-            raise SsiosError("git_failed", detail or "git command failed", 500)
-        return completed
+        return self.git_runner.run(allowed, args, check=check)
 
     def _env(self) -> dict[str, str]:
         return {

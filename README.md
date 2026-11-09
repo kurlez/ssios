@@ -24,10 +24,16 @@ Cloud Hypervisor 代码只生成启动参数并做预检。它没有启动过客
 
 ```bash
 make test      # 回归测试，不需要密钥
-make demo      # 启动 mock 开发档，跑完合成项目摘要后退出
-make up        # 前台启动开发档，Ctrl-C 停止
-make preflight # 打印 Cloud Hypervisor 预检，预期失败关闭
+make demo      # mock 演示。自动选一个空闲端口，可与 make up 同时存在
+make up        # 前台启动开发档，默认 127.0.0.1:8765，Ctrl-C 停止
+make preflight # 打印 Cloud Hypervisor 预检。这不是启动虚拟机
 make memfs-info
+```
+
+`make demo` 使用状态目录 `.ssios-demo`，不会删除已有的 `.ssios` 或 `.ssios-demo`。批准如果中途失败，直接再执行一次 `make demo`：它会接着处理仍在等待的审批，而不是另起一份会冲突的任务。若那份状态不想再动，可以换一个新目录，旧目录保持原样：
+
+```bash
+PYTHONPATH=src python3 -m ssios demo --state .ssios-demo-retry --config config/ssios.example.toml
 ```
 
 上游 MemFS 冒烟（需要已安装钉住版本，且不会启动代理对话）：
