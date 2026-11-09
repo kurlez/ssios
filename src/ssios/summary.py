@@ -24,11 +24,11 @@ TOPIC_PATH = "topics/fixtures/last-summary.md"
 CONFIRM = "确认：输入 yes 批准，输入 no 拒绝。"
 
 
-def run_summary(settings) -> int:
+def run_summary(settings, *, project_id: str = SUMMARY_PROJECT, topic: str = "") -> int:
     token = _human_token(settings)
     base = _base_url(settings)
     _require_identity(settings, base, token)
-    created = _create_task(base, token)
+    created = _create_task(base, token, project_id, topic or project_id)
     task = _poll(
         base,
         token,
@@ -163,14 +163,15 @@ def _same(key: str, expected, actual) -> bool:
     return expected == actual
 
 
-def _create_task(base: str, token: str) -> dict:
+def _create_task(base: str, token: str, project_id: str, topic: str) -> dict:
     code, payload, _headers = _call(
         base,
         "POST",
         "/v1/tasks",
         token=token,
         body={
-            "project_id": SUMMARY_PROJECT,
+            "project_id": project_id,
+            "topic": topic,
             "kind": "project-summary",
             "input_revision": SUMMARY_REVISION,
             "input_path": SUMMARY_INPUT,
@@ -268,7 +269,7 @@ def _decide(base: str, token: str, approval: dict, decision: str, timeout: float
 
 
 def _verify(base: str, token: str, task: dict) -> int:
-    project = urllib.parse.quote(SUMMARY_PROJECT)
+    project = urllib.parse.quote(str(task.get("project_id") or SUMMARY_PROJECT))
     code, published, _headers = _call(
         base,
         "GET",
@@ -315,7 +316,7 @@ def _verify(base: str, token: str, task: dict) -> int:
         {
             "result": "committed",
             "task_id": task["id"],
-            "project_id": SUMMARY_PROJECT,
+            "project_id": task.get("project_id") or SUMMARY_PROJECT,
             "published_revision": published.get("revision"),
             "memory_revision": topic.get("revision"),
             "memory_trust": topic.get("trust"),
@@ -357,6 +358,11 @@ def _failure_detail(task: dict) -> str:
         return (
             "模型输出被截断，没有进入批准。可以在 [llm] 里加大 max_output_tokens 后，用同一 --state 和 --config 重启服务，再运行 ssios summary。"
             "失败记录会保留，重试会新建任务。"
+        )
+    if code == "no_content":
+        return (
+            "没有可摘要的笔记。默认的 human.md 或 persona.md 模板不会被当成内容。"
+            "先用 ssios ingest 导入 md 或 txt，批准后再运行 ssios summary。没有删除已有状态。"
         )
     if code == "model_output_low_quality":
         return (

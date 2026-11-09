@@ -132,6 +132,13 @@ class UpstreamLettaBridge:
         agent_id = self.ensure_agent(project_id)
         return self._git(self._memory_dir(agent_id), ["rev-parse", "HEAD"]).stdout.decode().strip()
 
+    def list_markdown(self, project_id: str) -> list[str]:
+        agent_id = self.ensure_agent(project_id)
+        completed = self._git(self._memory_dir(agent_id), ["ls-tree", "-r", "--name-only", "HEAD"], check=False)
+        if completed.returncode != 0:
+            return []
+        return [line.decode("utf-8") for line in completed.stdout.splitlines() if line.endswith(b".md")]
+
     def core(self, project_id: str, *, budget: int) -> dict:
         agent_id = self.ensure_agent(project_id)
         tokens = self.tokens(agent_id)

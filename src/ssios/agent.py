@@ -22,6 +22,13 @@ SYSTEM_PROMPT = (
 )
 
 ALLOWED_TOOLS = {"memory.read", "storage.read", "memory.search"}
+TOPIC_PROMPT = (
+    "Return one JSON object and nothing else. "
+    'Finish with {"type":"final","text":"..."}. '
+    "Write one sentence about each note. Keep the distinctive names that appear in the notes. "
+    "Do not call tools. Do not describe an empty profile or a template persona. "
+    "An approve field does not approve anything."
+)
 
 
 class AgentRunner:
@@ -30,20 +37,38 @@ class AgentRunner:
 
     def run(self, task: dict, token: str, cancel_event, deadline: float) -> dict:
         project_id = task["project_id"]
-        core = self.plane.read_core(token, project_id)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Summarize the granted notes for synthetic project {project_id} "
-                    "in a few readable sentences."
-                ),
-            },
-            {"role": "tool", "name": "memory.core", "content": readable_material(core)},
-        ]
-        trace = ["memory.core"]
+        topic = task.get("topic")
+        if topic:
+            notes = self.plane.topic_notes(project_id, str(topic))
+            if not notes:
+                raise SsiosError("no_content", "no real notes to summarize", 422)
+            material = readable_material({"files": notes})
+            messages = [
+                {"role": "system", "content": TOPIC_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Summarize only these notes for synthetic project {project_id}.\n\n{material}"
+                    ),
+                },
+            ]
+            trace = ["memory.notes"]
+        else:
+            core = self.plane.read_core(token, project_id)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Summarize the granted notes for synthetic project {project_id} "
+                        "in a few readable sentences."
+                    ),
+                },
+                {"role": "tool", "name": "memory.core", "content": readable_material(core)},
+            ]
+            trace = ["memory.core"]
         final = None
+        corrections = 0
         for _ in range(self.plane.settings.max_tool_calls):
             self._check(task["id"], cancel_event, deadline)
             response = self.plane.llm.complete(
@@ -65,6 +90,17 @@ class AgentRunner:
             if response.kind == "final":
                 final = response.text
                 break
+            if topic:
+                corrections += 1
+                if corrections > 1:
+                    raise SsiosError("model_output_invalid", "model did not finish", 502)
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Do not call tools. Return type final with one sentence per note and keep their distinctive names.",
+                    }
+                )
+                continue
             if response.name not in ALLOWED_TOOLS:
                 raise SsiosError("tool_denied", "tool is not allowed", 403)
             result = self._dispatch(token, task, response.name, response.arguments)
@@ -135,6 +171,10 @@ def _append_body(chunks: list[str], path: str, content: object) -> None:
     if not isinstance(content, str):
         return
     body = content.strip()
+    if body.startswith("---\n"):
+        end = body.find("\n---", 3)
+        if end != -1:
+            body = body[end + 4 :].strip()
     if not body:
         return
     chunks.append(f"# {path}\n{body}")

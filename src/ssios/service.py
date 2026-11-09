@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 import time
@@ -15,7 +16,7 @@ from ssios.auth import AuthStore, Grant, Principal
 from ssios.errors import FlowInterrupt, SsiosError
 from ssios.gitio import GitRunner
 from ssios.letta_upstream import UpstreamLettaBridge
-from ssios.llm import build_llm
+from ssios.llm import build_llm, is_template_boilerplate
 from ssios.memory_store import MemoryStore, validate_document
 from ssios.paths import fixtures_dir
 from ssios.runtime import CloudHypervisorRuntime, DevGuardRuntime
@@ -24,6 +25,16 @@ from ssios.upstream import describe_memfs
 from ssios.util import assert_private, atomic_write, read_json, secure_mkdir, sha256_bytes, write_json
 
 SEEDED_PROJECTS = ("demo-alpha", "demo-beta", "local-summary")
+_TOPIC = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+
+def _optional_topic(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    topic = str(value)
+    if not _TOPIC.fullmatch(topic):
+        raise SsiosError("project_invalid", "topic rejected", 400)
+    return topic
 
 TASK_FIELDS = (
     "id",
@@ -39,6 +50,7 @@ TASK_FIELDS = (
     "published_revision",
     "memory_revision",
     "output_sha256",
+    "topic",
 )
 
 
@@ -250,6 +262,35 @@ class ControlPlane:
             raise SsiosError("forbidden", "operation is not granted", 403)
         return principal
 
+    def topic_notes(self, project_id: str, topic: str) -> list[dict]:
+        """Committed note bodies under topics/<topic>, without template boilerplate."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", topic):
+            raise SsiosError("project_invalid", "topic rejected", 400)
+        prefix = f"topics/{topic}/"
+        paths = self.upstream.list_markdown(project_id) if self._uses_upstream() else self.memory.list_markdown(project_id)
+        notes = []
+        for path in paths:
+            if not path.startswith(prefix) or not path.endswith(".md"):
+                continue
+            name = path.rsplit("/", 1)[-1]
+            if name in {"MEMORY.md", "last-summary.md"}:
+                continue
+            try:
+                doc = (
+                    self.upstream.read_committed(project_id, path)
+                    if self._uses_upstream()
+                    else self.memory.read_file(project_id, path, include_untrusted=True)
+                )
+            except SsiosError:
+                continue
+            content = str(doc.get("content") or "")
+            if is_template_boilerplate(path, content):
+                continue
+            if len(content.strip()) < 40:
+                continue
+            notes.append({"path": path, "content": content})
+        return notes
+
     def read_core(self, token: str, project_id: str) -> dict:
         with self.lock:
             principal = self._grant(token, project_id, "allow_memory_read")
@@ -333,6 +374,7 @@ class ControlPlane:
                 "published_revision": None,
                 "memory_revision": None,
                 "output_sha256": None,
+                "topic": _optional_topic(body.get("topic")),
             }
             self.tasks[task_id] = task
             grant = Grant(

@@ -24,7 +24,7 @@
 - 源码中不存在 `shell=True` 或 `os.system`
 - 内部 Git 仓库不继承外部签名、钩子、身份、属性或 `*.md` 排除规则；重复提交已存在的批准内容不会再报空的 `git command failed`。这是 Linux 上的回归，不是 Mac 实测
 - 钉住的 Letta Code 0.34.45：`agents create --backend local --personality blank` 不需要账号或模型，会生成 `memfs/<agent-id>/memory` 的 Git 仓库；`memory tokens` 把根目录 Markdown 标为核心；批准后的 git 提交能被 `memory export` 读回，且新主题不进入核心列表。该测试由 `SSIOS_LETTA_UPSTREAM=1` 打开，默认 CI 不安装这个包
-- `ssios summary` 用相对 `--state` 连接已经运行的服务。子进程测试覆盖 `yes`、`no`、EOF，以及一次无效输出后的重试会新建任务并保留失败记录。模型 `<think>` 和 `message.thinking` 里的 `approve` 不会被解析成命令。Ollama 适配器会发送 JSON schema，并在服务拒绝 schema 时只再试一次 `format: "json"`。这些交互用的是环回 HTTP 桩。另外在 Linux 上用官方 Ollama 0.40.15 跑过公开的 `qwen2.5:0.5b`（无思考能力）和 `qwen3:0.6b`（`think: false`，答案不再被推理占满）。截断和复述内部字段会在批准前失败。没有在这里跑过 Mac 上的 `deepseek-r1:7b`。设置 `SSIOS_LETTA_UPSTREAM=1` 时，同一条命令会把主题提交进钉住的 Letta 0.34.45 本地 MemFS，且该主题不进入核心
+- `ssios summary` 用相对 `--state` 连接已经运行的服务。子进程测试覆盖 `yes`、`no`、EOF，以及一次无效输出后的重试会新建任务并保留失败记录。模型 `<think>` 和 `message.thinking` 里的 `approve` 不会被解析成命令。Ollama 适配器会发送 JSON schema，并在服务拒绝 schema 时只再试一次 `format: "json"`。这些交互用的是环回 HTTP 桩。`ssios ingest` 把 md/txt 笔记经审批写入 `topics/<project>/`。`summary --topic` 只摘要这些正文；空模板不会被当成内容。Linux 上用官方 Ollama 0.40.15 对 `examples/notes` 跑过 `qwen2.5:0.5b` 和 `qwen3:0.6b`（`think: false`），摘要提到了笔记里的要点，而不是 Letta 的空模板。没有在这里跑过 Mac 上的 `deepseek-r1:7b`。设置 `SSIOS_LETTA_UPSTREAM=1` 时，同一条命令会把主题提交进钉住的 Letta 0.34.45 本地 MemFS，且该主题不进入核心
 
 mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表明对方不是真正的 Ollama 守护进程。
 

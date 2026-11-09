@@ -83,11 +83,17 @@ PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios --config .ssios/
 PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-另一个终端：
+另一个终端。先把合成笔记送进记忆，看完差异后输入 `yes`。这一步不会绕过审批：
 
 ```bash
-PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
+PYTHONPATH=src python3 -m ssios ingest examples/notes \
+  --project local-summary --state .ssios-memfs --config .ssios/memfs.toml
+PYTHONPATH=src python3 -m ssios summary \
+  --project local-summary --topic local-summary \
+  --state .ssios-memfs --config .ssios/memfs.toml
 ```
+
+`summary` 只摘要 `topics/<topic>/` 里的笔记正文。`human.md` 和 `persona.md` 里的默认模板不算内容。没有笔记时返回 `no_content`，不会把模板复述进记忆。
 
 命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve`、`message.thinking` 和 `<think>` 都不会被当成批准。Ollama 请求带有 JSON schema；答案只从 `message.content` 读取。
 

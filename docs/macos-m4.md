@@ -49,8 +49,14 @@ PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .
 另一个终端：
 
 ```bash
-PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
+PYTHONPATH=src python3 -m ssios ingest examples/notes \
+  --project local-summary --state .ssios-memfs --config .ssios/memfs.toml
+PYTHONPATH=src python3 -m ssios summary \
+  --project local-summary --topic local-summary \
+  --state .ssios-memfs --config .ssios/memfs.toml
 ```
+
+`ingest` 只接受 md 和 txt，拒绝符号链接和看起来像密钥的文本。输入 `yes` 之后才写入记忆。`summary` 只读 `topics/local-summary/` 里的笔记，不把 Letta 的空模板当成正文。批准后的新摘要仍写到 `topics/fixtures/last-summary.md`，用新的 git 提交覆盖，不删除旧历史。
 
 它只对合成项目 `local-summary` 提出摘要。看完拟发布的文本和记忆差异后，输入 `yes` 批准，或输入 `no` 拒绝。不输入就结束时，审批保持待处理。DeepSeek 的 `message.thinking`、`<think>` 内容和 JSON 里的 `approve` 都不会变成批准。
 

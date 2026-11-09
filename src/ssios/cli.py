@@ -13,6 +13,7 @@ from ssios.client import request
 from ssios.config import load_settings
 from ssios.errors import SsiosError
 from ssios.httpapi import ControlServer
+from ssios.ingest import run_ingest
 from ssios.letta_upstream import UpstreamLettaBridge
 from ssios.llm import probe_ollama
 from ssios.runtime import CloudHypervisorRuntime
@@ -27,11 +28,17 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
             command.add_argument("--port", type=int)
+        if name == "summary":
+            command.add_argument("--project", default="local-summary")
+            command.add_argument("--topic", default="")
+        if name == "ingest":
+            command.add_argument("source")
+            command.add_argument("--project", required=True)
         if name == "memfs-info":
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
@@ -70,9 +77,21 @@ def main(argv: list[str] | None = None) -> int:
         return run_demo(settings)
     if args.command == "ollama-probe":
         return run_ollama_probe(settings)
+    if args.command == "ingest":
+        try:
+            return run_ingest(settings, Path(args.source), args.project)
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        except KeyboardInterrupt:
+            print(json.dumps({"error": "interrupted", "detail": "已中断，没有写入记忆。"}, ensure_ascii=False), flush=True)
+            return 130
+        except Exception as exc:
+            print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
+            return 1
     if args.command == "summary":
         try:
-            return run_summary(settings)
+            return run_summary(settings, project_id=args.project, topic=args.topic)
         except SsiosError as exc:
             print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
             return 1

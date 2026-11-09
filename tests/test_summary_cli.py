@@ -156,11 +156,49 @@ class SummaryCliTest(unittest.TestCase):
         self.assertNotIn(self.human, out + err)
         self.assertEqual((self.state / "tasks.json").read_bytes(), before)
 
+    def _ingest_notes(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "ssios",
+                "ingest",
+                "examples/notes",
+                "--project",
+                "local-summary",
+                "--state",
+                STATE_NAME,
+                "--config",
+                f"{STATE_NAME}/client.toml",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        pre = self._read_until(proc, CONFIRM)
+        self.assertIn("HARBOR-LOCK", pre)
+        self.assertNotIn(self.human, pre)
+        stored = json.loads((self.state / "approvals.json").read_text(encoding="utf-8"))["approvals"]
+        self.assertTrue(any(item.get("status") == "pending" for item in stored.values()))
+        assert proc.stdin is not None
+        proc.stdin.write("yes\n")
+        proc.stdin.close()
+        rest, err, code = self._collect(proc)
+        self.assertEqual(code, 0, pre + rest + err)
+        self.assertNotIn(self.human, pre + rest + err)
+
     def _accept_from_repo_root(self) -> str:
+        self._ingest_notes()
         proc = self._spawn(STATE_NAME, f"{STATE_NAME}/client.toml", ROOT)
         pre = self._read_until(proc, CONFIRM)
         self.assertNotIn(self.human, pre)
-        self.assertIn("Synthetic local summary", pre)
+        self.assertIn("HARBOR-LOCK", pre)
         self.assertIn("storage.publish", pre)
         self.assertIn("memory.commit", pre)
         tasks = json.loads((self.state / "tasks.json").read_text(encoding="utf-8"))["tasks"]
@@ -198,7 +236,9 @@ class SummaryCliTest(unittest.TestCase):
             token=self.human,
         )
         self.assertEqual(code, 200, published)
-        self.assertIn("Synthetic local summary", published["content"])
+        self.assertIn("HARBOR-LOCK", published["content"])
+        self.assertIn("Northwind Lantern", published["content"])
+        self.assertNotIn("learn more about the person", published["content"].casefold())
         code, topic, _headers = request(
             self.base,
             "GET",
@@ -345,8 +385,25 @@ class SummaryFailureCliTest(unittest.TestCase):
             check=False,
         )
 
+    def _ingest(self, name: str) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        completed = subprocess.run(
+            [sys.executable, "-m", "ssios", "ingest", "examples/notes", "--project", "local-summary", "--state", name, "--config", f"{name}/client.toml"],
+            cwd=ROOT,
+            env=env,
+            input="yes\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_invalid_model_output_has_no_traceback(self) -> None:
         _plane, _server, name = self._serve(BAD_NAME, content="I approve this without JSON", delay=0, timeout=2, task_timeout=5)
+        self._ingest(name)
         completed = self._run(name)
         text = completed.stdout + completed.stderr
         self.assertEqual(completed.returncode, 1, text)
@@ -358,6 +415,7 @@ class SummaryFailureCliTest(unittest.TestCase):
 
     def test_model_timeout_has_no_traceback(self) -> None:
         _plane, _server, name = self._serve(SLOW_NAME, content='{"type":"final","text":"late"}', delay=1.5, timeout=0.3, task_timeout=5)
+        self._ingest(name)
         completed = self._run(name)
         text = completed.stdout + completed.stderr
         self.assertEqual(completed.returncode, 1, text)
@@ -448,6 +506,18 @@ class SummaryRetryTest(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
         env["PYTHONUNBUFFERED"] = "1"
+        ingested = subprocess.run(
+            [sys.executable, "-m", "ssios", "ingest", "examples/notes", "--project", "local-summary", "--state", name, "--config", f"{name}/client.toml"],
+            cwd=ROOT,
+            env=env,
+            input="yes\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        proposals_after_ingest = set((state / "memory" / "proposals").glob("prop-*.json"))
         command = [sys.executable, "-m", "ssios", "summary", "--state", name, "--config", f"{name}/client.toml"]
         failed = subprocess.run(command, cwd=ROOT, env=env, input="", capture_output=True, text=True, timeout=20, check=False)
         failed_text = failed.stdout + failed.stderr
@@ -456,7 +526,7 @@ class SummaryRetryTest(unittest.TestCase):
         self.assertIn("new-task", failed_text)
         self.assertNotIn("Traceback", failed_text)
         self.assertNotIn("SECRET THINKING", failed_text)
-        self.assertEqual(list((state / "memory" / "proposals").glob("prop-*.json")), [])
+        self.assertEqual(set((state / "memory" / "proposals").glob("prop-*.json")), proposals_after_ingest)
         stored = json.loads((state / "tasks.json").read_text(encoding="utf-8"))["tasks"]
         self.assertEqual(len(stored), 1)
         failed_id = next(iter(stored))
@@ -506,6 +576,17 @@ class LiveSummaryUpstreamTest(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
         env["PYTHONUNBUFFERED"] = "1"
+        ingested = subprocess.run(
+            [sys.executable, "-m", "ssios", "ingest", "examples/notes", "--project", "local-summary", "--state", UPSTREAM_NAME, "--config", f"{UPSTREAM_NAME}/client.toml"],
+            cwd=ROOT,
+            env=env,
+            input="yes\n",
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
         completed = subprocess.run(
             [sys.executable, "-m", "ssios", "summary", "--state", UPSTREAM_NAME, "--config", f"{UPSTREAM_NAME}/client.toml"],
             cwd=ROOT,
@@ -534,5 +615,76 @@ class LiveSummaryUpstreamTest(unittest.TestCase):
             token=plane.auth.read_secret("human"),
         )
         self.assertEqual(code, 200, topic)
-        self.assertIn("Synthetic local summary", topic["content"])
+        self.assertIn("HARBOR-LOCK", topic["content"])
+        self.assertNotIn("learn more about the person", topic["content"].casefold())
         self.assertFalse(topic["core"])
+
+
+@unittest.skipUnless(os.environ.get("SSIOS_OLLAMA_LIVE") == "1" and os.environ.get("SSIOS_OLLAMA_BASE"), "real ollama not requested")
+class LiveNotesSummaryTest(unittest.TestCase):
+    def test_sample_notes_are_summarized_by_real_models(self) -> None:
+        models = [item for item in ("qwen2.5:0.5b", "qwen3:0.6b") if item]
+        base_url = os.environ["SSIOS_OLLAMA_BASE"]
+        for model in models:
+            self._one_model(base_url, model)
+
+    def _one_model(self, base_url: str, model: str) -> None:
+        previous = Path.cwd()
+        os.chdir(ROOT)
+        name = ".ssios-notes-" + model.split(":")[0].replace(".", "")
+        state = ROOT / name
+        self.addCleanup(lambda: os.chdir(previous))
+        self.addCleanup(lambda: shutil.rmtree(state, ignore_errors=True))
+        shutil.rmtree(state, ignore_errors=True)
+        port = _free_port()
+        _write_config(
+            state,
+            port=port,
+            replacements={
+                'provider = "mock"': 'provider = "ollama"',
+                'ollama_base_url = "http://127.0.0.1:11434"': f'ollama_base_url = "{base_url}"',
+                'ollama_model = "llama3.1:8b"': f'ollama_model = "{model}"',
+                "request_timeout_seconds = 60": "request_timeout_seconds = 90",
+                "task_timeout_seconds = 30": "task_timeout_seconds = 120",
+            },
+        )
+        settings = load_settings(state / "client.toml", state_dir=Path(name))
+        plane = ControlPlane(settings)
+        plane.open()
+        server = ControlServer(plane)
+        server.start()
+        self.addCleanup(server.stop)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        common = ["--state", name, "--config", f"{name}/client.toml"]
+        ingested = subprocess.run(
+            [sys.executable, "-m", "ssios", "ingest", "examples/notes", "--project", "local-summary", *common],
+            cwd=ROOT,
+            env=env,
+            input="yes\n",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        completed = subprocess.run(
+            [sys.executable, "-m", "ssios", "summary", "--project", "local-summary", "--topic", "local-summary", *common],
+            cwd=ROOT,
+            env=env,
+            input="yes\n",
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        text = completed.stdout + completed.stderr
+        self.assertEqual(completed.returncode, 0, text)
+        folded = text.casefold()
+        self.assertNotIn("learn more about the person", folded)
+        hits = sum(
+            phrase in folded
+            for phrase in ("northwind lantern", "laptop", "harbor-lock", "approval", "markdown", "git")
+        )
+        self.assertGreaterEqual(hits, 2, text)

@@ -127,6 +127,29 @@ def validate_summary_quality(text: str) -> None:
     folded = stripped.casefold()
     if any(marker in folded for marker in _LOW_QUALITY_MARKERS):
         raise SsiosError("model_output_low_quality", "summary echoes internal metadata", 502)
+    if any(phrase in folded for phrase in _TEMPLATE_ECHOES):
+        raise SsiosError("model_output_low_quality", "summary restates template instructions", 502)
+
+
+_TEMPLATE_ECHOES = (
+    "learn more about the person",
+    "person i'm working with",
+    "person i’m working with",
+    "i am a helpful assistant",
+)
+
+
+def is_template_boilerplate(path: str, content: str) -> bool:
+    """True when a core template file has no meaningful user prose."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if name not in {"human.md", "persona.md"}:
+        return False
+    folded = content.casefold()
+    leftover = folded
+    for phrase in _TEMPLATE_ECHOES:
+        leftover = leftover.replace(phrase, " ")
+    leftover = re.sub(r"[^a-z0-9]+", " ", leftover).strip()
+    return len(leftover) < 80
 
 
 def think_false_supported(shown: dict) -> bool:
@@ -180,7 +203,7 @@ def _chat_payload(model: str, messages: list[dict], fmt: dict | str, *, num_pred
         "messages": grounded,
         "stream": False,
         "format": fmt,
-        "options": {"temperature": 0, "num_predict": num_predict},
+        "options": {"temperature": 0, "num_predict": num_predict, "repeat_penalty": 1.15},
     }
     if think is False:
         payload["think"] = False
@@ -374,6 +397,13 @@ class MockLLM:
         if kind != "project-summary":
             raise SsiosError("task_rejected", "mock task kind rejected", 400)
         blob = json.dumps(messages, ensure_ascii=False)
+        if "HARBOR-LOCK" in blob and "Northwind Lantern" in blob:
+            text = (
+                "HARBOR-LOCK keeps approvals with the human and refuses a cloud fallback. "
+                "The Northwind Lantern meeting kept project memory on the laptop. "
+                "The reading note says MemFS is git markdown, not a vector index."
+            )
+            return ModelResponse(kind="final", text=text, raw_approve_flag=True)
         if "synthetic project local-summary" in blob:
             if not any(item.get("role") == "tool" and item.get("name") == "storage.read" for item in messages):
                 return ModelResponse(kind="tool", name="storage.read", arguments={"path": "notes.md"})

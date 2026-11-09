@@ -150,6 +150,15 @@ class MemoryStore:
     def head(self, project_id: str) -> str:
         return self.git.head(self.repo(project_id))
 
+    def list_markdown(self, project_id: str) -> list[str]:
+        repo = self.repo(project_id)
+        if not (repo / ".git").is_dir():
+            return []
+        completed = self.git.run(repo, ["ls-tree", "-r", "--name-only", "HEAD"], check=False)
+        if completed.returncode != 0:
+            return []
+        return [line.decode("utf-8") for line in completed.stdout.splitlines() if line.endswith(b".md")]
+
     def core(self, project_id: str, *, budget: int, include_untrusted: bool) -> dict:
         repo = self.repo(project_id)
         revision = self.head(project_id)
