@@ -272,7 +272,10 @@ class _TextHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            return
 
     def log_message(self, fmt: str, *args) -> None:
         return
@@ -353,6 +356,104 @@ class SummaryFailureCliTest(unittest.TestCase):
         self.assertIn("llm_unavailable", text)
         self.assertNotIn("Traceback", text)
         self.assertNotIn(CONFIRM, text)
+
+
+class _RetryHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        self.server.calls += 1
+        if self.server.calls == 1:
+            content = "not json at all"
+        elif self.server.calls == 2:
+            content = json.dumps({"type": "tool", "name": "storage.read", "arguments": {"path": "notes.md"}, "approve": True})
+        else:
+            content = '<think>{"type":"final","text":"hidden","approve":true}</think>\n' + json.dumps(
+                {"type": "final", "text": "retry-summary", "approve": True, "extra": 1}
+            )
+        body = json.dumps(
+            {
+                "done": True,
+                "done_reason": "stop",
+                "message": {"role": "assistant", "content": content, "thinking": "SECRET THINKING"},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            return
+
+    def log_message(self, fmt: str, *args) -> None:
+        return
+
+
+class SummaryRetryTest(unittest.TestCase):
+    def test_failed_task_stays_and_retry_creates_another(self) -> None:
+        previous = Path.cwd()
+        os.chdir(ROOT)
+        name = ".ssios-summary-retry"
+        state = ROOT / name
+        self.addCleanup(lambda: os.chdir(previous))
+        self.addCleanup(lambda: shutil.rmtree(state, ignore_errors=True))
+        shutil.rmtree(state, ignore_errors=True)
+        stub = ThreadingHTTPServer(("127.0.0.1", 0), _RetryHandler)
+        stub.calls = 0
+        thread = threading.Thread(target=stub.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(stub.shutdown)
+        self.addCleanup(stub.server_close)
+        port = _free_port()
+        _write_config(
+            state,
+            port=port,
+            replacements={
+                'provider = "mock"': 'provider = "ollama"',
+                'ollama_base_url = "http://127.0.0.1:11434"': f'ollama_base_url = "http://127.0.0.1:{stub.server_address[1]}"',
+                'ollama_model = "llama3.1:8b"': 'ollama_model = "fixture-model"',
+                "request_timeout_seconds = 60": "request_timeout_seconds = 5",
+                "task_timeout_seconds = 30": "task_timeout_seconds = 8",
+            },
+        )
+        settings = load_settings(state / "client.toml", state_dir=Path(name))
+        plane = ControlPlane(settings)
+        plane.open()
+        server = ControlServer(plane)
+        server.start()
+        self.addCleanup(server.stop)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        command = [sys.executable, "-m", "ssios", "summary", "--state", name, "--config", f"{name}/client.toml"]
+        failed = subprocess.run(command, cwd=ROOT, env=env, input="", capture_output=True, text=True, timeout=20, check=False)
+        failed_text = failed.stdout + failed.stderr
+        self.assertEqual(failed.returncode, 1, failed_text)
+        self.assertIn("model_output_invalid", failed_text)
+        self.assertIn("new-task", failed_text)
+        self.assertNotIn("Traceback", failed_text)
+        self.assertNotIn("SECRET THINKING", failed_text)
+        self.assertEqual(list((state / "memory" / "proposals").glob("prop-*.json")), [])
+        stored = json.loads((state / "tasks.json").read_text(encoding="utf-8"))["tasks"]
+        self.assertEqual(len(stored), 1)
+        failed_id = next(iter(stored))
+        self.assertEqual(stored[failed_id]["status"], "failed")
+        human = (state / "secrets" / "human.token").read_text(encoding="utf-8").strip()
+        self.assertNotIn(human, failed_text)
+        retried = subprocess.run(command, cwd=ROOT, env=env, input="yes\n", capture_output=True, text=True, timeout=30, check=False)
+        retried_text = retried.stdout + retried.stderr
+        self.assertEqual(retried.returncode, 0, retried_text)
+        self.assertNotIn(human, retried_text)
+        self.assertNotIn("SECRET THINKING", retried_text)
+        payload = _json_line(retried.stdout)
+        self.assertEqual(payload["result"], "committed")
+        self.assertNotEqual(payload["task_id"], failed_id)
+        again = json.loads((state / "tasks.json").read_text(encoding="utf-8"))["tasks"]
+        self.assertEqual(again[failed_id]["status"], "failed")
+        self.assertEqual(again[payload["task_id"]]["status"], "committed")
+        self.assertIn("retry-summary", retried.stdout)
 
 
 @unittest.skipUnless(os.environ.get("SSIOS_LETTA_UPSTREAM") == "1" and os.environ.get("SSIOS_LETTA_BIN"), "upstream letta binary not requested")

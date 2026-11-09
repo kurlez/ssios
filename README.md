@@ -89,7 +89,13 @@ PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .
 PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve` 和 `<think>` 思考块都不会被当成批准。思考块里的 JSON 会被丢掉。
+命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve`、`message.thinking` 和 `<think>` 都不会被当成批准。Ollama 请求带有 JSON schema；答案只从 `message.content` 读取。
+
+失败的任务会留在状态目录里。再次执行上面的 `ssios summary` 会新建一个任务，不会删除旧任务或记忆。可以先看本机 Ollama 是否接受结构化输出，这一步不创建任务：
+
+```bash
+PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
+```
 
 microVM 不参与这条路径。`dev-guard` 只是进程内限制。
 

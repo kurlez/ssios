@@ -52,7 +52,13 @@ PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .
 PYTHONPATH=src python3 -m ssios summary --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-它只对合成项目 `local-summary` 提出摘要。看完拟发布的文本和记忆差异后，输入 `yes` 批准，或输入 `no` 拒绝。不输入就结束时，审批保持待处理。DeepSeek 的 `<think>` 内容和 JSON 里的 `approve` 都不会变成批准。
+它只对合成项目 `local-summary` 提出摘要。看完拟发布的文本和记忆差异后，输入 `yes` 批准，或输入 `no` 拒绝。不输入就结束时，审批保持待处理。DeepSeek 的 `message.thinking`、`<think>` 内容和 JSON 里的 `approve` 都不会变成批准。
+
+如果摘要失败，旧任务会保留。不要删除 `.ssios-memfs`，也不要重新拉取模型。直接再执行同一条 `ssios summary`，它会新建任务。要先区分是模型没返回 JSON、输出被截断，还是 Ollama 不接受 schema，可以运行：
+
+```bash
+PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
+```
 
 这条命令走开发档控制面。它不是 microVM，也没有把“模型端口通了”当成任务成功。
 

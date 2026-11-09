@@ -14,6 +14,7 @@ from ssios.config import load_settings
 from ssios.errors import SsiosError
 from ssios.httpapi import ControlServer
 from ssios.letta_upstream import UpstreamLettaBridge
+from ssios.llm import probe_ollama
 from ssios.runtime import CloudHypervisorRuntime
 from ssios.service import ControlPlane, production_blocked
 from ssios.summary import run_summary
@@ -26,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "port", None) is None:
             settings = replace(settings, port=0)
         return run_demo(settings)
+    if args.command == "ollama-probe":
+        return run_ollama_probe(settings)
     if args.command == "summary":
         try:
             return run_summary(settings)
@@ -80,6 +83,26 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
             return 1
     return 2
+
+
+def run_ollama_probe(settings) -> int:
+    if settings.llm_provider != "ollama":
+        print(
+            json.dumps(
+                {
+                    "error": "probe_not_applicable",
+                    "detail": "config llm provider is not ollama; nothing was contacted",
+                    "cloud_fallback": False,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
+    report = probe_ollama(settings.ollama_base_url, settings.ollama_model, float(settings.llm_timeout_seconds))
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    if report.get("error") or not report.get("structured_output"):
+        return 1
+    return 0
 
 
 def _up(settings) -> int:

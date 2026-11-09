@@ -37,7 +37,15 @@ def run_summary(settings) -> int:
         timeout=float(settings.task_timeout_seconds) + 5,
     )
     if task.get("status") != "awaiting_approval":
-        raise SsiosError(str(task.get("error_code") or task.get("status") or "task_failed"), _failure_detail(task))
+        _emit(
+            {
+                "error": str(task.get("error_code") or task.get("status") or "task_failed"),
+                "detail": _failure_detail(task),
+                "task_id": task.get("id"),
+                "retry": "new-task",
+            }
+        )
+        return 1
     pending = _show_pending(base, token, task)
     print(CONFIRM, flush=True)
     try:
@@ -335,7 +343,24 @@ def _failure_detail(task: dict) -> str:
     if code == "llm_unavailable":
         return "模型没有完成这次任务。Ollama 命令能回答只说明进程在听，不代表任务成功。没有云端回退。"
     if code == "model_output_invalid":
-        return "模型输出不是要求的 JSON。思考过程里的 approve 不会被当成批准。"
+        return (
+            "模型输出不是要求的 JSON。思考过程和 approve 字段都不会被当成批准。"
+            "这次失败的任务会保留。再次运行 ssios summary 会新建任务，不会删除已有状态。"
+        )
+    if code == "model_output_empty":
+        return (
+            "模型没有返回可用的答案内容。message.thinking 和 think 标签里的文字没有被执行。"
+            "这次失败的任务会保留。再次运行 ssios summary 会新建任务。"
+        )
+    if code == "model_output_truncated":
+        return (
+            "模型输出被截断。可以加大 request_timeout_seconds 或 task_timeout_seconds 后，用同一配置重启服务再运行 ssios summary。"
+            "失败记录会保留，重试会新建任务。"
+        )
+    if code == "model_format_unsupported":
+        return "这台 Ollama 不接受结构化 format。请升级本机 Ollama。没有改用云端，也没有删除状态。"
+    if code == "llm_response_unsupported":
+        return "Ollama 的响应形状不受支持。没有把未知字段当成批准。失败记录会保留，重试会新建任务。"
     if code in ("timeout", "task_timeout"):
         return "任务超时。可以加大 limits.task_timeout_seconds 后，用同一 --state 和 --config 重启服务再试。不要删除状态。"
     return f"任务没有进入待批准：{code}"
