@@ -28,28 +28,27 @@ text = path.read_text(encoding="utf-8")
 text = text.replace('backend = "dev-guard"', 'backend = "macos-vm"', 1)
 path.write_text(text, encoding="utf-8")
 PY
-PYTHONPATH=src python3 -m ssios up --profile dev --state "$STATE" --config "$STATE/smoke.toml" --port 0 >"$STATE/up.log" 2>&1 &
+PYTHONPATH=src PYTHONUNBUFFERED=1 python3 -u -m ssios up --profile dev --state "$STATE" --config "$STATE/smoke.toml" --port 0 >"$STATE/up.log" 2>&1 &
 PID=$!
 python3 - "$STATE" <<'PY'
-import json, pathlib, sys, time, urllib.parse, urllib.request
+import json, pathlib, sys, time, urllib.request
 state = pathlib.Path(sys.argv[1])
-log = (state / "up.log").read_text(encoding="utf-8", errors="replace") if (state / "up.log").exists() else ""
+listen = state / "listen.url"
 deadline = time.time() + 20
 url = ""
 while time.time() < deadline:
-    log = (state / "up.log").read_text(encoding="utf-8", errors="replace")
-    for line in log.splitlines():
-        if "http://" in line:
-            url = line[line.find("http://"):].split()[0]
-            break
-    if url:
-        try:
-            urllib.request.urlopen(url + "/ui/login", timeout=1).read()
-            break
-        except Exception:
-            pass
-    time.sleep(0.2)
+    if listen.is_file():
+        candidate = listen.read_text(encoding="utf-8").strip()
+        if candidate.startswith("http://127.0.0.1:"):
+            try:
+                urllib.request.urlopen(candidate + "/ui/login", timeout=1).read()
+                url = candidate
+                break
+            except Exception:
+                pass
+    time.sleep(0.1)
 else:
+    log = (state / "up.log").read_text(encoding="utf-8", errors="replace") if (state / "up.log").exists() else ""
     sys.stderr.write(log)
     raise SystemExit("ssios up did not start")
 token = (state / "secrets" / "human.token").read_text(encoding="utf-8").strip()

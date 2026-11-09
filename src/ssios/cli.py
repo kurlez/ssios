@@ -25,6 +25,11 @@ from ssios.upstream import describe_memfs, probe_local_binary
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except (OSError, ValueError):
+            pass
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state", default=".ssios", help="state directory")
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
@@ -204,18 +209,20 @@ def run_ollama_probe(settings) -> int:
 def _up(settings) -> int:
     if production_blocked(settings):
         report = CloudHypervisorRuntime(settings).preflight()
-        print(json.dumps({"error": "microvm_fail_closed", "preflight": report}, indent=2, ensure_ascii=False))
+        print(json.dumps({"error": "microvm_fail_closed", "preflight": report}, indent=2, ensure_ascii=False), flush=True)
         return 2
     try:
         plane = ControlPlane(settings)
         plane.open()
         server = ControlServer(plane)
     except SsiosError as exc:
-        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
         return 1
     server.start()
-    print(f"SSIOS 开发配置已在 http://{settings.host}:{plane.bound_port} 监听")
-    print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：{settings.memory_mode}")
+    listen_url = f"http://127.0.0.1:{plane.bound_port}"
+    (settings.state_dir / "listen.url").write_text(listen_url + "\n", encoding="utf-8")
+    print(f"SSIOS 开发配置已在 {listen_url} 监听", flush=True)
+    print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：{settings.memory_mode}", flush=True)
     try:
         while True:
             time.sleep(3600)
