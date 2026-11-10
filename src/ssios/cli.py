@@ -79,8 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "init":
         ControlPlane(settings).open()
-        print(f"状态目录已就绪：{settings.state_dir}")
-        print("令牌写在 secrets/human.token 与 secrets/worker.token，权限为 0600。")
+        print(f"State directory is ready: {settings.state_dir}")
+        print("Tokens are in secrets/human.token and secrets/worker.token, mode 0600.")
         return 0
     if args.command == "preflight":
         print(json.dumps(CloudHypervisorRuntime(settings).preflight(), indent=2, ensure_ascii=False))
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         plane.open()
         code = issue_login_code(plane)
         print(f"http://127.0.0.1:{settings.port}/ui/login?code={code}")
-        print("这个代码大约两分钟内有效，且只保存在本机状态目录的哈希里。")
+        print("This code is valid for about two minutes and is stored only as a hash in the local state directory.")
         return 0
     if args.command == "vm-prepare":
         return run_vm_prepare(settings)
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
             return 1
         except KeyboardInterrupt:
-            print(json.dumps({"error": "interrupted", "detail": "已中断，没有写入记忆。"}, ensure_ascii=False), flush=True)
+            print(json.dumps({"error": "interrupted", "detail": "Interrupted. Memory was not written."}, ensure_ascii=False), flush=True)
             return 130
         except Exception as exc:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
             return 1
         except KeyboardInterrupt:
-            print(json.dumps({"error": "interrupted", "detail": "已中断，没有批准。"}, ensure_ascii=False), flush=True)
+            print(json.dumps({"error": "interrupted", "detail": "Interrupted. Nothing was approved."}, ensure_ascii=False), flush=True)
             return 130
         except Exception as exc:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
@@ -181,10 +181,10 @@ def run_gc(settings, *, dry_run: bool) -> int:
     print(json.dumps(preview, ensure_ascii=False, indent=2), flush=True)
     if preview["count"] == 0:
         return 0
-    print("删除这些一次性导出副本请输入 yes。git 记忆仓库不会被删除。", flush=True)
+    print("Type yes to delete these one-shot export copies. The git memory repository will not be deleted.", flush=True)
     line = sys.stdin.readline()
     if line.strip() != "yes":
-        print(json.dumps({"result": "pending", "detail": "未输入 yes，没有删除任何文件。"}, ensure_ascii=False))
+        print(json.dumps({"result": "pending", "detail": "yes was not entered. No files were deleted."}, ensure_ascii=False))
         return 2
     print(json.dumps(collect_leftovers(settings.state_dir, apply=True), ensure_ascii=False, indent=2))
     return 0
@@ -259,8 +259,8 @@ def _up(settings) -> int:
     server.start()
     listen_url = f"http://127.0.0.1:{plane.bound_port}"
     (settings.state_dir / "listen.url").write_text(listen_url + "\n", encoding="utf-8")
-    print(f"SSIOS 开发配置已在 {listen_url} 监听", flush=True)
-    print(f"配置档：{settings.profile}，模型：{settings.llm_provider}，内存模式：{settings.memory_mode}", flush=True)
+    print(f"SSIOS dev profile is listening at {listen_url}", flush=True)
+    print(f"Profile: {settings.profile}, model: {settings.llm_provider}, memory mode: {settings.memory_mode}", flush=True)
     try:
         while True:
             time.sleep(3600)
@@ -402,11 +402,11 @@ def run_demo(settings) -> int:
         audit_text = (settings.state_dir / "audit" / "audit.jsonl").read_text(encoding="utf-8")
         if human.strip() in audit_text or "NORTHWIND-FIXTURE-NOTE" in audit_text:
             raise RuntimeError("audit log leaked a token or raw fixture text")
-        print("演示完成。")
-        print(f"任务 {task['id']} 已由人类控制令牌批准并提交。")
-        print(f"发布修订：{task['published_revision']}")
-        print(f"记忆修订：{task['memory_revision']}")
-        print("重启后核心记忆仍可加载，主题摘要按路径读取，审计日志只保留哈希。")
+        print("Demo finished.")
+        print(f"Task {task['id']} was approved with the human control token and committed.")
+        print(f"Published revision: {task['published_revision']}")
+        print(f"Memory revision: {task['memory_revision']}")
+        print("Core memory still loads after restart. The topic summary is read by path. The audit log keeps only hashes.")
         return 0
     finally:
         server.stop()

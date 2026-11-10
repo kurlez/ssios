@@ -158,8 +158,8 @@ class ScriptedPlaneTest(PlaneTest):
         request = urllib.request.Request(self.base + f"/ui/tasks/{created['id']}", headers={"Cookie": session})
         with urllib.request.urlopen(request, timeout=10) as response:
             html = response.read().decode()
-        self.assertIn("隔离：是", html)
-        self.assertIn("15 毫秒", html)
+        self.assertIn("Isolated: yes", html)
+        self.assertIn("15 ms", html)
         self.assertIn("macos-vm", html)
 
     def test_unisolated_launcher_does_not_approve_or_run_the_host_agent(self) -> None:

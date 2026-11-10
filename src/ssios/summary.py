@@ -21,7 +21,7 @@ SUMMARY_PROJECT = "local-summary"
 SUMMARY_INPUT = "notes.md"
 SUMMARY_REVISION = "exp-1"
 TOPIC_PATH = "topics/fixtures/last-summary.md"
-CONFIRM = "确认：输入 yes 批准，输入 no 拒绝。"
+CONFIRM = "Confirm: type yes to approve, or no to deny."
 
 
 def run_summary(settings, *, project_id: str = SUMMARY_PROJECT, topic: str = "") -> int:
@@ -53,10 +53,10 @@ def run_summary(settings, *, project_id: str = SUMMARY_PROJECT, topic: str = "")
     try:
         line = sys.stdin.readline()
     except KeyboardInterrupt:
-        _emit({"result": "pending", "task_id": task["id"], "detail": "已中断，没有批准。"})
+        _emit({"result": "pending", "task_id": task["id"], "detail": "Interrupted. Nothing was approved."})
         return 130
     if line == "":
-        _emit({"result": "pending", "task_id": task["id"], "detail": "没有输入，审批保持待处理，没有批准。"})
+        _emit({"result": "pending", "task_id": task["id"], "detail": "No input. The approval stays pending and was not approved."})
         return 2
     choice = line.strip()
     decide_timeout = max(60.0, float(settings.llm_timeout_seconds))
@@ -73,7 +73,7 @@ def run_summary(settings, *, project_id: str = SUMMARY_PROJECT, topic: str = "")
         _emit({"result": "denied", "task_id": task["id"], "status": final.get("status")})
         return 0
     if choice != "yes":
-        _emit({"result": "pending", "task_id": task["id"], "detail": "未输入 yes，审批保持待处理，没有批准。"})
+        _emit({"result": "pending", "task_id": task["id"], "detail": "yes was not entered. The approval stays pending and was not approved."})
         return 2
     for approval in pending:
         _decide(base, token, approval, "approve", decide_timeout)
@@ -94,16 +94,16 @@ def _human_token(settings) -> str:
     if not path.is_file():
         raise SsiosError(
             "state_not_ready",
-            "状态目录里没有 secrets/human.token。请先用同一 --state 和 --config 运行 ssios up。不要删除已有状态。",
+            "secrets/human.token is missing from the state directory. Run ssios up with the same --state and --config first. Do not delete existing state.",
         )
     try:
         token = AuthStore(settings.state_dir).read_secret("human")
     except SsiosError:
         raise
     except OSError as exc:
-        raise SsiosError("state_not_ready", "无法读取人类令牌文件") from exc
+        raise SsiosError("state_not_ready", "The human token file cannot be read") from exc
     if not token:
-        raise SsiosError("state_not_ready", "人类令牌文件是空的")
+        raise SsiosError("state_not_ready", "The human token file is empty")
     return token
 
 
@@ -115,14 +115,14 @@ def _base_url(settings) -> str:
 def _require_identity(settings, base: str, token: str) -> None:
     code, payload, _headers = _call(base, "GET", "/v1/status", token=token, timeout=5)
     if code == 401:
-        raise SsiosError("unauthorized", "令牌不被正在运行的服务接受。确认 --state 就是该服务的状态目录。令牌不会打印。")
+        raise SsiosError("unauthorized", "The running service rejected the token. Confirm --state is that service's state directory. The token is not printed.")
     if code != 200:
         raise SsiosError(str(payload.get("error") or "status_failed"), str(payload.get("detail") or "status failed"))
     actual = payload.get("identity")
     if not isinstance(actual, dict):
         raise SsiosError(
             "service_identity_missing",
-            "正在运行的服务没有身份字段。更新代码后，用原来的 --state 和 --config 重启那一个进程。不要删除状态目录，也不要另开第二个服务。",
+            "The running service has no identity field. After updating the code, restart that one process with the original --state and --config. Do not delete the state directory, and do not start a second service.",
         )
     expected = {
         "state_dir": str(settings.state_dir),
@@ -153,9 +153,9 @@ def _require_identity(settings, base: str, token: str) -> None:
             parts.append(f"{key} config={expected[key]!r} service={actual.get(key)!r}")
     raise SsiosError(
         "service_mismatch",
-        "配置与正在运行的服务不一致："
+        "The config does not match the running service: "
         + "; ".join(parts)
-        + "。停掉旧进程后用同一 --state 和 --config 重新启动。这条命令不会另开服务，也不会改记忆。",
+        + ". Stop the old process and start it again with the same --state and --config. This command will not start another service and will not change memory.",
     )
 
 
@@ -195,8 +195,8 @@ def _create_task(base: str, token: str, project_id: str, topic: str) -> dict:
     detail = str(payload.get("detail") or "task create failed")
     if payload.get("error") == "not_found":
         detail = (
-            "合成项目 local-summary 的导出还不在这个服务里。"
-            "用同一 --state 和 --config 重启正在运行的 ssios up，让它补上这份导出。不要删除已有状态。"
+            "The local-summary export is not in this service yet. "
+            "Restart the running ssios up with the same --state and --config so it adds that export. Do not delete existing state."
         )
     raise SsiosError(str(payload.get("error") or "task_create_failed"), detail)
 
@@ -210,7 +210,7 @@ def _show_pending(base: str, token: str, task: dict) -> list[dict]:
         if approval.get("status") != "pending":
             continue
         print(
-            f"待确认 {approval.get('action')} 载荷 {approval.get('payload_sha256')} 期望修订 {approval.get('expected_revision')}",
+            f"Pending {approval.get('action')} payload {approval.get('payload_sha256')} expected revision {approval.get('expected_revision')}",
             flush=True,
         )
         for item in approval.get("files") or []:
@@ -222,7 +222,7 @@ def _show_pending(base: str, token: str, task: dict) -> list[dict]:
             print(str(approval.get("preview")), flush=True)
         pending.append(approval)
     if not pending:
-        raise SsiosError("approval_missing", "任务在等待批准，但没有待处理的审批。")
+        raise SsiosError("approval_missing", "The task is waiting for approval, but no approval is pending.")
     return pending
 
 
@@ -258,7 +258,7 @@ def _print_diff(path: str, before: str | None, after: str) -> None:
         return
     diff = difflib.unified_diff(before.splitlines(), after.splitlines(), fromfile=path, tofile=path, lineterm="")
     text = "\n".join(diff)
-    print(text or f"{path} 内容没有变化", flush=True)
+    print(text or f"{path} is unchanged", flush=True)
 
 
 def _decide(base: str, token: str, approval: dict, decision: str, timeout: float) -> None:
@@ -299,39 +299,39 @@ def _verify(base: str, token: str, task: dict) -> int:
     code3, core, _headers = _call(base, "GET", f"/v1/memory/core?project_id={project}", token=token, timeout=30)
     code4, status, _headers = _call(base, "GET", "/v1/status", token=token, timeout=5)
     if code != 200 or code2 != 200 or code3 != 200 or code4 != 200:
-        raise SsiosError("verify_failed", "批准后的发布或记忆读取失败")
+        raise SsiosError("verify_failed", "The published result or memory could not be read after approval")
     if published.get("sha256") != task.get("output_sha256"):
-        raise SsiosError("verify_failed", "发布内容与任务载荷不一致")
+        raise SsiosError("verify_failed", "The published content does not match the task payload")
     if published.get("content") not in str(topic.get("content") or ""):
-        raise SsiosError("verify_failed", "已提交的主题记忆里没有这次发布的摘要")
+        raise SsiosError("verify_failed", "The committed topic memory does not contain this published summary")
     if topic.get("core") is not False:
-        raise SsiosError("verify_failed", "主题摘要进入了核心记忆")
+        raise SsiosError("verify_failed", "The topic summary was loaded into core memory")
     core_paths = [str(item.get("path")) for item in core.get("files") or [] if isinstance(item, dict)]
     if TOPIC_PATH in core_paths:
-        raise SsiosError("verify_failed", "主题路径出现在核心文件列表里")
+        raise SsiosError("verify_failed", "The topic path is in the core file list")
     memory = status.get("memory") if isinstance(status.get("memory"), dict) else {}
     llm = status.get("llm") if isinstance(status.get("llm"), dict) else {}
     runtime = status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
     backend = str(runtime.get("active_backend") or "dev-guard")
-    print("模型连通不等于任务成功。下面是已发布结果。", flush=True)
+    print("A reachable model is not a successful task. The published result is below.", flush=True)
     if task.get("isolated"):
         print(
-            f"本次执行后端是 {task.get('runtime_backend') or backend}。客户机已运行，启动并完成用时 {task.get('boot_ms')} 毫秒。模型调用在宿主机上。",
+            f"Runtime backend is {task.get('runtime_backend') or backend}. The guest ran, and boot plus completion took {task.get('boot_ms')} ms. The model call stayed on the host.",
             flush=True,
         )
     elif backend == "dev-guard":
-        print("本次执行后端是 dev-guard：任务在控制面进程内完成，没有启动 microVM。", flush=True)
+        print("Runtime backend is dev-guard: the task finished inside the control-plane process. No microVM was started.", flush=True)
     else:
-        print(f"本次执行后端是 {backend}，但客户机没有运行，任务没有在隔离虚拟机里完成。", flush=True)
-    print(f"任务 {task['id']} 已提交。", flush=True)
-    print(f"发布 {published.get('revision')} sha256 {published.get('sha256')}", flush=True)
+        print(f"Runtime backend is {backend}, but the guest did not run. The task did not finish inside an isolated virtual machine.", flush=True)
+    print(f"Task {task['id']} is committed.", flush=True)
+    print(f"Published {published.get('revision')} sha256 {published.get('sha256')}", flush=True)
     print(
-        f"记忆 {TOPIC_PATH} trust={topic.get('trust')} core={topic.get('core')} revision={topic.get('revision')}",
+        f"Memory {TOPIC_PATH} trust={topic.get('trust')} core={topic.get('core')} revision={topic.get('revision')}",
         flush=True,
     )
-    print("核心文件：" + (", ".join(core_paths) if core_paths else "(无)"), flush=True)
+    print("Core files: " + (", ".join(core_paths) if core_paths else "(none)"), flush=True)
     print(
-        f"服务 memory={memory.get('mode') or status.get('memory_mode')} provider={llm.get('provider')} model={llm.get('model')}",
+        f"Service memory={memory.get('mode') or status.get('memory_mode')} provider={llm.get('provider')} model={llm.get('model')}",
         flush=True,
     )
     _emit(
@@ -359,66 +359,66 @@ def _poll(base: str, token: str, task_id: str, terminal: set[str], timeout: floa
         if last.get("status") in terminal:
             return last
         time.sleep(0.1)
-    raise SsiosError("task_timeout", "等待任务结束超时。服务上的任务保持原状，没有自动批准。")
+    raise SsiosError("task_timeout", "Timed out waiting for the task to finish. The task on the service is unchanged and was not auto-approved.")
 
 
 def _failure_detail(task: dict) -> str:
     code = str(task.get("error_code") or task.get("status") or "task_failed")
     if code == "llm_unavailable":
-        return "模型没有完成这次任务。Ollama 命令能回答只说明进程在听，不代表任务成功。没有云端回退。"
+        return "The model did not finish this task. An Ollama command that answers only shows that the process is listening. It does not mean the task succeeded. There is no cloud fallback."
     if code == "model_output_invalid":
         detail = (
-            "模型输出不是要求的 JSON。思考文本没有被当成摘要，也没有被批准。"
-            "这次失败的任务会保留。再次运行 ssios summary 会新建任务，不会删除已有状态。"
+            "The model output was not the required JSON. Thinking text was not treated as the summary and was not approved. "
+            "This failed task is kept. Running ssios summary again creates a new task and does not delete existing state."
         )
         if task.get("diagnostic_path"):
-            detail += f" 诊断文件：{task['diagnostic_path']}（{task.get('diagnostic_class')}）。可用 ssios diagnose {task.get('id')} 查看分类。"
+            detail += f" Diagnostic file: {task['diagnostic_path']} ({task.get('diagnostic_class')}). Use ssios diagnose {task.get('id')} to see the classification."
         return detail
     if code == "model_output_empty":
         return (
-            "模型没有返回可用的答案内容。message.thinking 和 think 标签里的文字没有被执行。"
-            "这次失败的任务会保留。再次运行 ssios summary 会新建任务。"
+            "The model returned no usable answer. Text inside message.thinking and think tags was not executed. "
+            "This failed task is kept. Running ssios summary again creates a new task."
         )
     if code == "model_output_truncated":
         return (
-            "模型输出被截断，没有进入批准。可以在 [llm] 里加大 max_output_tokens 后，用同一 --state 和 --config 重启服务，再运行 ssios summary。"
-            "失败记录会保留，重试会新建任务。"
+            "The model output was truncated and did not reach approval. Raise max_output_tokens under [llm], restart the service with the same --state and --config, then run ssios summary again. "
+            "The failure record is kept, and a retry creates a new task."
         )
     if code == "no_content":
         return (
-            "没有可摘要的笔记。默认的 human.md 或 persona.md 模板不会被当成内容。"
-            "先用 ssios ingest 导入 md 或 txt，批准后再运行 ssios summary。没有删除已有状态。"
+            "There are no notes to summarize. The default human.md or persona.md template is not treated as content. "
+            "Import md or txt with ssios ingest, approve it, then run ssios summary. Existing state was not deleted."
         )
     if code == "model_output_low_quality":
         return (
-            "模型摘要只是在复述内部字段、截断的 JSON，或短到不能用，所以没有创建批准。"
-            "再次运行 ssios summary 会新建任务。若之前已经批准过一份坏摘要，新的 yes 会用一次新的 git 提交覆盖 topics/fixtures/last-summary.md，不删除状态目录，也不改写旧历史。"
+            "The model summary only restated internal fields, truncated JSON, or was too short to use, so no approval was created. "
+            "Running ssios summary again creates a new task. If a bad summary was already approved, a new yes makes one new git commit that replaces topics/fixtures/last-summary.md. It does not delete the state directory or rewrite old history."
         )
     if code == "model_format_unsupported":
-        return "这台 Ollama 不接受结构化 format。请升级本机 Ollama。没有改用云端，也没有删除状态。"
+        return "This Ollama does not accept a structured format. Upgrade the local Ollama. Nothing was sent to the cloud, and state was not deleted."
     if code == "llm_response_unsupported":
-        return "Ollama 的响应形状不受支持。没有把未知字段当成批准。失败记录会保留，重试会新建任务。"
+        return "The Ollama response shape is not supported. Unknown fields were not treated as approval. The failure record is kept, and a retry creates a new task."
     if code == "microvm_fail_closed":
-        detail = "客户机没有跑完这次任务，所以没有在宿主机上补跑，也没有批准。"
+        detail = "The guest did not finish this task, so it was not rerun on the host and nothing was approved."
         if task.get("error_detail"):
             detail += " " + str(task["error_detail"])
         if task.get("diagnostic_path"):
-            detail += f" 诊断文件：{task['diagnostic_path']}。"
+            detail += f" Diagnostic file: {task['diagnostic_path']}."
         return detail
     if code in ("timeout", "task_timeout"):
-        return "任务超时。可以加大 limits.task_timeout_seconds 后，用同一 --state 和 --config 重启服务再试。不要删除状态。"
-    return f"任务没有进入待批准：{code}"
+        return "The task timed out. Raise limits.task_timeout_seconds, restart the service with the same --state and --config, and try again. Do not delete state."
+    return f"The task did not reach awaiting approval: {code}"
 
 
 def _call(base: str, method: str, path: str, *, token: str, body: dict | None = None, timeout: float = 10):
     try:
         return request(base, method, path, token=token, body=body, timeout=timeout)
     except json.JSONDecodeError as exc:
-        raise SsiosError("bad_response", "服务返回的不是 JSON") from exc
+        raise SsiosError("bad_response", "The service did not return JSON") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise SsiosError(
             "service_unavailable",
-            f"连不上 {base}。请用同一 --state 和 --config 启动已有服务。这条命令不会另开一个服务。",
+            f"Cannot reach {base}. Start the existing service with the same --state and --config. This command will not start another service.",
         ) from exc
 
 

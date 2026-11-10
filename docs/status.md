@@ -1,56 +1,56 @@
-# 实现状态
+# Implementation status
 
-状态分三类。命令构造和预检通过，不等于 microVM 已经跑起来。
+Status is in three groups. A command that builds and a preflight that passes do not mean a microVM has booted.
 
-## 已测试
+## Tested
 
-在 Linux x86_64、Python 3.12、Git 2.43 上由 `make test` 覆盖：
+Covered by `make test` on Linux x86_64, Python 3.12, and Git 2.43:
 
-- mock 开发档的健康检查、任务、核心记忆、按需主题、暂存、人类批准、发布、重启后读取
-- 未认证请求、错误令牌、工作者令牌不能批准、跨项目拒绝、未授权导出路径
-- 审批篡改、重放、过期、载荷字节被改、暂存冻结
-- 路径穿越、符号链接、导出清单哈希、来源不明的 Git 文件
-- 记忆和发布的 CAS，包括并发批准只有一个修订成功
-- 遗忘后工作树和搜索不再返回正文，`git log -p` 仍保留该短语
-- 核心令牌预算截断
-- 任务超时、人类取消、输出长度上限
-- 模型 `approve` 字段被忽略
-- shell 工具被拒绝，实际拉起的进程只有 Git，没有 shell
-- Ollama 适配器对环回桩的 `/api/chat` 请求，以及连不上 `127.0.0.1:9` 时的 `llm_unavailable`
-- 生产档 CLI 在创建令牌之前以失败关闭退出
-- 选择 `cloud-hypervisor` 或 `macos-vm` 后端时，创建任务会失败关闭，不在宿主机执行。`macos-vm` 只检查 `krunvm` 是否在 PATH 上，本机没有启动过客户机
-- `ssios gc --dry-run` 只列出 `upstream-letta/exports/<agent>/` 下的一次性导出副本。真正删除需要再输入 `yes`，并且拒绝删除 `backend/memfs` 里的 Git 记忆
-- 本机 `/ui` 页面：登录后会话 cookie 是 HttpOnly 且 SameSite=Strict，每次 POST 校验 CSRF，批准按钮带上同一组载荷哈希、修订和 bound hash。笔记里的 `<script>` 会转义。人类令牌不写入会话文件
-- 快照策略拒绝 vault，干净任务目录也返回未实现且不复制文件
-- 令牌文件权限，以及权限被放宽后拒绝启动
-- 源码中不存在 `shell=True` 或 `os.system`
-- 内部 Git 仓库不继承外部签名、钩子、身份、属性或 `*.md` 排除规则；重复提交已存在的批准内容不会再报空的 `git command failed`。这是 Linux 上的回归，不是 Mac 实测
-- 钉住的 Letta Code 0.34.45：`agents create --backend local --personality blank` 不需要账号或模型，会生成 `memfs/<agent-id>/memory` 的 Git 仓库；`memory tokens` 把根目录 Markdown 标为核心；批准后的 git 提交能被 `memory export` 读回，且新主题不进入核心列表。该测试由 `SSIOS_LETTA_UPSTREAM=1` 打开，默认 CI 不安装这个包
-- `ssios summary` 用相对 `--state` 连接已经运行的服务。子进程测试覆盖 `yes`、`no`、EOF，以及一次无效输出后的重试会新建任务并保留失败记录。模型 `<think>` 和 `message.thinking` 里的 `approve` 不会被解析成命令。Ollama 适配器会发送 JSON schema，并在服务拒绝 schema 时只再试一次 `format: "json"`。这些交互用的是环回 HTTP 桩。`ssios ingest` 把 md/txt 笔记经审批写入 `topics/<project>/`。`summary --topic` 只摘要这些正文。思考模型先要一段正文，JSON 只在校验通过时采用。失败的原文写在状态目录的 `diagnostics/<task_id>.json`（0600），不会自动批准。Linux 上用官方 Ollama 0.40.15 测过公开的 `qwen2.5:0.5b`、`qwen3:0.6b` 和 `deepseek-r1:1.5b`。没有在这里跑过 Mac 上的 `deepseek-r1:7b`。设置 `SSIOS_LETTA_UPSTREAM=1` 时，同一条命令会把主题提交进钉住的 Letta 0.34.45 本地 MemFS，且该主题不进入核心
+- Health, tasks, core memory, on-demand topics, staging, human approval, publish, and read-after-restart on the mock dev profile
+- Unauthenticated requests, a bad token, a worker token that cannot approve, cross-project denial, and an export path that was not granted
+- Approval tampering, replay, expiry, a changed payload, and a frozen stage
+- Path traversal, symlinks, export manifest hashes, and Git files with no recorded source
+- CAS for memory and publish, including concurrent approvals where only one revision wins
+- After forget, the worktree and search no longer return the body, while `git log -p` still keeps the phrase
+- Core token budget truncation
+- Task timeout, human cancel, and the output length cap
+- The model's `approve` field is ignored
+- The shell tool is rejected. The only process actually started is Git, not a shell
+- The Ollama adapter's `/api/chat` request against a loopback stub, and `llm_unavailable` when `127.0.0.1:9` cannot be reached
+- The production-profile CLI exits fail-closed before creating tokens
+- Choosing the `cloud-hypervisor` or `macos-vm` backend fails closed on task creation and does not run on the host. `macos-vm` only checks whether `krunvm` is on PATH. This machine has not booted a guest
+- `ssios gc --dry-run` only lists one-shot export copies under `upstream-letta/exports/<agent>/`. A real delete requires typing `yes` again, and it refuses to delete Git memory under `backend/memfs`
+- The local `/ui` page: after login the session cookie is HttpOnly and SameSite=Strict, every POST checks CSRF, and the approve button carries the same payload hash, revision, and bound hash. `<script>` in a note is escaped. The human token is not written to the session file
+- The snapshot policy rejects a vault. A clean task directory also returns unimplemented and copies no files
+- Token file permissions, and refusal to start after those permissions are widened
+- The source contains no `shell=True` and no `os.system`
+- The internal Git repository does not inherit external signing, hooks, identity, attributes, or `*.md` exclude rules. Committing approved content that already exists does not report an empty `git command failed`. This is a Linux regression, not a measurement on a Mac
+- Pinned Letta Code 0.34.45: `agents create --backend local --personality blank` needs no account or model and creates a Git repository at `memfs/<agent-id>/memory`. `memory tokens` marks root Markdown as core. An approved git commit can be read back with `memory export`, and a new topic does not enter the core list. That test is enabled by `SSIOS_LETTA_UPSTREAM=1`. Default CI does not install the package
+- `ssios summary` connects to an already running service with a relative `--state`. Subprocess tests cover `yes`, `no`, EOF, and a retry after one invalid output that creates a new task and keeps the failure record. `approve` inside model `<think>` and `message.thinking` is not parsed as a command. The Ollama adapter sends a JSON schema and, if the service rejects the schema, tries `format: "json"` only once more. These interactions use a loopback HTTP stub. `ssios ingest` writes md/txt notes to `topics/<project>/` after approval. `summary --topic` summarizes only those bodies. A thinking model is asked for prose first. JSON is used only when it validates. The failed raw output is written to `diagnostics/<task_id>.json` (0600) in the state directory and is not auto-approved. On Linux, official Ollama 0.40.15 was tested with the public `qwen2.5:0.5b`, `qwen3:0.6b`, and `deepseek-r1:1.5b`. `deepseek-r1:7b` was not run here on a Mac. With `SSIOS_LETTA_UPSTREAM=1`, the same command commits the topic into the pinned Letta 0.34.45 local MemFS, and that topic does not enter core
 
-mock 测试使用的提供方名字就是 `mock`。Ollama 桩测试的名字表明对方不是真正的 Ollama 守护进程。
+The provider name used by mock tests is `mock`. The name of the Ollama stub test says the other side is not a real Ollama daemon.
 
-## 依赖外部集成
+## Depends on an external integration
 
-这些代码路径存在，但本环境没有把它们跑成端到端系统：
+These code paths exist, but this environment has not run them as an end-to-end system:
 
-- 真实 Ollama 进程和真实 7B/8B 模型。适配器会发 `POST /api/chat`。写这份状态时，这台 Linux 机器的 `127.0.0.1:11434` 没有服务，所以没有声称跑过 `deepseek-r1:7b`
-- 默认测试不下载客户机内核。样例配置的 `kernel_path` 为空时，`cloud-hypervisor` 任务仍然失败关闭，不会改在宿主机上跑
-- 这台机器上把 `/dev/kvm` 打开给当前用户之后，用 Cloud Hypervisor v54.0 和 cloud-hypervisor 发布的 Linux 7.2.8 内核（`ch-release-v7.2.8-20261009` 的 `bzImage-x86_64`）启动了 initramfs。`echo ok` 的墙钟是 898 毫秒。带 virtio-fs 输入和 scratch、没有 `--net` 的摘要 worker 用了 1576 毫秒，任务进入 `awaiting_approval`，`isolated` 为 true。模型调用是宿主机上的 mock。krunvm 没有安装，所以没有启动 macOS 那条路径
-- `[runtime] agent = "codex"` 在同一台 Cloud Hypervisor 上跑了钉住的 `codex-cli 0.167.0` musl 二进制。宿主机先核对 `third_party/codex.pin.json` 里的 SHA256，客户机不下载。客户机只有 `lo`，`ip addr` 配上 `127.0.0.1/8` 后，环回中继经 vsock 打到宿主机的模拟 Responses 服务。没有 `--net`。`/sys/class/net` 只有 `lo`，连 `1.1.1.1:443` 失败。一次 `POST /v1/responses` 被代理记下，任务进入 `awaiting_approval`，`isolated` 为 true，`boot_ms` 为 7155。最后一条消息是模拟摘要，没有写入 MemFS。`codex` 的标准错误是空的。这不是 Mac 上的结果。`scripts/macos-codex-smoke.sh` 只在 Apple Silicon 上核对 aarch64 包，不启动客户机，也不把那次核对说成隔离成功
-- `macos-vz` 用 vfkit 0.6.4。用户在 M4 上跑 `a982e34` 时，任务进入 `awaiting_approval`，`isolated` 为 true，`boot_ms` 为 22209，网卡只有 `lo`，预检上下文是 16384。模型没有去写标记，也没有去写工作区外的路径，所以 `marker` 和 `sandbox_denied` 都是 false。客户机现在在 Codex 之后用同一个 `workspace-write` 沙箱固定写一次标记并尝试外部写入。缺标记是 `probe_marker_missing`，没有拒绝是 `probe_sandbox_not_denied`。这台 Linux 机器没有启动 Virtualization.framework
-- 同一台机器上的 Ollama 0.40.15 提供 `/v1/responses`。`SSIOS_OLLAMA_LIVE=1` 且 `SSIOS_VM_LIVE=1` 时，客户机里的 Codex 用 `qwen2.5-coder:7b` 调用了三次 `exec_command`。工作区里写出了 `marker.txt`。写 `/opt/ssios-outside` 得到只读文件系统，连 `1.1.1.1:443` 得到 `Operation not permitted`。任务进入 `awaiting_approval`，`isolated` 为 true，`boot_ms` 为 43363。代理日志只有字节数和 SHA256。`deepseek-r1:7b` 在 200 个输出 token 内只产生推理摘要，没有工具调用。`qwen2.5-coder:1.5b` 的工具 JSON 不合格。krunvm 没有启动
-- Apple M4、macOS、krunvm 0.2.7：镜像还没缓存时，`scripts/macos-vm-smoke.sh` 大约 31 秒后失败，`isolated` 为 false，`error_code` 是 `microvm_fail_closed`。用户先执行 `krunvm create python:3.12-alpine` 之后，同一条冒烟在 `2166525` 通过，结果是 `awaiting_approval`，`runtime_backend` 为 `macos-vm`，`isolated` 为 true，`boot_ms` 为 3513。没有个人数据。这台 Linux 机器没有 krunvm，没有复现那次启动
-- Letta Code 0.34.45 的本地后端。探测函数可选，默认不执行
+- A real Ollama process and a real 7B/8B model. The adapter sends `POST /api/chat`. When this status was written, `127.0.0.1:11434` on this Linux machine had no service, so this does not claim that `deepseek-r1:7b` ran
+- The default tests do not download a guest kernel. When `kernel_path` in the sample config is empty, a `cloud-hypervisor` task still fails closed and does not run on the host instead
+- After `/dev/kvm` was opened for the current user on this machine, Cloud Hypervisor v54.0 and the Linux 7.2.8 kernel from the cloud-hypervisor release (`bzImage-x86_64` of `ch-release-v7.2.8-20261009`) booted an initramfs. `echo ok` took 898 ms of wall time. The summary worker with virtio-fs input and scratch and no `--net` took 1576 ms. The task reached `awaiting_approval` with `isolated` true. The model call was the host mock. krunvm is not installed, so the macOS path was not started
+- `[runtime] agent = "codex"` ran the pinned `codex-cli 0.167.0` musl binary on the same Cloud Hypervisor. The host checks the SHA256 in `third_party/codex.pin.json` first. The guest does not download. The guest has only `lo`. After `ip addr` assigns `127.0.0.1/8`, the loopback relay reaches the host's mock Responses service over vsock. There is no `--net`. `/sys/class/net` contains only `lo`, and a connection to `1.1.1.1:443` fails. One `POST /v1/responses` was recorded by the proxy. The task reached `awaiting_approval` with `isolated` true and `boot_ms` 7155. The last message was the mock summary and was not written to MemFS. Codex's standard error was empty. This is not a Mac result. `scripts/macos-codex-smoke.sh` only checks the aarch64 package on Apple Silicon. It does not boot a guest and does not treat that check as isolation success
+- `macos-vz` uses vfkit 0.6.4. When the user ran `a982e34` on an M4, the task reached `awaiting_approval` with `isolated` true, `boot_ms` 22209, only `lo` as the NIC, and a preflight context of 16384. The model did not write the marker and did not write outside the workspace, so `marker` and `sandbox_denied` were both false. The guest now writes the marker and attempts the outside write inside the same `workspace-write` sandbox after Codex. A missing marker is `probe_marker_missing`. A missing denial is `probe_sandbox_not_denied`. This Linux machine did not start Virtualization.framework
+- Ollama 0.40.15 on the same machine serves `/v1/responses`. With `SSIOS_OLLAMA_LIVE=1` and `SSIOS_VM_LIVE=1`, Codex in the guest called `exec_command` three times with `qwen2.5-coder:7b`. It wrote `marker.txt` in the workspace. Writing `/opt/ssios-outside` got a read-only filesystem, and connecting to `1.1.1.1:443` got `Operation not permitted`. The task reached `awaiting_approval` with `isolated` true and `boot_ms` 43363. The proxy log has only byte counts and SHA256. `deepseek-r1:7b` produced only a reasoning summary within 200 output tokens and made no tool call. `qwen2.5-coder:1.5b` produced invalid tool JSON. krunvm was not started
+- Apple M4, macOS, krunvm 0.2.7: when the image was not cached, `scripts/macos-vm-smoke.sh` failed after about 31 seconds with `isolated` false and `error_code` `microvm_fail_closed`. After the user ran `krunvm create python:3.12-alpine`, the same smoke passed at `2166525`: `awaiting_approval`, `runtime_backend` `macos-vm`, `isolated` true, `boot_ms` 3513. No personal data. This Linux machine has no krunvm and did not reproduce that boot
+- The local backend of Letta Code 0.34.45. The probe function is optional and does not run by default
 
-## 计划中
+## Planned
 
-- Ubuntu 上的真实 microVM 快速启动和单次使用的干净预热池
-- 每个导出一个 virtiofsd 进程的实际挂载
-- 客户机网络经纪。现在默认拒绝，没有连接器
-- 快照恢复。需要先做身份和密钥重置，当前直接拒绝带 vault、记忆或令牌的快照
-- 启动信任链、TPM 密封的 vault
-- 可选的机密计算 / TEE 剖面
-- 静态数据加密。代码只做权限位，不做 LUKS 或 FileVault
-- QMD 或 MemFS Search 的语义索引
-- 图形界面、消息和采购连接器
+- A real microVM fast start and a clean single-use warm pool on Ubuntu
+- An actual mount with one virtiofsd process per export
+- A guest network broker. It is denied by default now, and there is no connector
+- Snapshot restore. Identity and key reset have to come first. A snapshot that contains a vault, memory, or tokens is rejected now
+- A measured boot chain and a TPM-sealed vault
+- An optional confidential-computing / TEE profile
+- Encryption at rest. The code only sets permission bits. It does not use LUKS or FileVault
+- A semantic index from QMD or MemFS Search
+- A graphical interface and messaging and procurement connectors

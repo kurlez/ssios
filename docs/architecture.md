@@ -1,22 +1,22 @@
-# 架构
+# Architecture
 
-SSIOS v0 是本地个人 Agent OS 的上层原型：可信控制面、本地模型网关、Letta MemFS 兼容记忆、任务范围授权、项目共享存储、人类审批和审计。它不提供已验证的 microVM 快速启动，也不把开发档的进程内隔离说成虚拟化边界。
+SSIOS v0 is an upper-layer prototype of a local personal Agent OS: a trusted control plane, a local model gateway, Letta MemFS-compatible memory, task-scoped grants, project shared storage, human approval, and an audit log. It does not provide a verified microVM fast start, and it does not describe the dev profile's in-process isolation as a virtualization boundary.
 
-## 信任边界
+## Trust boundary
 
 ```mermaid
 flowchart TB
-  human[人类控制令牌]
-  task[任务范围令牌]
-  api[控制面 API 127.0.0.1]
-  auth[认证 ACL 审批 审计]
-  mem[Git Markdown 记忆库]
-  disk[只读导出 任务暂存 CAS 发布]
-  guard[dev-guard 进程内循环]
-  model[mock 或本机 Ollama]
-  ch[Cloud Hypervisor 适配器]
-  guest[客户机工作负载]
-  letta[Letta Code 可执行 shell]
+  human[Human control token]
+  task[Task-scoped token]
+  api[Control-plane API 127.0.0.1]
+  auth[Auth ACL approval audit]
+  mem[Git Markdown memory]
+  disk[Read-only export task staging CAS publish]
+  guard[dev-guard in-process loop]
+  model[mock or local Ollama]
+  ch[Cloud Hypervisor adapter]
+  guest[Guest workload]
+  letta[Letta Code executable shell]
 
   human --> api
   task --> api
@@ -25,56 +25,56 @@ flowchart TB
   auth --> disk
   api --> guard
   guard --> model
-  model -. 不可信文本 .-> guard
-  guard -. 白名单工具 .-> auth
-  ch -. 预检失败则关闭 .-> api
-  guest -. v0 未实现 .-> ch
-  letta -. 不进入可信核心 .-> mem
+  model -. untrusted text .-> guard
+  guard -. allowlisted tools .-> auth
+  ch -. fail closed when preflight fails .-> api
+  guest -. not implemented in v0 .-> ch
+  letta -. stays outside the trusted core .-> mem
 ```
 
-可信部分是控制面进程：令牌校验、项目 ACL、记忆经纪、存储经纪、审批绑定、审计和 dev-guard 的工具循环。模型输出不可信。未来的客户机不可信。Letta Code 能执行 shell，因此即使使用本地后端，也不能放进可信核心。可选的上游模式把 `letta` 放在经纪之外，只调用文档里的 JSON 子命令；批准仍由人类令牌完成。它不会在 CLI 失败时改用 `letta-memfs-compat`。
+The trusted part is the control-plane process: token checks, project ACL, the memory broker, the storage broker, approval binding, the audit log, and the dev-guard tool loop. Model output is not trusted. A future guest is not trusted. Letta Code can execute a shell, so it cannot sit inside the trusted core even with a local backend. The optional upstream mode keeps `letta` outside the broker and calls only the documented JSON subcommands. Approval is still done with the human token. It does not switch to `letta-memfs-compat` when the CLI fails.
 
-`dev-guard` 的隔离级别是 `process-jail`。它在同一进程里跑代理循环，只允许 `memory.read`、`memory.search` 和 `storage.read`。模型里的 `approve: true` 会被忽略并记入审计。这能挡住错误的工具调用，不能挡住控制面进程自身的漏洞，也不能代替 KVM。
+The isolation level of `dev-guard` is `process-jail`. It runs the agent loop in the same process and allows only `memory.read`, `memory.search`, and `storage.read`. `approve: true` from the model is ignored and written to the audit log. This stops a wrong tool call. It does not stop a bug in the control-plane process itself, and it is not a substitute for KVM.
 
-## 运行剖面
+## Runtime profiles
 
-| 剖面 | 行为 |
+| Profile | Behavior |
 | --- | --- |
-| `dev` + `dev-guard` + `mock` | 默认。本机环回、确定性模型、无网络 |
-| `dev` + `dev-guard` + `ollama` | 同一控制面，模型改为本机 Ollama，无云端回退 |
-| `production` 或 `cloud-hypervisor` | 进程不提供任务服务。预检打印后以状态码 2 退出 |
+| `dev` + `dev-guard` + `mock` | Default. Local loopback, a deterministic model, no network |
+| `dev` + `dev-guard` + `ollama` | The same control plane, with the model changed to local Ollama and no cloud fallback |
+| `production` or `cloud-hypervisor` | The process does not serve tasks. It prints preflight and exits with status 2 |
 
-Cloud Hypervisor 命令按上游文档构造：`--memory size=...M,shared=on`、每个共享目录一个 `--fs`、磁盘是任务私有路径、`--serial off`、`--console off`。参数里不出现 `--net`。请求客户机网络会得到 `network_denied`。
+The Cloud Hypervisor command follows the upstream docs: `--memory size=...M,shared=on`, one `--fs` per shared directory, a disk that is private to the task, `--serial off`, and `--console off`. `--net` does not appear in the arguments. Asking for a guest network returns `network_denied`.
 
-共享目录计划是两条 virtiofs：
+The share plan is two virtiofs mounts:
 
-- 输入导出：`virtiofsd --readonly --cache never --sandbox namespace`
-- 输出暂存：单独的 virtiofsd，只指向该任务的 staging 目录
+- Input export: `virtiofsd --readonly --cache never --sandbox namespace`
+- Output staging: a separate virtiofsd that points only at that task's staging directory
 
-记忆库、vault、令牌目录和用户主目录不能成为共享路径。v0 没有真正拉起 virtiofsd 或 cloud-hypervisor。`execution_implemented` 固定为 false。缺 KVM、二进制、内核或磁盘镜像时，对应检查为失败。无论检查是否齐备，`launch()` 都抛出 `microvm_fail_closed`，并且不会调用宿主机任务函数。
+The memory repository, the vault, the token directory, and the user's home directory cannot be share paths. v0 does not actually start virtiofsd or cloud-hypervisor. `execution_implemented` is fixed at false. If KVM, a binary, the kernel, or the disk image is missing, the matching check fails. Whether or not the checks are complete, `launch()` raises `microvm_fail_closed` and does not call the host task function.
 
-## 请求路径
+## Request path
 
-1. 人类令牌提交合成任务，指定项目、导出修订和允许读取的路径。
-2. 控制面签发只覆盖该项目和该路径的任务令牌。工作者静态令牌没有项目授权。
-3. dev-guard 先加载根目录核心记忆，再按模型请求读取主题文件和授权输入。
-4. 摘要写入任务私有暂存区并冻结。记忆提案写在 Git 仓库之外，标记为 `untrusted`。
-5. 两张审批单分别绑定动作、载荷 SHA-256、期望修订、随机 nonce 和由此算出的 `bound_hash`，并带过期时间。
-6. 人类令牌提交完全相同的绑定后，控制面才发布文件或提交 Git。重复提交被拒绝。
-7. 进程重启后，核心文件仍从 Git HEAD 加载，主题摘要按路径读取。
+1. The human token submits a synthetic task and names the project, the export revision, and the paths that may be read.
+2. The control plane issues a task token that covers only that project and those paths. The static worker token has no project grant.
+3. dev-guard loads root core memory first, then reads topic files and the granted input as the model asks.
+4. The summary is written to the task-private staging area and frozen. A memory proposal is written outside the Git repository and marked `untrusted`.
+5. Two approvals each bind the action, the payload SHA-256, the expected revision, a random nonce, and the `bound_hash` computed from those, and they carry an expiry.
+6. Only after the human token submits that exact binding does the control plane publish the file or commit Git. A repeat submission is rejected.
+7. After the process restarts, core files still load from Git HEAD and the topic summary is read by path.
 
-## 数据位置
+## Where data lives
 
-状态目录默认是 `.ssios/`，不入库。
+The state directory defaults to `.ssios/` and is not committed.
 
-- `secrets/`：人类令牌和工作者令牌，0600
-- `auth/tokens.json`：只有令牌哈希和授权
-- `memory/<project>/repo/`：MemFS 兼容 Git 仓库
-- `memory/<project>/provenance.json`：信任和墓碑元数据，不是事实来源
-- `storage/exports/`：不可变只读导出，带清单哈希
-- `storage/tasks/<id>/`：任务私有暂存
-- `storage/published/`：CAS 发布修订
-- `vault/`：不通过任何 API 提供的合成金丝雀
-- `audit/audit.jsonl`：动作元数据和哈希
+- `secrets/`: the human token and the worker token, mode 0600
+- `auth/tokens.json`: only token hashes and grants
+- `memory/<project>/repo/`: the MemFS-compatible Git repository
+- `memory/<project>/provenance.json`: trust and tombstone metadata, not the source of facts
+- `storage/exports/`: immutable read-only exports with a manifest hash
+- `storage/tasks/<id>/`: task-private staging
+- `storage/published/`: CAS published revisions
+- `vault/`: a synthetic canary that no API serves
+- `audit/audit.jsonl`: action metadata and hashes
 
-事实以 Git 中的 Markdown 为准。来源不在 `{synthetic_seed, approved}` 的文件不会交给任务令牌。直接写进工作树的文件对人类显示为 `unknown`。
+The facts are the Markdown in Git. A file whose source is not in `{synthetic_seed, approved}` is not given to a task token. A file written straight into the worktree is shown to the human as `unknown`.

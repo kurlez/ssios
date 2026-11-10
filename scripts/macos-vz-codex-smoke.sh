@@ -24,7 +24,7 @@ fi
 echo "If qwen2.5-coder:7b is not listed, run: ollama pull qwen2.5-coder:7b" >&2
 ollama list || true
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vz-codex.XXXXXX")
-echo "临时状态目录：$STATE" >&2
+echo "Temporary state directory: $STATE" >&2
 cleanup() {
   if [ -n "${PID:-}" ]; then
     kill "$PID" 2>/dev/null || true
@@ -33,7 +33,7 @@ cleanup() {
   if [ "${SSIOS_SMOKE_CLEAN:-}" = "1" ]; then
     rm -rf "$STATE"
   else
-    echo "临时状态保留在 $STATE" >&2
+    echo "Temporary state kept at $STATE" >&2
   fi
 }
 trap cleanup EXIT
@@ -58,7 +58,7 @@ if missing:
     raise SystemExit("smoke config was not updated: " + ", ".join(missing))
 path.write_text(text, encoding="utf-8")
 PY
-echo "核对 Ollama 的有效上下文。仍是 4096 就停在这里，不启动客户机。" >&2
+echo "Checking Ollama's effective context. If it is still 4096, stop here and do not boot the guest." >&2
 PYTHONPATH=src python3 - "$STATE/smoke.toml" "$STATE" << 'PY'
 import json
 import sys
@@ -77,7 +77,7 @@ if not report["ok"]:
     raise SystemExit(1)
 print(report["detail"], flush=True)
 PY
-echo "准备钉住的 aarch64 内核和 initramfs。客户机启动时不再下载。" >&2
+echo "Preparing the pinned aarch64 kernel and initramfs. The guest will not download them at boot." >&2
 # vm-prepare reads profile from the config file. It does not accept --profile.
 PYTHONPATH=src python3 -m ssios vm-prepare --state "$STATE" --config "$STATE/smoke.toml"
 PYTHONPATH=src PYTHONUNBUFFERED=1 python3 -u -m ssios up --profile dev --state "$STATE" --config "$STATE/smoke.toml" --port 0 >"$STATE/up.log" 2>&1 &
@@ -180,4 +180,4 @@ if failures:
     sys.stderr.write("smoke failed: " + ",".join(failures) + "\n")
     raise SystemExit(1)
 PY
-echo "这次结果来自这台 Mac。在 Linux 上的代理没有执行过 vfkit。" >&2
+echo "This result is from this Mac. The agent on Linux did not run vfkit." >&2

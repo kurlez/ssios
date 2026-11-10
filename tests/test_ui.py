@@ -115,7 +115,7 @@ class OriginTest(PlaneTest):
         self.assertIn("HttpOnly", cookie)
         status, page, _cookie = _form(self.base, "/ui/login", {"token": self.human}, origin="https://evil.example")
         self.assertEqual(status, 403, page)
-        self.assertIn("来源被拒绝", page)
+        self.assertIn("Origin rejected", page)
         self.assertIn("https://evil.example", page)
         self.assertIn(f"http://127.0.0.1:{port}", page)
         self.assertNotIn(self.human, page)
@@ -126,7 +126,7 @@ class OriginTest(PlaneTest):
             extra={"Referer": "https://evil.example/login"},
         )
         self.assertEqual(status, 403, page)
-        self.assertIn("来源被拒绝", page)
+        self.assertIn("Origin rejected", page)
 
 
 class RealUpOriginTest(unittest.TestCase):

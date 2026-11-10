@@ -1,42 +1,42 @@
 # SSIOS
 
-## microVM 还不能执行任务
+## The microVM cannot run tasks yet
 
-Cloud Hypervisor 代码只生成启动参数并做预检。它没有启动过客户机，也不是生产执行环境。缺 KVM、`cloud-hypervisor`、`virtiofsd`、内核或磁盘时会失败关闭，并且不会改在宿主机上跑任务。`dev-guard` 只是进程内的工具白名单。
+The Cloud Hypervisor code only builds launch arguments and runs preflight. It has not booted a guest, and it is not a production execution environment. If KVM, `cloud-hypervisor`, `virtiofsd`, the kernel, or the disk is missing, it fails closed and does not run the task on the host instead. `dev-guard` is only an in-process tool allowlist.
 
-## 两种记忆模式
+## Two memory modes
 
-默认 `letta-memfs-compat` 是本仓库自己的 Git Markdown 兼容库，用来在没有 Letta CLI 时跑通 mock 演示。它不是 Letta MemFS。
+The default `letta-memfs-compat` is this repository's own Git Markdown compatibility library. It lets the mock demo run when the Letta CLI is absent. It is not Letta MemFS.
 
-可选 `letta-memfs-upstream` 调用钉住的 Letta Code `0.34.45`（Apache-2.0）本地后端。它只运行文档中的 JSON 子命令：`agents create`、`memory tokens`、`memory export`、`memory status`，然后在 Letta 创建的 `memfs/<agent-id>/memory` 仓库里做经过批准的 git 提交。不会运行 `letta -p`，也不会加 `--yolo`。CLI 缺失或版本不符时直接失败，不会退回兼容库。
+The optional `letta-memfs-upstream` mode calls the pinned Letta Code `0.34.45` (Apache-2.0) local backend. It runs only the documented JSON subcommands: `agents create`, `memory tokens`, `memory export`, and `memory status`. It then makes an approved git commit in the `memfs/<agent-id>/memory` repository Letta created. It does not run `letta -p` and does not add `--yolo`. If the CLI is missing or the version does not match, it fails. It does not fall back to the compatibility library.
 
-控制面、审批、审计和项目存储在本机完成。开发档默认只绑定 `127.0.0.1`，模型是确定性 `mock`。
+The control plane, approvals, audit log, and project storage stay on this machine. The dev profile binds only to `127.0.0.1` by default, and the model is the deterministic `mock`.
 
-## 环境
+## Environment
 
-- Python 3.11 或更新版本（本仓库在 Python 3.12 上测试）
-- Git 2.x（MemFS 兼容库用它做版本提交）
-- 不需要 pip 第三方包、云密钥、Docker 或 root
+- Python 3.11 or newer (this repository is tested on Python 3.12)
+- Git 2.x (the MemFS compatibility library uses it for version commits)
+- No third-party pip packages, cloud keys, Docker, or root
 
-开发档默认只绑定 `127.0.0.1`，模型提供方是确定性的 `mock`，不访问网络，也不下载模型。
+The dev profile binds only to `127.0.0.1` by default. The model provider is the deterministic `mock`. It does not use the network and does not download a model.
 
-## 命令
+## Commands
 
 ```bash
-make test      # 回归测试，不需要密钥
-make demo      # mock 演示。自动选一个空闲端口，可与 make up 同时存在
-make up        # 前台启动开发档，默认 127.0.0.1:8765，Ctrl-C 停止
-make preflight # 打印 Cloud Hypervisor 预检。这不是启动虚拟机
+make test      # regression tests, no keys required
+make demo      # mock demo. Picks a free port and can run beside make up
+make up        # start the dev profile in the foreground, 127.0.0.1:8765 by default, Ctrl-C to stop
+make preflight # print the Cloud Hypervisor preflight. This does not boot a virtual machine
 make memfs-info
 ```
 
-`make demo` 的 `--state .ssios-demo` 会在启动时按当前工作目录收成绝对路径，再交给 Git。这样内部 Git 的工作目录即使改到 `git-home`，也不会再把相对路径 `-C` 解析错。它不会删除已有的 `.ssios` 或 `.ssios-demo`。过期的审批保持过期，不会延长原单或重用原来的 nonce。再执行 `make demo` 时，演示程序会按当前修订另开一张新审批，再用演示用的人类令牌批准新单。已发布且内容相同的结果不会重复发布。被拒绝、取消、失败或超时的任务不会在同一次命令里循环重试。若那份状态不想再动，可以换一个新目录，旧目录保持原样：
+`make demo` resolves `--state .ssios-demo` to an absolute path from the current working directory before handing it to Git. Internal Git can change its working directory to `git-home` without resolving a relative `-C` against the wrong place. It does not delete an existing `.ssios` or `.ssios-demo`. An expired approval stays expired. The original approval is not extended and its nonce is not reused. Running `make demo` again opens a new approval for the current revision and approves that new approval with the demo human token. A result that is already published with the same content is not published again. A task that was denied, cancelled, failed, or timed out is not retried in a loop by the same command. If that state directory should stay untouched, use a new directory and leave the old one as it is:
 
 ```bash
 PYTHONPATH=src python3 -m ssios demo --state .ssios-demo-retry --config config/ssios.example.toml
 ```
 
-上游 MemFS 冒烟（需要已安装钉住版本，且不会启动代理对话）：
+Upstream MemFS smoke (the pinned version must already be installed, and this does not start an agent conversation):
 
 ```bash
 npm install --prefix "$HOME/.ssios-letta" --no-fund --no-audit @letta-ai/letta-code@0.34.45
@@ -44,46 +44,46 @@ PYTHONPATH=src python3 -m ssios memfs-upstream-smoke \
   --state .ssios-upstream --letta-bin "$HOME/.ssios-letta/node_modules/.bin/letta"
 ```
 
-完整性校验见 `third_party/letta-code.pin.json`。Node 需要满足该包的 engines 字段。不要把 `LETTA_API_KEY` 放进环境；这条命令会丢掉父进程里的该变量。
+The integrity check is in `third_party/letta-code.pin.json`. Node must satisfy that package's engines field. Do not put `LETTA_API_KEY` in the environment; this command drops that variable from the parent process.
 
-也可以直接调用：
+You can also call the commands directly:
 
 ```bash
 PYTHONPATH=src python3 -m ssios demo --state .ssios-demo --config config/ssios.example.toml
 PYTHONPATH=src python3 -m ssios health --state .ssios --config config/ssios.example.toml
 ```
 
-`make up` 会在第一次运行时生成 `.ssios/secrets/human.token` 和 `worker.token`，权限为 `0600`。这两个文件已被 gitignore。人类控制令牌和工作者令牌不同。批准动作只能使用人类令牌。
+`make up` creates `.ssios/secrets/human.token` and `worker.token` on the first run, mode `0600`. Both files are gitignored. The human control token and the worker token are different. Only the human token can approve.
 
-演示会提交合成项目 `demo-alpha` 的摘要，等待人类批准，写入记忆并发布，然后重启进程再读回。审计日志只记录动作和载荷哈希。
+The demo submits a summary for the synthetic project `demo-alpha`, waits for human approval, writes memory, publishes, then restarts the process and reads the result back. The audit log records only the action and the payload hash.
 
-## 连接本机 Ollama
+## Connect local Ollama
 
-mock 与 Ollama 是两条配置，没有自动回退。把样例复制出来再改，不要把真实选择写回被跟踪的样例文件：
+mock and Ollama are two separate configs. There is no automatic fallback. Copy the sample and edit the copy. Do not write a real choice back into the tracked sample:
 
 ```bash
 cp config/ssios.example.toml .ssios/ollama.toml
 ```
 
-把 `.ssios/ollama.toml` 里的 `provider` 改成 `ollama`，并按本机模型名修改 `ollama_model`。建议从 7B/8B 的量化模型开始，名称只是配置，不是写死的依赖。Ollama 默认监听 `127.0.0.1:11434`。首次 `ollama pull` 会下载模型；下载完成后推理可以离线进行。本程序不会自动拉取模型，也没有遥测。
+Change `provider` in `.ssios/ollama.toml` to `ollama`, and set `ollama_model` to the local model name. Start with a quantized 7B or 8B model. The name is configuration, not a hardcoded dependency. Ollama listens on `127.0.0.1:11434` by default. The first `ollama pull` downloads the model; inference can stay offline after that. This program does not pull models automatically and has no telemetry.
 
 ```bash
 PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios --config .ssios/ollama.toml
 ```
 
-模型不在或端口不通时，任务失败，错误码是 `llm_unavailable`。Ollama 自己能回答，只说明进程在听，不代表 SSIOS 任务已经成功。
+If the model is missing or the port is closed, the task fails with `llm_unavailable`. An Ollama process that can answer only shows that the process is listening. It does not mean the SSIOS task succeeded.
 
-## 对已经运行的服务做一次摘要
+## Summarize against a service that is already running
 
-`ssios summary` 连接已经启动的服务，不另开进程，也不自动批准。它只跑合成项目 `local-summary`，不会改 `demo-alpha` 或其他项目的记忆。请使用和 `ssios up` 相同的 `--state` 与 `--config`。
+`ssios summary` connects to a service that is already running. It does not start another process and it does not approve by itself. It runs only the synthetic project `local-summary` and does not change memory for `demo-alpha` or any other project. Use the same `--state` and `--config` as `ssios up`.
 
-更新代码后，先停掉旧的 `ssios up`（不要删除状态目录），再用原来的参数启动一次，让新代码补上 `local-summary` 的导出：
+After updating the code, stop the old `ssios up` (do not delete the state directory), then start it once with the original arguments so the new code adds the `local-summary` export:
 
 ```bash
 PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-另一个终端。先把合成笔记送进记忆，看完差异后输入 `yes`。这一步不会绕过审批：
+In another terminal, send the synthetic notes into memory. Read the diff, then type `yes`. This step does not bypass approval:
 
 ```bash
 PYTHONPATH=src python3 -m ssios ingest examples/notes \
@@ -93,50 +93,50 @@ PYTHONPATH=src python3 -m ssios summary \
   --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-`summary` 只摘要 `topics/<topic>/` 里的笔记正文。`human.md` 和 `persona.md` 里的默认模板不算内容。没有笔记时返回 `no_content`，不会把模板复述进记忆。
+`summary` summarizes only note bodies under `topics/<topic>/`. The default templates in `human.md` and `persona.md` are not content. When there are no notes it returns `no_content` and does not write a restatement of the template into memory.
 
-命令会先打印拟发布的摘要和记忆差异。输入 `yes` 才批准，输入 `no` 拒绝，直接结束输入则保持待处理。模型输出里的 `approve`、`message.thinking` 和 `<think>` 都不会被当成批准。Ollama 请求带有 JSON schema；答案只从 `message.content` 读取。
+The command prints the summary it would publish and the memory diff first. `yes` approves, `no` denies, and ending input with no line leaves the approval pending. `approve`, `message.thinking`, and `<think>` in the model output are not treated as approval. The Ollama request includes a JSON schema. The answer is read only from `message.content`.
 
-失败的任务会留在状态目录里。截断的输出、只含思考过程的输出，以及复述内部字段的摘要都不会进入批准。再次执行 `ssios summary` 会新建一个任务。如果之前已经批准过一份坏摘要，新的 `yes` 会再做一次 git 提交，覆盖 `topics/fixtures/last-summary.md`，旧提交还在，状态目录不用删。
+Failed tasks stay in the state directory. Truncated output, output that contains only thinking, and a summary that restates internal fields do not reach approval. Running `ssios summary` again creates a new task. If a bad summary was already approved, a new `yes` makes another git commit that replaces `topics/fixtures/last-summary.md`. The old commit remains. The state directory does not need to be deleted.
 
-思考模型会收到 `think: false`。答案预算是配置里的 `max_output_tokens`（默认 1024）。可以先看本机 Ollama 是否接受结构化输出，这一步不创建任务：
+Thinking models receive `think: false`. The answer budget is `max_output_tokens` in the config (1024 by default). You can check whether the local Ollama accepts structured output before creating a task:
 
 ```bash
 PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-`dev-guard` 在控制面进程内完成任务。`macos-vm` 在装了 `krunvm` 之后把摘要 worker 放进客户机；模型调用仍由宿主机代理。没有客户机时任务失败关闭。`isolated` 只在客户机确实写出结果时为 true。说明见 [docs/macos-vm.md](docs/macos-vm.md)。
+`dev-guard` finishes the task inside the control-plane process. `macos-vm` puts the summary worker in a guest after `krunvm` is installed; the model call is still proxied by the host. Without a guest the task fails closed. `isolated` is true only when the guest actually wrote the result. See [docs/macos-vm.md](docs/macos-vm.md).
 
-Letta 每次 `memory export` 会在状态目录留下一份完整副本。读完后会删掉当次的 `exports/<agent>/scratch`。已经积累的 `exports/<agent>/<四位十六进制>/` 不会自动删。先停掉 `ssios up`，再看清单：
+Each Letta `memory export` leaves a full copy in the state directory. After the read, that run's `exports/<agent>/scratch` is deleted. Copies already accumulated under `exports/<agent>/<four hex digits>/` are not deleted automatically. Stop `ssios up` first, then list them:
 
 ```bash
 PYTHONPATH=src python3 -m ssios gc --dry-run --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-确认清单里只有导出副本后，去掉 `--dry-run` 并输入 `yes`。这条命令不删除 `backend/memfs` 里的 Git 历史。
+After the list contains only export copies, drop `--dry-run` and type `yes`. This command does not delete Git history under `backend/memfs`.
 
-本机页面只监听 `127.0.0.1`。API 仍使用 Bearer 令牌。浏览器先登录：
+The local page listens only on `127.0.0.1`. The API still uses a Bearer token. Sign in from the browser first:
 
 ```bash
 PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-打印的地址带一次性代码，大约两分钟有效。也可以打开 `http://127.0.0.1:8765/ui/login` 粘贴人类令牌。令牌不会出现在会话文件里。
+The printed address includes a one-time code that is valid for about two minutes. You can also open `http://127.0.0.1:8765/ui/login` and paste the human token. The token does not appear in the session file.
 
-Linux 客户机访问不到 macOS 宿主机的 `127.0.0.1`。默认不要把 Ollama 绑到 `0.0.0.0`。如果必须从客户机调用宿主机模型，只为该客户机地址做显式转发，并在防火墙上收紧来源。详见 [docs/macos-m4.md](docs/macos-m4.md)。
+A Linux guest cannot reach `127.0.0.1` on the macOS host. Do not bind Ollama to `0.0.0.0` by default. If the guest must call the host model, forward only that guest address and restrict the source in the firewall. See [docs/macos-m4.md](docs/macos-m4.md).
 
-## 文档
+## Docs
 
-- [架构与信任边界](docs/architecture.md)
-- [MemFS 集成边界](docs/memfs.md)
-- [实现状态](docs/status.md)
-- [威胁模型](docs/security.md)
+- [Architecture and trust boundary](docs/architecture.md)
+- [MemFS integration boundary](docs/memfs.md)
+- [Implementation status](docs/status.md)
+- [Threat model](docs/security.md)
 - [Mac mini M4 24GB](docs/macos-m4.md)
-- [macOS 客户机预检](docs/macos-vm.md)
-- [Ubuntu 与 Cloud Hypervisor](docs/deployment-ubuntu.md)
-- [许可证](docs/licenses.md)
-- 样例配置：[config/ssios.example.toml](config/ssios.example.toml)
+- [macOS guest preflight](docs/macos-vm.md)
+- [Ubuntu and Cloud Hypervisor](docs/deployment-ubuntu.md)
+- [Licenses](docs/licenses.md)
+- Sample config: [config/ssios.example.toml](config/ssios.example.toml)
 
-## 许可
+## License
 
-本仓库代码使用 MIT 许可证。Letta MemFS 的概念和 Letta Code 实现归 Letta 所有，上游许可证是 Apache-2.0。本仓库没有拷贝 Letta Code 源码。
+Code in this repository uses the MIT license. The Letta MemFS concept and the Letta Code implementation belong to Letta. The upstream license is Apache-2.0. This repository does not copy Letta Code source.

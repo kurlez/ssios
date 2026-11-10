@@ -1,22 +1,22 @@
-# macOS 上没有网卡的 Codex 客户机
+# A Codex guest on macOS with no NIC
 
-`agent = "codex"` 在 Apple Silicon 上用 `macos-vz`，不走 krunvm。摘要 worker 仍用 `macos-vm`。这篇说明核对的是 2026-11-09 的上游文档。Linux 云环境不能启动 Virtualization.framework，所以这里没有 Mac 启动结果。
+`agent = "codex"` uses `macos-vz` on Apple Silicon and does not use krunvm. The summary worker still uses `macos-vm`. This note was checked against upstream docs on 2026-11-09. A Linux cloud environment cannot start Virtualization.framework, so this file does not contain a Mac boot result of its own.
 
-## 为什么是 vfkit
+## Why vfkit
 
-| 方案 | 没有网卡 | vsock | virtio-fs | 安装 | 不选的原因 |
+| Option | No NIC | vsock | virtio-fs | Install | Why it was not chosen |
 | --- | --- | --- | --- | --- | --- |
-| vfkit 0.6.4 | 不写 `--device virtio-net` 就没有网卡。设备是逐个声明的 | `--device virtio-vsock,port=…,socketURL=…,listen`，宿主机是 Unix 套接字 | `--device virtio-fs,sharedDir=…,mountTag=…` | `brew install vfkit`。Apache-2.0。签名过的发布物带 `com.apple.security.virtualization` | 选定 |
-| Apple `container` 0.6.0 的 `--network none` | 例子里 `ip addr` 只剩 `lo` | 文档没有把 vsock 暴露成我们能接的宿主机套接字 | 容器根文件系统，不是这次的 virtio-fs 副本 | `brew` 不一定是主路径 | 关网卡不等于能接现有的 vsock 代理 |
-| 自己写的 Swift 助手 | 可以不添加 `VZVirtioNetworkDeviceConfiguration` | 可以 | 可以 | 要自己签名和维持 entitlement | 多一份要维护的二进制 |
-| libkrun / krunvm 0.2.7 / krunkit | 没有 virtio-net 时，libkrun 仍会打开 TSI，套接字由宿主机代发 | 有，但是 TSI 的通道 | krunvm 的 `-v` | 已用于摘要 | 不能保证没有出网 |
-| Lima `vz`、Tart | 能配成无网卡，但默认镜像和网络栈都比较重 | 有 | 有 | `brew` | 启动和镜像都比 vfkit 厚，不适合这个只读边界 |
+| vfkit 0.6.4 | Omitting `--device virtio-net` means there is no NIC. Devices are declared one by one | `--device virtio-vsock,port=…,socketURL=…,listen`. The host side is a Unix socket | `--device virtio-fs,sharedDir=…,mountTag=…` | `brew install vfkit`. Apache-2.0. The signed release has `com.apple.security.virtualization` | Chosen |
+| Apple `container` 0.6.0 `--network none` | The example `ip addr` shows only `lo` | The docs do not expose vsock as a host socket we can attach | A container root filesystem, not the virtio-fs copy used here | `brew` is not necessarily the main path | Turning off the NIC does not connect the existing vsock proxy |
+| A Swift helper written here | It can omit `VZVirtioNetworkDeviceConfiguration` | Possible | Possible | It would need its own signing and a maintained entitlement | Another binary to maintain |
+| libkrun / krunvm 0.2.7 / krunkit | Without virtio-net, libkrun still opens TSI and the host forwards the socket | Present, but it is the TSI channel | krunvm `-v` | Already used for summaries | It cannot guarantee there is no outbound network |
+| Lima `vz`, Tart | They can be configured with no NIC, but the default image and network stack are heavier | Present | Present | `brew` | Boot and images are thicker than vfkit and do not fit this read-only boundary |
 
-vfkit 的用法说明：<https://github.com/crc-org/vfkit/blob/v0.6.4/doc/usage.md>。直接启动要用未压缩的 arm64 `Image`。内核钉在 cloud-hypervisor 的 `ch-release-v7.2.8-20261009` `Image-arm64`，和这台 Linux 上已经用过的 x86_64 内核是同一次发布。arm64 这份有没有 virtio-fs 和 vsock，要等 Mac 上的第一次启动。
+vfkit usage: <https://github.com/crc-org/vfkit/blob/v0.6.4/doc/usage.md>. A direct boot needs an uncompressed arm64 `Image`. The kernel is pinned to cloud-hypervisor `ch-release-v7.2.8-20261009` `Image-arm64`, the same release as the x86_64 kernel already used on this Linux machine. Whether that arm64 build includes virtio-fs and vsock had to wait for the first boot on a Mac.
 
-## 在 M4 上跑
+## Run it on an M4
 
-不要改 `.ssios`、`.ssios-demo` 或 `.ssios-memfs`。脚本用临时目录，失败时保留它。它不创建磁盘卷。
+Do not modify `.ssios`, `.ssios-demo`, or `.ssios-memfs`. The script uses a temporary directory and keeps it on failure. It does not create a disk volume.
 
 ```bash
 brew install vfkit
@@ -25,9 +25,9 @@ ollama pull qwen2.5-coder:7b
 bash scripts/macos-vz-codex-smoke.sh
 ```
 
-脚本把样例配置改成 `backend = "macos-vz"`、`agent = "codex"` 和本机 Ollama。`vm-prepare` 不接受 `--profile`，档位来自配置文件里的 `profile = "dev"`。`--profile dev` 只传给 `ssios up`。
+The script changes the sample config to `backend = "macos-vz"`, `agent = "codex"`, and local Ollama. `vm-prepare` does not accept `--profile`. The profile comes from `profile = "dev"` in the config file. `--profile dev` is passed only to `ssios up`.
 
-Ollama 的 OpenAI 兼容接口 `/v1/responses` 忽略请求里的 `options`，上下文停在默认的 4096。Codex 的系统提示加工具大约 4098 token，所以那条路径会返回 400。宿主机代理把同一份请求译成原生 `POST /api/chat`，并带上 `[agent.codex] num_ctx`（默认 16384，允许 8192 到 32768）。已安装的 `qwen2.5-coder:7b` 不会被改写。冒烟脚本在启动客户机之前读 `/api/ps` 的 `context_length`。如果仍是 4096，脚本直接退出，并打印这两条补救命令：
+Ollama's OpenAI-compatible `/v1/responses` ignores `options` in the request, so the context stays at the 4096 default. Codex's system prompt plus tools is about 4098 tokens, so that path returns 400. The host proxy translates the same request to native `POST /api/chat` and sends `[agent.codex] num_ctx` (16384 by default, allowed from 8192 to 32768). The installed `qwen2.5-coder:7b` is not rewritten. The smoke script reads `context_length` from `/api/ps` before booting the guest. If it is still 4096, the script exits and prints these two recovery commands:
 
 ```bash
 OLLAMA_CONTEXT_LENGTH=16384 ollama serve
@@ -35,12 +35,12 @@ printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 16384\n' > /tmp/ssios-Modelfile
 ollama create ssios-qwen2.5-coder-7b-16k -f /tmp/ssios-Modelfile
 ```
 
-第二条只在重启后的 `/api/ps` 仍是 4096 时才需要。然后把 `[agent.codex] model` 改成 `ssios-qwen2.5-coder-7b-16k`，并把它加进 `allow_models`。上游 400 这类不可重试的 4xx 会立刻停掉 vfkit，请求上限仍是 4。
+The second command is needed only if `/api/ps` is still 4096 after the restart. Then set `[agent.codex] model` to `ssios-qwen2.5-coder-7b-16k` and add it to `allow_models`. A non-retryable upstream 4xx such as 400 stops vfkit immediately. The request cap stays at 4.
 
-客户机根不会解到宿主机磁盘上。CPython 的 terminfo 里有 25 对只差大小写的路径，例如 `N/NCR260VT300WPP` 指向 `../n/ncr260vt300wpp`。在默认不区分大小写的 APFS 上这会变成指向自己的符号链接，Python 3.14 的 `tarfile` 过滤再调用 `realpath` 就会报 `Too many levels of symbolic links`。initramfs 在内存里从 tar 成员直接打成 cpio。`share/terminfo` 不放进客户机。每次冒烟都用新的临时目录，不必删上一次失败留下的目录。
+The guest root is not extracted onto the host disk. CPython's terminfo has 25 path pairs that differ only by case, for example `N/NCR260VT300WPP` pointing at `../n/ncr260vt300wpp`. On the default case-insensitive APFS that becomes a symlink to itself, and Python 3.14's `tarfile` filter then calls `realpath` and reports `Too many levels of symbolic links`. The initramfs is packed from tar members to cpio in memory. `share/terminfo` is not placed in the guest. Each smoke uses a new temporary directory. The directory left by the previous failure does not need to be deleted.
 
-vsock 的宿主机套接字不放在状态目录里。macOS 的 `sun_path` 只有 104 字节，`/var/folders/...` 太长。代理在 `/tmp/ssios-<随机>`（0700）上监听，套接字是 0600。vfkit 0.6.4 的 `listen` 表示宿主机听、客户机连到 CID 2 端口 19090。没有打开 vfkit 的 REST 套接字。串口日志仍写在任务目录的 `guest/serial.log`，失败时路径和末尾会进 `diagnostics/<task>.json`。Homebrew 的 vfkit 自带 `com.apple.security.virtualization` 签名，这里不再签名。
+The host vsock socket is not placed in the state directory. macOS `sun_path` is only 104 bytes, and `/var/folders/...` is too long. The proxy listens on `/tmp/ssios-<random>` (0700), and the socket is 0600. vfkit 0.6.4 `listen` means the host listens and the guest connects to CID 2 port 19090. vfkit's REST socket is not opened. The serial log stays at `guest/serial.log` in the task directory. On failure its path and tail go into `diagnostics/<task>.json`. Homebrew vfkit already carries the `com.apple.security.virtualization` signature. This code does not sign it again.
 
-钉住的 `Image-arm64`（Linux 7.2.8）已经包含 virtio-vsock 和 virtio-fs。M4 上的串口日志有 `NET: Registered PF_VSOCK protocol family`。失败点是 python-build-standalone 的 CPython 3.12.16 musl 没有编译 `socket.AF_VSOCK`。中继用协议族 40，并通过 musl 的 `connect` 发送 16 字节的 `sockaddr_vm`。客户机在启动后几秒内自检；60 秒内没有 vsock 连接就停掉 vfkit。
+The pinned `Image-arm64` (Linux 7.2.8) already contains virtio-vsock and virtio-fs. The M4 serial log contains `NET: Registered PF_VSOCK protocol family`. The failure point was that python-build-standalone CPython 3.12.16 musl was not built with `socket.AF_VSOCK`. The relay uses address family 40 and sends a 16-byte `sockaddr_vm` through musl `connect`. The guest self-checks within a few seconds of boot. If there is no vsock connection within 60 seconds, vfkit is stopped.
 
-客户机在 Codex 跑完之后，再用同一个 `workspace-write` 沙箱执行一次固定探测：写入 `/workspace/marker.txt`，并尝试写 `/opt/ssios-outside`。这一步不调用模型。冒烟只有在 `awaiting_approval`、`isolated` 为 true、`marker` 为 true、`sandbox_denied` 为 true、`outside_write` 为 false、`nic` 只有 `lo`、`outbound` 为 false 时才通过。缺标记是 `probe_marker_missing`，沙箱没有拒绝外部写入是 `probe_sandbox_not_denied`。
+After Codex finishes, the guest runs one fixed probe in the same `workspace-write` sandbox: it writes `/workspace/marker.txt` and tries to write `/opt/ssios-outside`. That step does not call the model. The smoke passes only when the status is `awaiting_approval`, `isolated` is true, `marker` is true, `sandbox_denied` is true, `outside_write` is false, `nic` is only `lo`, and `outbound` is false. A missing marker is `probe_marker_missing`. An outside write that the sandbox did not deny is `probe_sandbox_not_denied`.

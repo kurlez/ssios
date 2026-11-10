@@ -12,7 +12,7 @@ if ! command -v krunvm >/dev/null 2>&1; then
 fi
 krunvm --version
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vm-smoke.XXXXXX")
-echo "临时状态目录：$STATE" >&2
+echo "Temporary state directory: $STATE" >&2
 cleanup() {
   if [ -n "${PID:-}" ]; then
     kill "$PID" 2>/dev/null || true
@@ -21,7 +21,7 @@ cleanup() {
   if [ "${SSIOS_SMOKE_CLEAN:-}" = "1" ]; then
     rm -rf "$STATE"
   else
-    echo "临时状态保留在 $STATE" >&2
+    echo "Temporary state kept at $STATE" >&2
   fi
 }
 trap cleanup EXIT

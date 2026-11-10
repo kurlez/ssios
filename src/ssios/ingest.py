@@ -130,7 +130,7 @@ def run_ingest(settings, source: Path, project_id: str) -> int:
     if code != 200:
         raise SsiosError(str(preview.get("error") or "preview_failed"), str(preview.get("detail") or "preview failed"))
     print(
-        f"待确认 {preview.get('action')} 载荷 {preview.get('payload_sha256')} 期望修订 {preview.get('expected_revision')}",
+        f"Pending {preview.get('action')} payload {preview.get('payload_sha256')} expected revision {preview.get('expected_revision')}",
         flush=True,
     )
     for item in preview.get("files") or []:
@@ -143,7 +143,7 @@ def run_ingest(settings, source: Path, project_id: str) -> int:
 
     line = sys.stdin.readline()
     if line == "":
-        _emit({"result": "pending", "approval_id": approval_id, "detail": "没有输入，审批保持待处理，没有写入记忆。"})
+        _emit({"result": "pending", "approval_id": approval_id, "detail": "No input. The approval stays pending and memory was not written."})
         return 2
     choice = line.strip()
     if choice == "no":
@@ -151,7 +151,7 @@ def run_ingest(settings, source: Path, project_id: str) -> int:
         _emit({"result": "denied", "approval_id": approval_id, "project_id": project_id})
         return 0
     if choice != "yes":
-        _emit({"result": "pending", "approval_id": approval_id, "detail": "未输入 yes，审批保持待处理，没有写入记忆。"})
+        _emit({"result": "pending", "approval_id": approval_id, "detail": "yes was not entered. The approval stays pending and memory was not written."})
         return 2
     _decide(base, token, preview, "approve", 90)
     _emit({"result": "committed", "approval_id": approval_id, "project_id": project_id, "files": len(files)})

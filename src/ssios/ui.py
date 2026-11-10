@@ -71,7 +71,7 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
                 "input_path": "notes.md",
             },
         )
-        return Page(200, _page(session, "任务已创建", f"<p>任务 {html.escape(created['id'])} 已排队。批准仍在收件箱里完成。</p>"))
+        return Page(200, _page(session, "Task created", f"<p>Task {html.escape(created['id'])} is queued. Approval still happens in the inbox.</p>"))
     if method == "GET" and path == "/ui/memory":
         return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", "")))
     if method == "GET" and path == "/ui/settings":
@@ -80,7 +80,7 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
         _csrf(session, body)
         _drop_session(plane, session["id"])
         return Page(200, _login_page(""), cookie=f"{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/ui; Max-Age=0")
-    return Page(404, _page(session, "没有这个页面", "<p>没有这个页面。</p>"))
+    return Page(404, _page(session, "Page not found", "<p>This page does not exist.</p>"))
 
 
 def issue_login_code(plane) -> str:
@@ -118,7 +118,7 @@ def _start_session(plane) -> Page:
     sessions[session_id] = {"csrf": csrf, "expires": time.time() + SESSION_TTL}
     write_json(path, {"sessions": sessions}, 0o600)
     cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/ui"
-    return Page(200, _page({"csrf": csrf}, "已登录", "<p>已登录。令牌没有写入会话文件。</p><p><a href=\"/ui\">进入控制台</a></p>"), cookie=cookie)
+    return Page(200, _page({"csrf": csrf}, "Signed in", "<p>Signed in. The token was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"), cookie=cookie)
 
 
 def _session(plane, headers) -> dict | None:
@@ -207,11 +207,11 @@ def _check_origin(plane, headers) -> Page | None:
     origin = str(headers.get("Origin") or "").strip()
     site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
     if site == "cross-site":
-        return _origin_rejection(origin or "(没有 Origin)", allowed)
+        return _origin_rejection(origin or "(no Origin)", allowed)
     if origin.lower() in ("", "null"):
         referer = str(headers.get("Referer") or headers.get("Referrer") or "").strip()
         if referer and _origin_value(referer) not in allowed:
-            return _origin_rejection(origin or "(没有 Origin)", allowed)
+            return _origin_rejection(origin or "(no Origin)", allowed)
         return None
     if _origin_value(origin) not in allowed:
         return _origin_rejection(origin, allowed)
@@ -220,14 +220,14 @@ def _check_origin(plane, headers) -> Page | None:
 
 def _origin_rejection(received: str, allowed: set[str]) -> Page:
     shown = html.escape(received)
-    expected = "、".join(html.escape(item) for item in sorted(allowed))
+    expected = ", ".join(html.escape(item) for item in sorted(allowed))
     body = (
-        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>来源被拒绝</title>"
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Origin rejected</title>"
         + _STYLE
-        + "<body><main><h1>来源被拒绝</h1>"
-        + f"<p>收到的 Origin：{shown}</p>"
-        + f"<p>允许的 Origin：{expected}</p>"
-        + "<p>请从 http://127.0.0.1 和实际端口重新打开登录页。其他网站的来源会被拒绝。</p>"
+        + "<body><main><h1>Origin rejected</h1>"
+        + f"<p>Origin received: {shown}</p>"
+        + f"<p>Allowed origins: {expected}</p>"
+        + "<p>Open the login page again from http://127.0.0.1 and the actual port. Origins from other sites are rejected.</p>"
         + "</main></body></html>"
     )
     return Page(403, body)
@@ -240,14 +240,14 @@ def _human(plane) -> str:
 def _dashboard(plane, session: dict) -> str:
     status = plane.status(_human(plane))
     runtime = status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
-    isolated = "是" if runtime.get("isolated") else "否"
+    isolated = "yes" if runtime.get("isolated") else "no"
     body = (
-        f"<p>后端：{html.escape(str(runtime.get('active_backend')))}</p>"
-        f"<p>隔离：{isolated}</p>"
-        f"<p>模型：{html.escape(str(status.get('llm', {}).get('provider')))} / {html.escape(str(status.get('llm', {}).get('model')))}</p>"
-        f"<p>记忆：{html.escape(str(status.get('memory', {}).get('mode')))}</p>"
+        f"<p>Backend: {html.escape(str(runtime.get('active_backend')))}</p>"
+        f"<p>Isolated: {isolated}</p>"
+        f"<p>Model: {html.escape(str(status.get('llm', {}).get('provider')))} / {html.escape(str(status.get('llm', {}).get('model')))}</p>"
+        f"<p>Memory: {html.escape(str(status.get('memory', {}).get('mode')))}</p>"
     )
-    return _page(session, "控制台", body)
+    return _page(session, "Console", body)
 
 
 def _tasks(plane, session: dict) -> str:
@@ -256,24 +256,24 @@ def _tasks(plane, session: dict) -> str:
         rows.append(
             f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
         )
-    return _page(session, "任务", "<ul>" + "".join(rows) + "</ul>")
+    return _page(session, "Tasks", "<ul>" + "".join(rows) + "</ul>")
 
 
 def _task(plane, session: dict, task_id: str) -> str:
     try:
         task = plane.get_task(_human(plane), task_id)
     except SsiosError as exc:
-        return _page(session, "任务", f"<p>{html.escape(exc.detail)}</p>")
-    isolated = "是" if task.get("isolated") else "否"
+        return _page(session, "Task", f"<p>{html.escape(exc.detail)}</p>")
+    isolated = "yes" if task.get("isolated") else "no"
     boot = task.get("boot_ms")
-    boot_line = f"{boot} 毫秒" if isinstance(boot, int) else "没有"
+    boot_line = f"{boot} ms" if isinstance(boot, int) else "none"
     summary = (
-        f"<p>后端：{html.escape(str(task.get('runtime_backend') or ''))}</p>"
-        f"<p>隔离：{isolated}</p>"
-        f"<p>启动并运行：{html.escape(boot_line)}</p>"
+        f"<p>Backend: {html.escape(str(task.get('runtime_backend') or ''))}</p>"
+        f"<p>Isolated: {isolated}</p>"
+        f"<p>Boot and run: {html.escape(boot_line)}</p>"
     )
     if task.get("error_detail"):
-        summary += f"<p>错误：{html.escape(str(task.get('error_detail')))}</p>"
+        summary += f"<p>Error: {html.escape(str(task.get('error_detail')))}</p>"
     return _page(session, task_id, summary + f"<pre>{html.escape(json.dumps(task, ensure_ascii=False, indent=2))}</pre>")
 
 
@@ -295,7 +295,7 @@ def _approvals(plane, session: dict) -> str:
             + _decision_form(session, record)
             + "</article>"
         )
-    return _page(session, "批准", "".join(rows) or "<p>没有待批准的项目。</p>")
+    return _page(session, "Approvals", "".join(rows) or "<p>Nothing is waiting for approval.</p>")
 
 
 def _decision_form(session: dict, record: dict) -> str:
@@ -307,14 +307,14 @@ def _decision_form(session: dict, record: dict) -> str:
     return (
         f"<form method=\"post\" action=\"/ui/approvals/{html.escape(record['approval_id'])}\">"
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">{fields}"
-        "<button name=\"decision\" value=\"approve\" type=\"submit\">批准</button>"
-        "<button name=\"decision\" value=\"deny\" type=\"submit\">拒绝</button></form>"
+        "<button name=\"decision\" value=\"approve\" type=\"submit\">Approve</button>"
+        "<button name=\"decision\" value=\"deny\" type=\"submit\">Deny</button></form>"
     )
 
 
 def _decide(plane, session: dict, approval_id: str, body: dict) -> Page:
     result = plane.decide(_human(plane), approval_id, body)
-    return Page(200, _page(session, "已决定", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
 
 
 def _ingest_form(plane, session: dict, notice: str) -> str:
@@ -322,13 +322,13 @@ def _ingest_form(plane, session: dict, notice: str) -> str:
     csrf = html.escape(str(session["csrf"]))
     return _page(
         session,
-        "收录",
+        "Ingest",
         notice
         + f"<form method=\"post\" action=\"/ui/ingest\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<label>项目 <input name=\"project_id\" value=\"local-summary\"></label>"
-        "<label>文件名 <input name=\"filename\" value=\"note.md\"></label>"
-        "<label>正文 <textarea name=\"content\" rows=\"8\"></textarea></label>"
-        "<button type=\"submit\">预览并创建批准</button></form>",
+        "<label>Project <input name=\"project_id\" value=\"local-summary\"></label>"
+        "<label>Filename <input name=\"filename\" value=\"note.md\"></label>"
+        "<label>Body <textarea name=\"content\" rows=\"8\"></textarea></label>"
+        "<button type=\"submit\">Preview and create approval</button></form>",
     )
 
 
@@ -356,8 +356,8 @@ def _ingest(plane, session: dict, body: dict) -> Page:
         200,
         _page(
             session,
-            "收录已提交批准",
-            f"<pre>{preview}</pre><p>批准编号 {html.escape(str(result['approval']['id']))}。记忆还没有写入。</p>",
+            "Ingest submitted for approval",
+            f"<pre>{preview}</pre><p>Approval {html.escape(str(result['approval']['id']))}. Memory has not been written.</p>",
         ),
     )
 
@@ -367,11 +367,11 @@ def _summary_form(plane, session: dict) -> str:
     csrf = html.escape(str(session["csrf"]))
     return _page(
         session,
-        "摘要",
+        "Summary",
         f"<form method=\"post\" action=\"/ui/summary\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<label>项目 <input name=\"project_id\" value=\"local-summary\"></label>"
-        "<label>主题 <input name=\"topic\" value=\"local-summary\"></label>"
-        "<button type=\"submit\">创建摘要任务</button></form>",
+        "<label>Project <input name=\"project_id\" value=\"local-summary\"></label>"
+        "<label>Topic <input name=\"topic\" value=\"local-summary\"></label>"
+        "<button type=\"submit\">Create summary task</button></form>",
     )
 
 
@@ -385,7 +385,7 @@ def _memory(plane, session: dict, project_id: str, path: str) -> str:
     if path:
         doc = plane.read_memory(_human(plane), project_id, path)
         content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>" + _history(plane, project_id, path)
-    return _page(session, "记忆", f"<ul>{links}</ul>{content}")
+    return _page(session, "Memory", f"<ul>{links}</ul>{content}")
 
 
 def _history(plane, project_id: str, path: str) -> str:
@@ -398,7 +398,7 @@ def _history(plane, project_id: str, path: str) -> str:
     if completed.returncode != 0 or not completed.stdout:
         return ""
     text = completed.stdout.decode("utf-8", "replace")
-    return f"<h2>历史</h2><pre>{html.escape(text)}</pre>"
+    return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
 def _settings(plane, session: dict) -> str:
@@ -409,12 +409,12 @@ def _settings(plane, session: dict) -> str:
         "memory": status.get("memory", {}).get("mode"),
         "model": status.get("llm", {}).get("model"),
     }
-    return _page(session, "设置", f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
+    return _page(session, "Settings", f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
 
 
 _STYLE = """
 <style>
-body { margin: 0; font: 16px/1.5 "Songti SC", "Noto Serif CJK SC", serif; color: #1c1915; background: #f6f1e7; }
+body { margin: 0; font: 16px/1.5 Georgia, "Iowan Old Style", serif; color: #1c1915; background: #f6f1e7; }
 nav, main { max-width: 46rem; margin: 0 auto; }
 nav { display: flex; gap: 1rem; padding: 1rem 0; }
 a { color: #6b3a1f; }
@@ -431,26 +431,26 @@ article { border-top: 1px solid #d9d0c1; padding-top: 1rem; }
 def _login_page(code: str) -> str:
     value = html.escape(code)
     return (
-        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>登录</title>"
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sign in</title>"
         + _STYLE
-        + "<body><main><h1>登录</h1><form method=\"post\" action=\"/ui/login\">"
-        f"<label>一次性代码 <input name=\"code\" value=\"{value}\"></label>"
-        "<label>人类令牌 <input name=\"token\" type=\"password\"></label>"
-        "<button type=\"submit\">登录</button></form></main></body></html>"
+        + "<body><main><h1>Sign in</h1><form method=\"post\" action=\"/ui/login\">"
+        f"<label>One-time code <input name=\"code\" value=\"{value}\"></label>"
+        "<label>Human token <input name=\"token\" type=\"password\"></label>"
+        "<button type=\"submit\">Sign in</button></form></main></body></html>"
     )
 
 
 def _page(session: dict, title: str, body: str) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     return (
-        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>"
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>"
         + html.escape(title)
         + "</title>"
         + _STYLE
-        + "<body><nav><a href=\"/ui\">控制台</a> <a href=\"/ui/tasks\">任务</a> "
-        "<a href=\"/ui/approvals\">批准</a> <a href=\"/ui/ingest\">收录</a> <a href=\"/ui/summary\">摘要</a> "
-        "<a href=\"/ui/memory?project_id=local-summary\">记忆</a> <a href=\"/ui/settings\">设置</a></nav>"
+        + "<body><nav><a href=\"/ui\">Console</a> <a href=\"/ui/tasks\">Tasks</a> "
+        "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a></nav>"
         f"<main><h1>{html.escape(title)}</h1>{body}"
         f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<button type=\"submit\">退出</button></form></main></body></html>"
+        "<button type=\"submit\">Sign out</button></form></main></body></html>"
     )

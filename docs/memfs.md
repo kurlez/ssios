@@ -1,50 +1,50 @@
-# Letta MemFS 集成边界
+# Letta MemFS integration boundary
 
-默认模式 `letta-memfs-compat` 只复用公开的 Git Markdown 形状，方便没有 Letta CLI 时运行 mock 演示。它不是 Letta MemFS。
+The default mode `letta-memfs-compat` only reuses the public Git Markdown shape so the mock demo can run without the Letta CLI. It is not Letta MemFS.
 
-可选模式 `letta-memfs-upstream` 才调用上游。钉住的包是 `@letta-ai/letta-code@0.34.45`，完整性摘要写在 `third_party/letta-code.pin.json`。
+Only the optional mode `letta-memfs-upstream` calls upstream. The pinned package is `@letta-ai/letta-code@0.34.45`. The integrity digest is in `third_party/letta-code.pin.json`.
 
-## 上游现状
+## What upstream looks like
 
-核对时间：2026-11-08。
+Checked on 2026-11-08.
 
-| 来源 | 观察 |
+| Source | Observation |
 | --- | --- |
-| [MemFS 文档](https://docs.letta.com/letta-code/memfs) | 记忆是属于代理的 Git 仓库。根目录 Markdown 进入每轮上下文；带自己 `MEMORY.md` 的目录按需读取。除索引外的文件使用 `name` 和 `description` 前言。默认没有向量索引。本地代理把提交留在当前机器。 |
-| [@letta-ai/letta-code 0.34.45](https://github.com/letta-ai/letta-code) | Apache-2.0。`package.json` 的 `bin` 是 `letta`。包体包含可执行代理、shell 和工具运行时。 |
-| `letta-code` 导出的 `memory-confinement` | 这是给子进程套沙箱的启动器。上游注释写明该进程仍可以广泛读取宿主机。它不是可嵌入的 MemFS 存储 SDK。本仓库不调用它。 |
-| [自托管文档](https://docs.letta.com/self-hosting) | `letta --backend local` 可以不登录，把状态放在 `~/.letta/lc-local-backend`。每个代理的 MemFS 在 `memfs/<agent-id>/memory`。代理工具运行在 harness 所在机器上。 |
-| [Letta 服务器的 local MemFS](https://docs.letta.com/v1-sdk/docker) | `LETTA_MEMFS_SERVICE_URL=local` 提供 API 级记忆块。文档写明该模式下 Git HTTP 代理返回 501，Letta Code 的 clone/push 流程不可用。社区 Git sidecar 被标为非官方。 |
+| [MemFS docs](https://docs.letta.com/letta-code/memfs) | Memory is a Git repository that belongs to an agent. Root Markdown enters every turn's context. A directory with its own `MEMORY.md` is read on demand. Files other than the index use `name` and `description` front matter. There is no vector index by default. A local agent keeps commits on the current machine. |
+| [@letta-ai/letta-code 0.34.45](https://github.com/letta-ai/letta-code) | Apache-2.0. The `bin` in `package.json` is `letta`. The package contains an executable agent, a shell, and a tool runtime. |
+| `memory-confinement` exported by `letta-code` | This is a launcher that sandboxes a subprocess. An upstream comment says that process can still read widely on the host. It is not an embeddable MemFS storage SDK. This repository does not call it. |
+| [Self-hosting docs](https://docs.letta.com/self-hosting) | `letta --backend local` can run without login and puts state in `~/.letta/lc-local-backend`. Each agent's MemFS is at `memfs/<agent-id>/memory`. Agent tools run on the machine that hosts the harness. |
+| [Local MemFS on the Letta server](https://docs.letta.com/v1-sdk/docker) | `LETTA_MEMFS_SERVICE_URL=local` provides API-level memory blocks. The docs say the Git HTTP proxy returns 501 in that mode, so Letta Code's clone/push flow is unavailable. The community Git sidecar is marked unofficial. |
 
-npm 上的 `memfs` 是另一个内存文件系统包。本项目不依赖它，也不依赖 `@letta-ai/letta-code` 或 `@letta-ai/letta-code-sdk`。
+The npm package `memfs` is a different in-memory filesystem package. This project does not depend on it, and it does not depend on `@letta-ai/letta-code` or `@letta-ai/letta-code-sdk`.
 
-## 本仓库实际做了什么
+## What this repository actually does
 
-控制面拥有一个普通 Git 仓库，目录形状与文档中的 `$MEMORY_DIR` 相同：
+The control plane owns an ordinary Git repository whose directory shape matches the documented `$MEMORY_DIR`:
 
-- 根目录 `MEMORY.md` 是没有前言的索引，属于核心记忆
-- 其他根目录 Markdown 带 `name` 和 `description`，每次任务先加载
-- `topics/` 和 `skills/` 不进入核心，只能按路径读取
-- 搜索是大小写不敏感的关键字扫描，`search_mode=keyword`
-- 批准后的修改用 `git commit` 固定下来，期望修订必须等于当前 HEAD
-- 遗忘使用 `git rm`，来源记录改为墓碑；API 不再返回正文
+- Root `MEMORY.md` is an index with no front matter and belongs to core memory
+- Other root Markdown files have `name` and `description` and are loaded before each task
+- `topics/` and `skills/` do not enter core and can be read only by path
+- Search is a case-insensitive keyword scan, `search_mode=keyword`
+- An approved change is fixed with `git commit`. The expected revision must equal the current HEAD
+- Forget uses `git rm` and changes the source record to a tombstone. The API no longer returns the body
 
-经纪 API：
+Broker API:
 
 - `GET /v1/memory/core`
 - `GET /v1/memory/file`
 - `GET /v1/memory/search`
 - `POST /v1/memory/propose`
 - `POST /v1/memory/forget`
-- 批准通过 `POST /v1/approvals/<id>/decide`，体内包含 `expected_revision`
+- Approval goes through `POST /v1/approvals/<id>/decide`, and the body includes `expected_revision`
 
-提案先落在仓库外的 JSON 文件，信任值是 `untrusted`。批准前，核心读取和按路径读取都看不到提案正文。
+A proposal is written to a JSON file outside the repository first, with trust `untrusted`. Before approval, core reads and path reads cannot see the proposal body.
 
-`ssios memfs-info` 只打印上述钉住的版本和本地探测结果。默认不执行 `letta`。`--execute-version` 才会运行 `letta --version`，并设置 `LETTA_CODE_TELEM=0` 与 `DISABLE_AUTOUPDATER=1`。控制面启动时不会做这件事。
+`ssios memfs-info` only prints the pinned version above and the local probe result. It does not run `letta` by default. `--execute-version` is what runs `letta --version`, and it sets `LETTA_CODE_TELEM=0` and `DISABLE_AUTOUPDATER=1`. The control plane does not do this at startup.
 
-## 上游模式实际调用的命令
+## Commands the upstream mode actually runs
 
-在空的 `HOME` 和单独的 `LETTA_LOCAL_BACKEND_DIR` 里，只允许这些参数：
+Inside an empty `HOME` and a separate `LETTA_LOCAL_BACKEND_DIR`, only these arguments are allowed:
 
 - `letta --version`
 - `letta --backend local agents create --personality blank`
@@ -52,17 +52,17 @@ npm 上的 `memfs` 是另一个内存文件系统包。本项目不依赖它，�
 - `letta --backend local memory export --agent ... --out ...`
 - `letta --backend local memory status --agent ...`
 
-`memory` 子命令的帮助写明：记忆由 Git 支持，提交使用 git。批准之后，SSIOS 只在该代理的 `memfs/<agent-id>/memory` 目录里 `git add` / `git commit`，并把 `core.hooksPath` 指到一个空目录，避免运行 Letta 安装的 `post-commit`（那个钩子会在配置了远端时后台 `git push`）。
+The `memory` subcommand help says memory is backed by Git and commits use git. After approval, SSIOS only runs `git add` / `git commit` in that agent's `memfs/<agent-id>/memory` directory, and it points `core.hooksPath` at an empty directory so Letta's installed `post-commit` does not run. That hook would `git push` in the background when a remote is configured.
 
-核心文件列表来自 `memory tokens`。主题目录来自 `memory export` 里不在该列表中的 `MEMORY.md`。读取时，Git `HEAD` 的字节必须和同一次 export 一致。
+The core file list comes from `memory tokens`. Topic directories come from `MEMORY.md` files in `memory export` that are not on that list. On read, the bytes at Git `HEAD` must match the same export.
 
-明确拒绝的参数包括 `-p`、`--yolo`、`--permission-mode`、`--tools` 和 `--disable-memory-guard`。因此没有“无模型的完整代理回合”。上游本地创建代理本身不需要账号，也不需要调用模型；这已经在 0.34.45 上验证过。
+Arguments that are explicitly rejected include `-p`, `--yolo`, `--permission-mode`, `--tools`, and `--disable-memory-guard`. There is therefore no full agent turn without a model. Creating an agent on the upstream local backend itself needs no account and no model call. That was verified on 0.34.45.
 
-## 没有做的事
+## What is not done
 
-- 没有运行 `letta -p` 或任何会让 harness 执行 shell 的回合
-- 没有调用 `api.letta.com`
-- 没有实现 Git smart HTTP sidecar
-- 没有 QMD
-- 没有把 `memory-confinement` 当作安全边界
-- 兼容模式不会在上游模式失败时自动接替
+- `letta -p` is not run, and neither is any turn that would let the harness execute a shell
+- `api.letta.com` is not called
+- A Git smart HTTP sidecar is not implemented
+- There is no QMD
+- `memory-confinement` is not treated as a security boundary
+- Compatibility mode does not take over automatically when upstream mode fails

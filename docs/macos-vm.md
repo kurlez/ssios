@@ -1,16 +1,16 @@
 # macOS microVM
 
-Apple Silicon 上的客户机用 `krunvm`（libkrun，Hypervisor.framework）。Linux 上的同一条命令在 KVM 可用时也能用。这台开发机是 Linux，不能启动 Hypervisor.framework。Cloud Hypervisor 是 Linux 上的第二条路径。
+The guest on Apple Silicon uses `krunvm` (libkrun, Hypervisor.framework). The same command can also be used on Linux when KVM is available. This development machine is Linux and cannot start Hypervisor.framework. Cloud Hypervisor is the second path on Linux.
 
-客户机里跑的是 `guest_worker.py`。它只读本次任务复制出来的 `grant.json`，把提示写到 scratch 的 `request.json`，等宿主机把模型回答写到 `response.json`，再把正文写到 `output.json`。客户机没有人类令牌，也没有模型地址。模型调用发生在宿主机上，仍然只走配置里的 mock 或本机 Ollama。质量检查和人类批准仍在宿主机上。`isolated` 只有在客户机进程确实退出且写出了 `output.json` 时才是 true。
+The guest runs `guest_worker.py`. It only reads the `grant.json` copied for this task, writes the prompt to `request.json` in scratch, waits for the host to write the model answer to `response.json`, then writes the body to `output.json`. The guest has no human token and no model address. The model call happens on the host and still uses only the configured mock or local Ollama. The quality check and human approval stay on the host. `isolated` is true only when the guest process actually exited and wrote `output.json`.
 
-`krunvm create -v` 没有只读参数（手册 `krunvm-create` 只有 `HOST_PATH:GUEST_PATH`）。因此不会把记忆仓库直接挂进去，而是把授权正文复制到本次任务自己的目录再挂载。客户机改这份副本不会写回记忆。本机这套 `virtiofsd` 同样没有只读开关，Cloud Hypervisor 也是挂复制出来的目录。
+`krunvm create -v` has no read-only argument (the `krunvm-create` manual only has `HOST_PATH:GUEST_PATH`). The memory repository is therefore not mounted directly. The granted body is copied into this task's own directory and that copy is mounted. Changes the guest makes to the copy are not written back to memory. The local `virtiofsd` also has no read-only switch, so Cloud Hypervisor mounts a copied directory too.
 
-krunvm 没有关闭客户机网络的参数，所以不能从命令行证明 TSI 已关闭。worker 自己不打开套接字。Cloud Hypervisor 的启动参数里没有 `--net`。
+krunvm has no argument that turns the guest network off, so the command line cannot prove that TSI is closed. The worker itself does not open a socket. The Cloud Hypervisor launch arguments contain no `--net`.
 
-## 安装
+## Install
 
-本仓库不附带 krunvm。krunvm 自己的 README 目前写的是：
+This repository does not ship krunvm. krunvm's own README currently says:
 
 ```bash
 brew tap slp/krun
@@ -19,17 +19,17 @@ brew install buildah
 krunvm --version
 ```
 
-Homebrew tap 仓库也写过 `brew tap libkrun/krun` 和 `brew trust libkrun/krun`。哪条能装上，以你机器上的 `brew` 为准。装完执行 `krunvm --version`，版本以那次输出为准。这里不写一个没有在 Mac 上执行过的瓶装哈希。
+The Homebrew tap repository has also said `brew tap libkrun/krun` and `brew trust libkrun/krun`. Whichever one installs is the one your machine's `brew` accepts. After it is installed, run `krunvm --version` and use that output as the version. This file does not record a bottle hash that was not executed on a Mac.
 
-`krunvm create` 通过 buildah 拉取 OCI 镜像。镜像钉在 `python:3.12-alpine` 的清单摘要上（2026-11-09 从 `registry-1.docker.io` 读到）：
+`krunvm create` pulls an OCI image through buildah. The image is pinned to the manifest digest of `python:3.12-alpine` (read from `registry-1.docker.io` on 2026-11-09):
 
 ```text
 docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
 ```
 
-krunvm 0.2.7 没有用来指定存储卷的环境变量。首次运行时如果自己的配置里 `storage_volume` 还是空的，它会在终端里询问挂载点，提示的默认值是 `/Volumes/krunvm`，然后把答案写进 `~/Library/Application Support/rs.krunvm/krunvm.toml`（confy 0.4）。之后的 `krunvm create` 让 buildah 使用该卷下面的 `root` 和 `runroot`。SSIOS 的 `[runtime] macos_vm_volume` 默认也是 `/Volumes/krunvm`，只给 `vm-doctor` 做只读检查。卷没挂上时，检查结果会写明，但不会拦住已经能跑的 krunvm。
+krunvm 0.2.7 has no environment variable for the storage volume. On the first run, if `storage_volume` in its own config is still empty, it asks for a mount point in the terminal. The default it suggests is `/Volumes/krunvm`, and it writes the answer to `~/Library/Application Support/rs.krunvm/krunvm.toml` (confy 0.4). Later `krunvm create` makes buildah use `root` and `runroot` under that volume. SSIOS `[runtime] macos_vm_volume` also defaults to `/Volumes/krunvm` and is used only by `vm-doctor` as a read-only check. If the volume is not mounted, the check says so, but it does not block a krunvm that can already run.
 
-外接磁盘可以用一个区分大小写的稀疏镜像。下面的路径是例子，脚本不会执行这些命令，也不会调用会改磁盘的 `hdiutil` 或 `diskutil`：
+An external disk can use a case-sensitive sparse image. The paths below are examples. The script does not run these commands and does not call `hdiutil` or `diskutil`, which would change disks:
 
 ```bash
 hdiutil create -size 60g -type SPARSE -fs "Case-sensitive APFS" -volname krunvm /path/to/external/krunvm.sparseimage
@@ -37,41 +37,41 @@ hdiutil attach /path/to/external/krunvm.sparseimage
 diskutil info /Volumes/krunvm
 ```
 
-`volname` 用 `krunvm` 时，挂载点就是 `/Volumes/krunvm`。若 krunvm 还没记住这个路径，在终端里执行一次 `krunvm list`，在它询问时输入该挂载点。
+When `volname` is `krunvm`, the mount point is `/Volumes/krunvm`. If krunvm has not remembered that path yet, run `krunvm list` once in the terminal and type that mount point when it asks.
 
-第一次拉取 `python:3.12-alpine` 可能超过任务超时。先准备镜像，再跑冒烟。`vm-prepare` 用和任务相同的镜像字符串执行 `krunvm create`，超时是 `guest_prepare_timeout_seconds`（默认 600），然后删掉名叫 `ssios-prepare` 的虚拟机。镜像留在 buildah 缓存里。任务自己的 create/start 参数不变。
+The first pull of `python:3.12-alpine` can exceed the task timeout. Prepare the image before the smoke. `vm-prepare` runs `krunvm create` with the same image string the task uses. The timeout is `guest_prepare_timeout_seconds` (600 by default). It then deletes the virtual machine named `ssios-prepare`. The image stays in the buildah cache. The task's own create/start arguments do not change.
 
 ```bash
 PYTHONPATH=src python3 -m ssios vm-prepare --state /tmp/ssios-vm-prepare --config /tmp/ssios-macos.toml
 bash scripts/macos-vm-smoke.sh
 ```
 
-失败时冒烟会把 `error_detail`、诊断文件和 `up.log` 打出来，并保留临时状态目录。只有设置 `SSIOS_SMOKE_CLEAN=1` 才删除它。
+On failure the smoke prints `error_detail`, the diagnostic file, and `up.log`, and it keeps the temporary state directory. It deletes that directory only when `SSIOS_SMOKE_CLEAN=1` is set.
 
-## 配置
+## Config
 
-在你自己的配置里（不要改被跟踪的样例，除非你愿意）把后端改成：
+In your own config (do not change the tracked sample unless you mean to), set the backend to:
 
 ```toml
 [runtime]
 backend = "macos-vm"
 ```
 
-然后用一份临时状态做冒烟。它不会动 `.ssios`、`.ssios-demo` 或 `.ssios-memfs`：
+Then smoke it with a temporary state directory. It will not touch `.ssios`, `.ssios-demo`, or `.ssios-memfs`:
 
 ```bash
 bash scripts/macos-vm-smoke.sh
 PYTHONPATH=src python3 -m ssios vm-doctor --state /tmp/ssios-vm-doctor --config /tmp/ssios-vm-doctor-does-not-exist
 ```
 
-`vm-doctor` 要读一份 `backend = "macos-vm"` 的配置。它会创建一台客户机，在里面执行 `echo ok`，打印耗时，然后删除这台虚拟机。预检本身不启动客户机。
+`vm-doctor` needs a config with `backend = "macos-vm"`. It creates a guest, runs `echo ok` inside it, prints the elapsed time, and then deletes that virtual machine. Preflight itself does not boot a guest.
 
-确认 `krunvm` 可用之后，再把正在跑的服务停掉，用原来的状态目录和新的 `backend` 启动。启动失败时任务失败关闭，不会改在 Mac 宿主机上跑摘要。
+After `krunvm` is confirmed to work, stop the running service and start it again with the original state directory and the new `backend`. If startup fails, the task fails closed and does not run the summary on the Mac host instead.
 
-这台 Linux 机器没有 krunvm。在把 `/dev/kvm` 交给当前用户之后，Cloud Hypervisor v54.0 配 Linux 7.2.8 内核实测：`echo ok` 898 毫秒；摘要 worker（virtio-fs，无 `--net`，模型在宿主机 mock）1576 毫秒，`isolated` 为 true。这不是 Mac 上的数字。
+This Linux machine has no krunvm. After `/dev/kvm` was given to the current user, Cloud Hypervisor v54.0 with the Linux 7.2.8 kernel measured: `echo ok` in 898 ms; the summary worker (virtio-fs, no `--net`, model mocked on the host) in 1576 ms, with `isolated` true. Those are not Mac numbers.
 
-## Codex 客户机
+## Codex guest
 
-`[runtime] agent = "codex"` 在 Linux 上用 Cloud Hypervisor，不给客户机网卡。Mac 上的 krunvm 关不掉网络，所以这条路径不把 `isolated` 标成 true，脚本也不声称跑通过。
+`[runtime] agent = "codex"` uses Cloud Hypervisor on Linux and does not give the guest a NIC. krunvm on a Mac cannot turn the network off, so that path does not mark `isolated` true and the script does not claim it passed.
 
-`scripts/macos-codex-smoke.sh` 只在 Apple Silicon 上、由宿主机下载并核对 `rust-v0.167.0` 的 aarch64 musl 包（哈希在 `third_party/codex.pin.json`）。它不启动虚拟机。客户机里不会再下载。没有在这台 Linux 机器上执行过该脚本的成功路径。
+`scripts/macos-codex-smoke.sh` only downloads and checks the `rust-v0.167.0` aarch64 musl package on Apple Silicon, on the host (the hash is in `third_party/codex.pin.json`). It does not boot a virtual machine. The guest does not download again. The success path of that script has not been executed on this Linux machine.
