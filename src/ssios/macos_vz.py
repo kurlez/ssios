@@ -723,6 +723,11 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
             error_code = "guest_vsock_unavailable"
             lead = "no vsock connection within 60s"
         if not ran:
+            from ssios.codex_guest import _with_upstream
+
+            detail, upstream_code = _with_upstream(proxy, detail, error_code)
+            if upstream_code:
+                error_code = upstream_code
             detail = _failure_detail(session, completed, net, proxy, detail)
             if lead and lead not in detail:
                 detail = (lead + " " + detail)[:500]

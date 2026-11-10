@@ -23,6 +23,16 @@ if ! command -v ollama >/dev/null 2>&1; then
 fi
 echo "If qwen2.5-coder:7b is not listed, run: ollama pull qwen2.5-coder:7b" >&2
 ollama list || true
+PYTHONPATH=src python3 - << 'PY'
+import json
+import sys
+from ssios.codex_guest import ollama_smoke_preflight
+report = ollama_smoke_preflight()
+print(json.dumps(report, ensure_ascii=False), flush=True)
+if not report["ok"]:
+    sys.stderr.write(report["detail"] + "\n")
+    raise SystemExit(1)
+PY
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vz-codex.XXXXXX")
 echo "临时状态目录：$STATE" >&2
 cleanup() {

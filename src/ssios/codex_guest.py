@@ -191,6 +191,17 @@ class RequestBudget:
         return "ok"
 
 
+def _upstream_output_empty(items: list[dict]) -> bool:
+    if not items:
+        return True
+    for item in items:
+        if item.get("name"):
+            return False
+        if str(item.get("text") or "").strip():
+            return False
+    return True
+
+
 def sse_response(text: str) -> bytes:
     message = {
         "id": "msg_mock",
@@ -359,7 +370,7 @@ def render_codex_sse(items: list[dict]) -> bytes:
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events).encode("utf-8")
 
 
-def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> bytes:
+def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> tuple[int, bytes]:
     host = urllib.request.urlparse(url).hostname
     if host not in ("127.0.0.1", "localhost"):
         raise SsiosError("network_denied", "ollama must stay on loopback", 403)
@@ -371,11 +382,96 @@ def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> bytes:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read()
+            return int(response.status), response.read()
     except urllib.error.HTTPError as exc:
-        raise SsiosError("llm_unavailable", "local model rejected the request", 502) from exc
+        detail = exc.read(400).decode("utf-8", "replace")
+        raise SsiosError("llm_unavailable", f"status={exc.code} {detail[:120]}", 502) from exc
     except urllib.error.URLError as exc:
         raise SsiosError("llm_unavailable", "local model is not reachable", 502) from exc
+
+
+def ollama_smoke_preflight(
+    base_url: str = "http://127.0.0.1:11434",
+    model: str = "qwen2.5-coder:7b",
+    timeout: float = 180,
+) -> dict:
+    """Check the loopback model before a Mac guest boot. No prompt text is returned."""
+    parsed = urllib.request.urlparse(base_url)
+    if parsed.hostname not in ("127.0.0.1", "localhost"):
+        return {"ok": False, "detail": "ollama must stay on loopback"}
+    root = base_url.rstrip("/")
+    try:
+        with urllib.request.urlopen(root + "/api/tags", timeout=10) as response:
+            tags = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        return {"ok": False, "detail": f"ollama is not reachable at {root}: {exc.__class__.__name__}"}
+    names = [str(item.get("name") or "") for item in tags.get("models") or [] if isinstance(item, dict)]
+    if not any(name == model or name.startswith(model + "-") for name in names):
+        return {"ok": False, "detail": f"{model} is not installed. Run: ollama pull {model}"}
+    plain = _ollama_chat(root, model, stream=False, timeout=timeout)
+    if not plain["ok"]:
+        return plain
+    streamed = _ollama_responses(root, model, timeout=timeout)
+    if not streamed["ok"]:
+        return streamed
+    return {
+        "ok": True,
+        "detail": f"{model} answered on /api/chat and /v1/responses",
+        "chat_bytes": plain["bytes"],
+        "responses_bytes": streamed["bytes"],
+        "responses_status": streamed["status"],
+    }
+
+
+def _ollama_chat(root: str, model: str, stream: bool, timeout: float) -> dict:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word ok."}],
+        "stream": stream,
+        "options": {"num_predict": 8},
+    }
+    request = urllib.request.Request(
+        root + "/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "detail": f"/api/chat status={exc.code}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "detail": f"/api/chat failed: {exc.__class__.__name__}"}
+    if not raw.strip():
+        return {"ok": False, "detail": "/api/chat returned an empty body"}
+    return {"ok": True, "bytes": len(raw)}
+
+
+def _ollama_responses(root: str, model: str, timeout: float) -> dict:
+    payload = {
+        "model": model,
+        "input": "Reply with the single word ok.",
+        "stream": True,
+        "max_output_tokens": 8,
+    }
+    request = urllib.request.Request(
+        root + "/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            status = int(response.status)
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "detail": f"/v1/responses status={exc.code}. /api/generate can still succeed."}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "detail": f"/v1/responses failed: {exc.__class__.__name__}"}
+    if not raw.strip():
+        return {"ok": False, "detail": "/v1/responses returned an empty body"}
+    return {"ok": True, "bytes": len(raw), "status": status}
 
 
 def error_response(status: int, reason: str) -> bytes:
@@ -439,6 +535,7 @@ class ResponsesProxy:
         self.served = 0
         self.connected = 0
         self.rejected = False
+        self.upstream_failure: dict | None = None
         self._thread: threading.Thread | None = None
         self._server: socket.socket | None = None
 
@@ -516,7 +613,7 @@ class ResponsesProxy:
             payload = None
         if decision != "ok":
             self.rejected = True
-            self._log(model, decision)
+            self._log(model, decision, len(body), hashlib.sha256(body).hexdigest() if body else "")
             conn.sendall(error_response(429, decision))
             return
         if not isinstance(payload, dict) or model not in self.allow_models or payload.get("stream") is not True:
@@ -545,23 +642,55 @@ class ResponsesProxy:
         if self.budget.requests == 1:
             payload = dict(payload)
             payload["tool_choice"] = "required"
+        started = time.monotonic()
         try:
-            raw = fetch_ollama_responses(self.upstream or "", payload, 120)
-        except SsiosError:
-            self.rejected = True
-            self._log(model, "local_model_unavailable", len(body), digest)
-            conn.sendall(error_response(502, "local_model_unavailable"))
+            status, raw = fetch_ollama_responses(self.upstream or "", payload, 120)
+        except SsiosError as exc:
+            self._note_upstream(
+                "upstream_error",
+                model,
+                body,
+                digest,
+                None,
+                started,
+                0,
+                exc.detail,
+            )
+            conn.sendall(error_response(502, "upstream_error"))
             return
+        latency_ms = int((time.monotonic() - started) * 1000)
         items, tokens = codex_items_from_ollama(raw)
+        if _upstream_output_empty(items):
+            self._note_upstream("upstream_empty", model, body, digest, status, started, len(raw), "model returned no text and no tool call")
+            conn.sendall(error_response(502, "upstream_empty"))
+            return
         self.output_tokens += tokens
         if self.output_tokens > self.max_output_tokens:
             self.rejected = True
-            self._log(model, "output_budget", len(body), digest, tokens)
+            self._log(
+                model,
+                "output_budget",
+                len(body),
+                digest,
+                tokens,
+                upstream_status=status,
+                latency_ms=latency_ms,
+                response_bytes=len(raw),
+            )
             conn.sendall(error_response(429, "output_budget"))
             return
         rendered = render_codex_sse(items)
         self.served += 1
-        self._log(model, "ok", len(body), digest, tokens)
+        self._log(
+            model,
+            "ok",
+            len(body),
+            digest,
+            tokens,
+            upstream_status=status,
+            latency_ms=latency_ms,
+            response_bytes=len(rendered),
+        )
         header = (
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/event-stream\r\n"
@@ -571,20 +700,54 @@ class ResponsesProxy:
         )
         conn.sendall(header.encode("ascii") + rendered)
 
-    def _log(self, model: str, decision: str, nbytes: int = 0, digest: str = "", output_tokens: int = 0) -> None:
+    def _note_upstream(
+        self,
+        error: str,
+        model: str,
+        body: bytes,
+        digest: str,
+        status: int | None,
+        started: float,
+        response_bytes: int,
+        detail: str,
+    ) -> None:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        self.rejected = True
+        self.upstream_failure = {
+            "error": error,
+            "status": status,
+            "latency_ms": latency_ms,
+            "request_bytes": len(body),
+            "response_bytes": response_bytes,
+            "detail": detail[:160],
+        }
+        self._log(
+            model,
+            error,
+            len(body),
+            digest,
+            0,
+            upstream_status=status,
+            latency_ms=latency_ms,
+            response_bytes=response_bytes,
+            upstream_error=detail[:160],
+        )
+
+    def _log(self, model: str, decision: str, nbytes: int = 0, digest: str = "", output_tokens: int = 0, **extra) -> None:
         from ssios.vmguest import redact_text
 
-        line = json.dumps(
-            {
-                "requests": self.budget.requests,
-                "model": model,
-                "decision": decision,
-                "bytes": nbytes,
-                "sha256": digest,
-                "output_tokens": output_tokens,
-            },
-            ensure_ascii=False,
-        )
+        record = {
+            "requests": self.budget.requests,
+            "model": model,
+            "decision": decision,
+            "bytes": nbytes,
+            "sha256": digest,
+            "output_tokens": output_tokens,
+        }
+        for key in ("upstream_status", "latency_ms", "response_bytes", "upstream_error"):
+            if key in extra and extra[key] is not None:
+                record[key] = extra[key]
+        line = json.dumps(record, ensure_ascii=False)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(redact_text(line, []) + "\n")
@@ -784,8 +947,11 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
             completed.returncode,
         )
         if not ran:
+            detail, error_code = _with_upstream(proxy, detail, None)
             detail = _failure_detail(session, completed, net, proxy, detail)
-        return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records)
+        else:
+            error_code = None
+        return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records, error_code)
     finally:
         proxy.close()
         for proc in daemons:
@@ -804,6 +970,21 @@ def final_exception_line(text: str) -> str:
         if re.match(r"^[A-Za-z_][\w.]*(Error|Exception)\b", stripped):
             found = stripped
     return found
+
+
+def _with_upstream(proxy, detail: str, error_code: str | None) -> tuple[str, str | None]:
+    failure = getattr(proxy, "upstream_failure", None)
+    if not isinstance(failure, dict) or not failure.get("error"):
+        return detail, error_code
+    lead = (
+        f"{failure['error']} status={failure.get('status')} latency_ms={failure.get('latency_ms')} "
+        f"request_bytes={failure.get('request_bytes')} response_bytes={failure.get('response_bytes')}"
+    )
+    if failure.get("detail"):
+        lead += " " + str(failure["detail"])
+    if lead not in detail:
+        detail = (lead + "; " + detail)[:500]
+    return detail, str(failure["error"])
 
 
 def classify_guest_result(output, net, served: int, rejected: bool, boundary, vmm_exit: int | None = None) -> tuple[bool, str]:
@@ -861,6 +1042,20 @@ def open_vsock(cid: int, port: int, timeout: float = 5.0, libc=None, wrap=None):
 
     family = 40
     stream = socket.SOCK_STREAM
+
+    def set_timeout(seconds):
+        if not hasattr(libc, "setsockopt"):
+            return
+        if seconds <= 0:
+            clock = struct.pack("@qq", 0, 0)
+        else:
+            whole = int(seconds)
+            micros = int((seconds - whole) * 1_000_000)
+            clock = struct.pack("@qq", whole, micros)
+        clock_buf = ctypes.create_string_buffer(clock)
+        for option in (20, 21):
+            libc.setsockopt(fd, 1, option, clock_buf, len(clock))
+
     own = libc is None
     if own:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -874,19 +1069,16 @@ def open_vsock(cid: int, port: int, timeout: float = 5.0, libc=None, wrap=None):
     if fd < 0:
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err) if err else "socket")
-    if timeout and timeout > 0 and hasattr(libc, "setsockopt"):
-        seconds = int(timeout)
-        micros = int((timeout - seconds) * 1_000_000)
-        clock = struct.pack("@qq", seconds, micros)
-        clock_buf = ctypes.create_string_buffer(clock)
-        for option in (20, 21):
-            libc.setsockopt(fd, 1, option, clock_buf, len(clock))
+    if timeout and timeout > 0:
+        set_timeout(timeout)
     address = struct.pack("<HHIIB3x", family, 0, port & 0xFFFFFFFF, cid & 0xFFFFFFFF, 0)
     buf = ctypes.create_string_buffer(address)
     if libc.connect(fd, buf, len(address)) < 0:
         err = ctypes.get_errno()
         os.close(fd)
         raise OSError(err, os.strerror(err) if err else "connect")
+    # A receive timeout left on the relay cuts an SSE stream while Ollama is still writing.
+    set_timeout(0)
     if wrap is not None:
         return wrap(fd)
     return socket.socket(fileno=fd)
@@ -1020,19 +1212,35 @@ PORT = 19090
 CID = 2
 
 
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        count = os.write(fd, view)
+        if count <= 0:
+            break
+        view = view[count:]
+
+
 def pipe(src, dst):
+    # os.read/os.write avoid the socket object's address family. A receive
+    # timeout must not half-close the other direction, or the SSE response is cut.
+    src_fd = src.fileno()
+    dst_fd = dst.fileno()
+    clean = False
     try:
         while True:
-            data = src.recv(65536)
+            data = os.read(src_fd, 65536)
             if not data:
+                clean = True
                 break
-            dst.sendall(data)
+            write_all(dst_fd, data)
     except Exception:
-        pass
-    try:
-        dst.shutdown(socket.SHUT_WR)
-    except Exception:
-        pass
+        clean = False
+    if clean:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
 
 
 def write_selfcheck(report):

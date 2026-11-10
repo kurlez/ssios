@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import socket
+import struct
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 from support import PlaneTest, wait_task
 
-import ctypes
-import socket
-import struct
-
 from ssios.codex_guest import (
     RequestBudget,
     ResponsesProxy,
+    _with_upstream,
     asset_for_machine,
+    classify_guest_result,
     clean_tool_arguments,
     codex_config_text,
     codex_items_from_ollama,
     exec_commands_from_text,
-    classify_guest_result,
     final_exception_line,
     guest_entry_source,
+    ollama_smoke_preflight,
     open_vsock,
     prepare_codex_binary,
     prepared_binary,
@@ -389,14 +390,19 @@ class VsockRelayTest(unittest.TestCase):
                 self.packed = addr.raw[:length]
                 return 0
 
-            def setsockopt(self, *args):
+            def setsockopt(self, fd, level, option, buf, length):
+                self.timeouts.append((option, bytes(buf.raw[:length])))
                 return 0
 
         libc = Libc()
+        libc.timeouts = []
         remote = open_vsock(2, 19090, timeout=1, libc=libc)
         self.addCleanup(remote.close)
         self.assertEqual(libc.family, 40)
         self.assertEqual(libc.packed, sockaddr_vm(19090, 2))
+        self.assertTrue(libc.timeouts)
+        self.assertEqual(libc.timeouts[-1][1], struct.pack("@qq", 0, 0))
+        self.assertIn("os.read", guest_entry_source(19090))
         remote.sendall(b"ok")
         self.assertEqual(left.recv(2), b"ok")
 
@@ -432,6 +438,116 @@ class VsockRelayTest(unittest.TestCase):
         self.assertFalse(ran)
         self.assertIn("outside_write", detail)
         self.assertTrue(detail.startswith("codex guest failed:"))
+
+    def test_empty_upstream_is_not_reported_as_the_request_cap(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                self.rfile.read(length)
+                body = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":0}}}\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        root = Path("/tmp/ssios-upstream-empty")
+        if root.exists():
+            import shutil
+            shutil.rmtree(root)
+        root.mkdir()
+        os.chmod(root, 0o700)
+        proxy = ResponsesProxy(
+            root / "vsock.sock",
+            "unused",
+            "qwen2.5-coder:7b",
+            RequestBudget(4, 200000),
+            root / "proxy.log",
+            upstream=f"http://127.0.0.1:{server.server_address[1]}/v1/responses",
+            allow_models=("qwen2.5-coder:7b",),
+        )
+        proxy.start()
+        self.addCleanup(proxy.close)
+        for _ in range(2):
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(proxy.listen_path))
+            payload = json.dumps({"model": "qwen2.5-coder:7b", "stream": True, "input": "hi"}).encode()
+            sock.sendall(
+                b"POST /v1/responses HTTP/1.1\r\nHost: h\r\nContent-Type: application/json\r\nContent-Length: "
+                + str(len(payload)).encode()
+                + b"\r\n\r\n"
+                + payload
+            )
+            sock.recv(200)
+            sock.close()
+        self.assertEqual(proxy.served, 0)
+        self.assertEqual(proxy.upstream_failure["error"], "upstream_empty")
+        self.assertGreater(proxy.upstream_failure["request_bytes"], 0)
+        self.assertGreater(proxy.upstream_failure["response_bytes"], 0)
+        log = (root / "proxy.log").read_text(encoding="utf-8")
+        self.assertIn("upstream_empty", log)
+        self.assertIn("upstream_status", log)
+        self.assertIn("latency_ms", log)
+        self.assertNotIn('"input"', log)
+        detail, code = _with_upstream(proxy, "codex guest failed: proxy_rejected", None)
+        self.assertEqual(code, "upstream_empty")
+        self.assertIn("status=200", detail)
+        self.assertNotIn("too_many_requests", detail.split(";")[0])
+
+    def test_preflight_checks_the_responses_stream(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/api/tags":
+                    self.send_error(404)
+                    return
+                body = json.dumps({"models": [{"name": "qwen2.5-coder:7b"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                self.rfile.read(length)
+                if self.path == "/api/chat":
+                    body = json.dumps({"message": {"content": "ok"}}).encode()
+                elif self.path == "/v1/responses":
+                    body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        report = ollama_smoke_preflight(base, timeout=5)
+        self.assertTrue(report["ok"], report)
+        self.assertGreater(report["responses_bytes"], 0)
+        missing = ollama_smoke_preflight(base, model="missing:1b", timeout=5)
+        self.assertFalse(missing["ok"])
+        self.assertIn("ollama pull", missing["detail"])
 
 
 class PrepareSkip(unittest.TestCase):

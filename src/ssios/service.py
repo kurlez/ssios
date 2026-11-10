@@ -845,6 +845,8 @@ class ControlPlane:
             "guest_vsock_unavailable",
             "guest_virtiofs_unavailable",
             "guest_nic_present",
+            "upstream_error",
+            "upstream_empty",
         }:
             commands = []
             if isinstance(payload, dict):
