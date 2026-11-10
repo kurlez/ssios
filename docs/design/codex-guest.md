@@ -215,6 +215,7 @@ Host broker:
 
 - The `host_broker` MCP server binary is in the guest, but the transport is still vsock. It does not hold an OAuth token, and it does not write memory or call Google inside the guest.
 - The read-only tools are `drive.search`, `drive.read_file`, `gmail.search`, and `gmail.get_message`. They are constrained by the task grant, the budget, and the audit log, as the next section says. A single read does not open another SSIOS approval, because the person already gave the grant before the task started. Without a grant, the call is denied.
+- Calendar create, update, and delete are not guest tools. The guest can only ask the host to propose one change. The host connector writes the event after a separate approval for that action. See `docs/google-connector.md`.
 - `memory_propose` hands the Markdown proposal from the guest to the existing `memory.commit` approval. It does not add a new approval meaning. MemFS does not change until the person approves.
 - The tool table has no send, reply, change-label, create-draft, upload, rename, share, or delete. An unknown name is rejected immediately. Shell is rejected. Publish to a path the guest cannot see is rejected. An argument that carries a token is rejected.
 

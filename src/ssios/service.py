@@ -1049,7 +1049,7 @@ class ControlPlane:
             if task is not None:
                 task["published_revision"] = revision
             return revision
-        if action == "connector.fetch":
+        if action in ("connector.fetch", "connector.write"):
             return self.google.execute_approved(record)
         if action in ("memory.commit", "memory.forget"):
             if self._uses_upstream():
@@ -1074,7 +1074,7 @@ class ControlPlane:
         raise SsiosError("approval_invalid", "action rejected", 400)
 
     def _preview_text(self, record: dict) -> str:
-        if record["action"] == "connector.fetch":
+        if record["action"] in ("connector.fetch", "connector.write"):
             return self.google.preview(record)
         if record["action"] == "storage.publish":
             data = self.storage.staged_bytes(record["task_id"])

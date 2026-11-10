@@ -19,8 +19,13 @@ SECRET_NAMES = (
     "client-secret",
     "drive-refresh",
     "gmail-refresh",
+    "calendar-refresh",
     "drive-scope",
     "gmail-scope",
+    "calendar-scope",
+    "drive-connected-at",
+    "gmail-connected-at",
+    "calendar-connected-at",
     "google-sub",
     "connected-at",
 )

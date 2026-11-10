@@ -9,6 +9,7 @@ or fixture body in return values other than the owner's one-shot result.
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import threading
@@ -29,25 +30,59 @@ from ssios.google_connector import (
     member_session,
 )
 from ssios.secret_store import MemorySecretStore, service_name
+from ssios.util import sha256_bytes
+
+
+FIXTURE_EVENT = {
+    "id": "evt1demo",
+    "summary": "Fixture standup",
+    "description": "Bring notes",
+    "location": "Room 1",
+    "start": {"dateTime": "2026-11-12T15:00:00-08:00", "timeZone": "America/Los_Angeles"},
+    "end": {"dateTime": "2026-11-12T16:00:00-08:00", "timeZone": "America/Los_Angeles"},
+    "attendees": [{"email": "person@example.com"}],
+}
 
 
 class _Google(BaseHTTPRequestHandler):
     seen: list[dict] = []
+    events: dict[str, dict] = {}
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
         return self.rfile.read(length).decode("utf-8")
 
+    def _record(self, method: str, body: str = "") -> tuple[str, dict]:
+        parsed = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        self.seen.append(
+            {
+                "method": method,
+                "path": parsed.path,
+                "query": query,
+                "body": body,
+                "auth": self.headers.get("Authorization", ""),
+            }
+        )
+        return parsed.path, query
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_POST(self) -> None:
         body = self._read_body()
-        self.seen.append({"method": "POST", "path": urllib.parse.urlsplit(self.path).path, "body": body, "auth": self.headers.get("Authorization", "")})
+        path, _query = self._record("POST", body)
         form = urllib.parse.parse_qs(body)
-        path = urllib.parse.urlsplit(self.path).path
         if path == "/token":
             grant = (form.get("grant_type") or [""])[0]
             if grant == "authorization_code":
                 code = (form.get("code") or [""])[0]
-                suffix = "a" if code == "code-a" else "b"
+                suffix = "b" if code == "code-b" else "a"
             else:
                 refresh = (form.get("refresh_token") or [""])[0]
                 suffix = "a" if refresh.endswith("-a") else "b"
@@ -56,19 +91,40 @@ class _Google(BaseHTTPRequestHandler):
                 "refresh_token": f"refresh-account-{suffix}",
                 "token_type": "Bearer",
             }
+            if (form.get("code") or [""])[0] == "code-wide":
+                payload["scope"] = (
+                    "https://www.googleapis.com/auth/calendar.events "
+                    "https://www.googleapis.com/auth/gmail.readonly"
+                )
+        elif path.startswith("/calendar/v3/calendars/") and path.endswith("/events"):
+            event = json.loads(body)
+            key = path.split("/calendars/", 1)[1].split("/events", 1)[0] + "/" + str(event.get("id"))
+            if key in self.events:
+                self._json({"error": "duplicate"}, 409)
+                return
+            self.events[key] = event
+            self._json(event)
+            return
         else:
             payload = {"revoked": True}
-        raw = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
+        self._json(payload)
+
+    def do_PUT(self) -> None:
+        body = self._read_body()
+        path, _query = self._record("PUT", body)
+        event = json.loads(body)
+        key = _event_key(path)
+        self.events[key] = event
+        self._json(event)
+
+    def do_DELETE(self) -> None:
+        path, _query = self._record("DELETE")
+        self.events.pop(_event_key(path), None)
+        self.send_response(204)
         self.end_headers()
-        self.wfile.write(raw)
 
     def do_GET(self) -> None:
-        path = urllib.parse.urlsplit(self.path).path
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        self.seen.append({"method": "GET", "path": path, "query": query, "auth": self.headers.get("Authorization", "")})
+        path, query = self._record("GET")
         auth = self.headers.get("Authorization", "")
         if path == "/userinfo":
             sub = "fixture-sub-a" if auth.endswith("-a") else "fixture-sub-b"
@@ -94,6 +150,14 @@ class _Google(BaseHTTPRequestHandler):
             payload = {"id": file_id, "name": "notes.txt", "mimeType": mime, "parents": [parent]}
         elif path == "/gmail/v1/users/me/messages":
             payload = {"messages": [{"id": "msg-1"}]}
+        elif path == "/calendar/v3/users/me/calendarList":
+            payload = {"items": [{"id": "cal-1", "summary": "Fixture calendar", "accessRole": "owner"}]}
+        elif path.startswith("/calendar/v3/calendars/") and path.endswith("/events"):
+            calendar_id = path.split("/calendars/", 1)[1].split("/events", 1)[0]
+            items = [item for key, item in self.events.items() if key.startswith(calendar_id + "/")]
+            payload = {"items": items}
+        elif path.startswith("/calendar/v3/calendars/") and "/events/" in path:
+            payload = self.events.get(_event_key(path)) or {"id": "missing"}
         elif path.startswith("/gmail/v1/users/me/messages/"):
             import base64
 
@@ -111,16 +175,15 @@ class _Google(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
             return
-        raw = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self._json(payload)
 
     def log_message(self, fmt, *args) -> None:
         return
 
+
+def _event_key(path: str) -> str:
+    calendar_id, event_id = path.split("/calendars/", 1)[1].split("/events/", 1)
+    return calendar_id + "/" + event_id
 
 def _html_message() -> str:
     import base64
@@ -130,11 +193,16 @@ def _html_message() -> str:
 
 
 class ConnectorTest(PlaneTest):
-    settings_overrides = {"connectors_enabled": ("drive", "gmail"), "connector_max_calls": 4, "connector_max_bytes": 4000}
+    settings_overrides = {
+        "connectors_enabled": ("drive", "gmail", "calendar"),
+        "connector_max_calls": 12,
+        "connector_max_bytes": 4000,
+    }
 
     def setUp(self) -> None:
         super().setUp()
         _Google.seen = []
+        _Google.events = {"cal-1/evt1demo": copy.deepcopy(FIXTURE_EVENT)}
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
         thread = threading.Thread(target=self.server_google.serve_forever, daemon=True)
@@ -191,7 +259,13 @@ class ConnectorTest(PlaneTest):
 
     def test_status_shape_namespace_and_no_token_leak(self) -> None:
         status = self._consent(self.ada, "drive", "code-a")
-        self.assertEqual(set(status), {"service", "connected", "connected_at"})
+        self.assertEqual(set(status), {"service", "connected", "connected_at", "connectors"})
+        self.assertEqual(set(status["connectors"]), {"drive", "gmail", "calendar"})
+        for item in status["connectors"].values():
+            self.assertEqual(set(item), {"connected", "connected_at"})
+        self.assertTrue(status["connectors"]["drive"]["connected"])
+        self.assertFalse(status["connectors"]["gmail"]["connected"])
+        self.assertFalse(status["connectors"]["calendar"]["connected"])
         self.assertEqual(status["service"], "ssios.google.ada")
         self.assertTrue(status["connected"])
         self.assertIsInstance(status["connected_at"], str)
@@ -202,7 +276,8 @@ class ConnectorTest(PlaneTest):
         self.assertIsNone(self.store.get("bea", "drive-refresh"))
         self.assertEqual(self.store.get("ada", "drive-refresh"), self.refresh_a)
         admin_view = self.connector.admin_connection_status("ada")
-        self.assertEqual(set(admin_view), {"service", "connected", "connected_at"})
+        self.assertEqual(set(admin_view), {"service", "connected", "connected_at", "connectors"})
+        self.assertEqual(set(admin_view["connectors"]["drive"]), {"connected", "connected_at"})
         self.assertNotIn(self.refresh_a, json.dumps(admin_view))
         with self.assertRaises(SsiosError) as caught:
             self.connector.status(self.admin)
@@ -417,3 +492,292 @@ class ConnectorTest(PlaneTest):
         with self.assertRaises(SsiosError) as caught:
             member_session("../ada")
         self.assertEqual(caught.exception.code, "account_invalid")
+
+    def test_calendar_scope_is_incremental(self) -> None:
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.connect(self.ada, "calendar", scope="https://www.googleapis.com/auth/calendar", open_browser=False)
+        self.assertEqual(caught.exception.code, "connector_scope_denied")
+        self._consent(self.ada, "drive", "code-a")
+        drive_refresh = self.store.get("ada", "drive-refresh")
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        scope = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)["scope"][0]
+        self.assertEqual(
+            set(scope.split()),
+            {
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            },
+        )
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        urllib.request.urlopen(
+            query["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": query["state"][0]}),
+            timeout=5,
+        ).read()
+        status = self.connector.finish_connect(self.ada, "calendar", timeout=5)
+        self.assertEqual(self.store.get("ada", "drive-refresh"), drive_refresh)
+        self.assertIsNotNone(self.store.get("ada", "calendar-refresh"))
+        self.assertTrue(status["connectors"]["calendar"]["connected"])
+        self.assertTrue(status["connectors"]["drive"]["connected"])
+        self.assertFalse(status["connectors"]["gmail"]["connected"])
+        self.assertIsInstance(status["connectors"]["calendar"]["connected_at"], str)
+        gmail = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        gmail_scope = urllib.parse.parse_qs(urllib.parse.urlsplit(gmail["authorization_url"]).query)["scope"][0]
+        self.assertEqual(gmail_scope, "https://www.googleapis.com/auth/gmail.readonly")
+        started = self.connector.connect(self.bea, "calendar", open_browser=False, timeout=5)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        urllib.request.urlopen(
+            query["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-wide", "state": query["state"][0]}),
+            timeout=5,
+        ).read()
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.finish_connect(self.bea, "calendar", timeout=5)
+        self.assertEqual(caught.exception.code, "oauth_scope_widened")
+        self.assertIsNone(self.store.get("bea", "calendar-refresh"))
+        self.assertTrue(any(item["path"] == "/revoke" for item in _Google.seen))
+        self._consent(self.bea, "calendar", "code-b", scope="https://www.googleapis.com/auth/calendar.events")
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.propose_fetch(
+                self.bea,
+                project_id="local-summary",
+                tool="calendar.list_calendars",
+                arguments={},
+                limits={"max_calls": 12},
+            )
+        self.assertEqual(caught.exception.code, "connector_scope_denied")
+        self.assertFalse(any(item["path"].endswith("/calendarList") for item in _Google.seen))
+
+    def test_calendar_reads_need_a_window_and_approval(self) -> None:
+        from dataclasses import replace
+
+        self._consent(self.ada, "calendar", "code-a")
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail"))
+        with self.assertRaises(SsiosError) as caught:
+            self._propose("calendar.list_events", {"calendar_id": "cal-1", "time_min": "2026-11-10T00:00:00Z", "time_max": "2026-11-20T00:00:00Z"})
+        self.assertEqual(caught.exception.code, "connector_disabled")
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))
+        with self.assertRaises(SsiosError) as caught:
+            self._propose("calendar.list_events", {"calendar_id": "cal-1"})
+        self.assertEqual(caught.exception.code, "connector_window_denied")
+        with self.assertRaises(SsiosError) as caught:
+            self._propose(
+                "calendar.list_events",
+                {"calendar_id": "cal-1", "time_min": "2026-11-01T00:00:00Z", "time_max": "2026-12-03T00:00:00Z"},
+            )
+        self.assertEqual(caught.exception.code, "connector_window_denied")
+        with self.assertRaises(SsiosError) as caught:
+            self._propose(
+                "calendar.list_events",
+                {"calendar_id": "cal-1", "time_min": "2026-11-10T00:00:00", "time_max": "2026-11-20T00:00:00Z"},
+            )
+        self.assertEqual(caught.exception.code, "connector_window_denied")
+        self._propose(
+            "calendar.list_events",
+            {"calendar_id": "cal-1", "time_min": "2026-11-01T00:00:00Z", "time_max": "2026-12-02T00:00:00Z"},
+        )
+        before = self._calendar_writes()
+        proposed = self._propose(
+            "calendar.list_events",
+            {"calendar_id": "cal-1", "time_min": "2026-11-10T00:00:00Z", "time_max": "2026-11-20T00:00:00Z"},
+        )
+        self.assertEqual(proposed["approval"]["action"], "connector.fetch")
+        self.assertEqual(self._calendar_writes(), before)
+        card = self.connector.preview(proposed["approval"], self.ada)
+        self.assertIn("2026-11-10T00:00:00Z", card)
+        self.assertIn("2026-11-20T00:00:00Z", card)
+        self._approve(proposed)
+        text = self.connector.take_result(self.ada, proposed["approval"]["id"])["text"]
+        self.assertIn("UNTRUSTED EXTERNAL CONTENT", text)
+        self.assertIn("Fixture standup", text)
+        self.assertIn("Bring notes", text)
+        listed = [item for item in _Google.seen if item["path"].endswith("/events")]
+        self.assertEqual(listed[-1]["query"]["timeMin"], ["2026-11-10T00:00:00Z"])
+        self.assertEqual(listed[-1]["query"]["timeMax"], ["2026-11-20T00:00:00Z"])
+
+    def test_calendar_writes_require_approval_and_stay_idempotent(self) -> None:
+        self._consent(self.ada, "calendar", "code-a")
+        fields = {
+            "calendar_id": "cal-1",
+            "title": "Planning meeting",
+            "start": "2026-11-13T15:00:00-08:00",
+            "end": "2026-11-13T16:00:00-08:00",
+            "time_zone": "America/Los_Angeles",
+            "location": "Room 2",
+            "attendees": ["person@example.com"],
+            "description": "Agenda",
+        }
+        with self.assertRaises(SsiosError) as caught:
+            self._propose("calendar.create_event", {**fields, "events": [fields]})
+        self.assertEqual(caught.exception.code, "connector_grant_denied")
+        proposed = self._propose("calendar.create_event", fields)
+        self.assertEqual(proposed["approval"]["action"], "connector.write")
+        card = self.connector.preview(proposed["approval"], self.ada)
+        self.assertIn("Planning meeting", card)
+        self.assertIn("America/Los_Angeles", card)
+        self.assertIn("Room 2", card)
+        self.assertIn("person@example.com", card)
+        self.assertIn("Notifications: none. Attendees are not emailed.", card)
+        self.assertEqual(self._calendar_writes(), [])
+        self._approve(proposed)
+        posts = self._calendar_writes()
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["query"].get("sendUpdates"), ["none"])
+        created = json.loads(posts[0]["body"])
+        self.assertEqual(created["summary"], "Planning meeting")
+        event_id = created["id"]
+        with self.assertRaises(SsiosError) as caught:
+            self._approve(proposed)
+        self.assertEqual(caught.exception.code, "approval_replay_denied")
+        self.assertEqual(len(self._calendar_writes()), 1)
+        again = self._propose("calendar.create_event", {**fields, "event_id": event_id})
+        self._approve(again)
+        self.assertEqual(len(self._calendar_writes()), 2)
+        self.assertEqual(sum(1 for key in _Google.events if key.endswith("/" + event_id)), 1)
+        record = self.plane.approvals.get(again["approval"]["id"])
+        self.connector.execute_approved(record)
+        self.assertEqual(len(self._calendar_writes()), 2)
+        denied = self._propose("calendar.create_event", {**fields, "title": "Denied meeting"})
+        self._decide(denied, "deny")
+        self.assertEqual(len(self._calendar_writes()), 2)
+        self.assertNotIn("Denied meeting", json.dumps([item["body"] for item in self._calendar_writes()]))
+        expired = self._propose("calendar.create_event", {**fields, "title": "Expired meeting"})
+        self.plane.advance_clock(self.settings.approval_ttl_seconds + 1)
+        with self.assertRaises(SsiosError) as caught:
+            self._approve(expired)
+        self.assertEqual(caught.exception.code, "approval_expired")
+        self.assertNotIn("Expired meeting", json.dumps([item["body"] for item in self._calendar_writes()]))
+        before = {
+            "title": "Fixture standup",
+            "description": "Bring notes",
+            "location": "Room 1",
+            "start": "2026-11-12T15:00:00-08:00",
+            "end": "2026-11-12T16:00:00-08:00",
+            "time_zone": "America/Los_Angeles",
+            "attendees": ["person@example.com"],
+        }
+        after = {**before, "title": "Moved standup"}
+        update = self._propose(
+            "calendar.update_event",
+            {"calendar_id": "cal-1", "event_id": "evt1demo", "before": before, "after": after},
+        )
+        diff = self.connector.preview(update["approval"], self.ada)
+        self.assertIn("Before:", diff)
+        self.assertIn("After:", diff)
+        self.assertIn("Fixture standup", diff)
+        self.assertIn("Moved standup", diff)
+        self.assertIn("not emailed", diff)
+        self._approve(update)
+        puts = [item for item in _Google.seen if item["method"] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["query"].get("sendUpdates"), ["none"])
+        self.assertEqual(json.loads(puts[0]["body"])["summary"], "Moved standup")
+        conflict = self._propose(
+            "calendar.update_event",
+            {"calendar_id": "cal-1", "event_id": "evt1demo", "before": before, "after": after},
+        )
+        with self.assertRaises(SsiosError) as caught:
+            self._approve(conflict)
+        self.assertEqual(caught.exception.code, "connector_conflict")
+        self.assertEqual(len([item for item in _Google.seen if item["method"] == "PUT"]), 1)
+        deletion = self._propose("calendar.delete_event", {**before, "calendar_id": "cal-1", "event_id": "evt1demo"})
+        destructive = self.connector.preview(deletion["approval"], self.ada)
+        self.assertTrue(destructive.startswith("DESTRUCTIVE:"))
+        self.assertIn("evt1demo", destructive)
+        self.assertIn("not emailed", destructive)
+        self._approve(deletion)
+        deletes = [item for item in _Google.seen if item["method"] == "DELETE"]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(deletes[0]["query"].get("sendUpdates"), ["none"])
+        self.assertNotIn("cal-1/evt1demo", _Google.events)
+        notify = self._propose("calendar.create_event", {**fields, "title": "Notify meeting", "send_updates": "all"})
+        self.assertIn("will email attendees", self.connector.preview(notify["approval"], self.ada))
+        self._approve(notify)
+        notified = [item for item in self._calendar_writes() if "Notify meeting" in item["body"]]
+        self.assertEqual(notified[0]["query"].get("sendUpdates"), ["all"])
+
+    def test_calendar_admin_audit_and_revoke(self) -> None:
+        self._consent(self.ada, "calendar", "code-a")
+        fields = {
+            "calendar_id": "cal-1",
+            "title": "Private planning",
+            "start": "2026-11-13T15:00:00-08:00",
+            "end": "2026-11-13T16:00:00-08:00",
+            "time_zone": "America/Los_Angeles",
+            "location": "Room 9",
+            "attendees": ["guest@example.com"],
+        }
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.propose_fetch(self.admin, project_id="local-summary", tool="calendar.create_event", arguments=fields, limits={"max_calls": 12})
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        self.assertEqual(self._calendar_writes(), [])
+        proposed = self._propose("calendar.create_event", fields)
+        card = self.connector.preview(proposed["approval"], self.ada)
+        self.assertIn("Private planning", card)
+        self.assertIn("guest@example.com", card)
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.preview(proposed["approval"], self.admin)
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        self.assertNotIn("Private planning", caught.exception.detail)
+        decided = self._approve(proposed)
+        self.assertNotIn("Private planning", json.dumps(decided))
+        self.assertNotIn("guest@example.com", json.dumps(decided))
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.take_result(self.admin, proposed["approval"]["id"])
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        owned = self.connector.take_result(self.ada, proposed["approval"]["id"])
+        self.assertIn("created", owned["text"])
+        self.assertNotIn("Private planning", owned["text"])
+        listed = self._propose(
+            "calendar.list_events",
+            {"calendar_id": "cal-1", "time_min": "2026-11-10T00:00:00Z", "time_max": "2026-11-20T00:00:00Z"},
+        )
+        self._approve(listed)
+        admin_view = self.connector.admin_connection_status("ada")
+        blob = json.dumps(admin_view)
+        for secret in ("Private planning", "Fixture standup", "guest@example.com", "Room 9", self.refresh_a, self.secret, "ya29."):
+            self.assertNotIn(secret, blob)
+        self.assertTrue(admin_view["connectors"]["calendar"]["connected"])
+        audit = (self.state / "audit" / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"op": "create"', audit)
+        self.assertIn('"op": "read"', audit)
+        self.assertIn(sha256_bytes(b"cal-1"), audit)
+        self.assertIn("2026-11-10T00:00:00Z", audit)
+        self.assertNotIn("cal-1", audit)
+        for secret in ("Private planning", "Fixture standup", "Bring notes", "guest@example.com", "Room 9", "Room 1", self.refresh_a, self.secret, "ya29."):
+            self.assertNotIn(secret, audit)
+        stored = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in self.state.rglob("*") if path.is_file())
+        self.assertNotIn("Private planning", stored)
+        self.assertNotIn("guest@example.com", stored)
+        self.assertIsNotNone(self.store.get("ada", "calendar-refresh"))
+        wiped = self.connector.revoke_and_delete("ada")
+        self.assertEqual(set(wiped), {"account_id", "deleted", "revoke_ok"})
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        self.assertIsNone(self.store.get("ada", "calendar-scope"))
+        self.assertIsNone(self.store.get("ada", "client-secret"))
+        self.assertFalse(self.connector.admin_connection_status("ada")["connectors"]["calendar"]["connected"])
+        self.assertEqual(self.store.get("bea", "client-secret"), "client-secret-bea")
+
+    def _propose(self, tool: str, arguments: dict) -> dict:
+        return self.connector.propose_fetch(
+            self.ada,
+            project_id="local-summary",
+            tool=tool,
+            arguments=arguments,
+            limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+        )
+
+    def _decide(self, proposed: dict, decision: str) -> dict:
+        approval = proposed["approval"]
+        return self.plane.decide(
+            self.human,
+            approval["id"],
+            {
+                "decision": decision,
+                "action": approval["action"],
+                "payload_sha256": approval["payload_sha256"],
+                "expected_revision": approval["expected_revision"],
+                "bound_hash": approval["bound_hash"],
+            },
+        )
+
+    def _calendar_writes(self) -> list[dict]:
+        return [item for item in _Google.seen if item["method"] == "POST" and "/calendar/" in item["path"]]

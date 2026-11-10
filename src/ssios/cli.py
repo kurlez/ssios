@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name, parents=[common])
         command.add_argument("--account", required=True)
         if name in ("oauth-connect", "oauth-disconnect"):
-            command.add_argument("--connector", required=True, choices=("drive", "gmail"))
+            command.add_argument("--connector", required=True, choices=("drive", "gmail", "calendar"))
         if name == "oauth-connect":
             command.add_argument("--scope", default="")
             command.add_argument("--no-browser", action="store_true")
@@ -475,8 +475,10 @@ def run_google_command(settings, args) -> int:
             limits=json.loads(args.limits),
         )
         approval = proposed["approval"]
+        print(google.preview(approval, session))
         print(json.dumps(approval, ensure_ascii=False))
-        print("Type yes to approve this read, or anything else to leave it pending.")
+        verb = "change" if args.tool in ("calendar.create_event", "calendar.update_event", "calendar.delete_event") else "read"
+        print(f"Type yes to approve this {verb}, or anything else to leave it pending.")
         if input("").strip() != "yes":
             print(json.dumps({"result": "pending", "approval_id": approval["id"]}, ensure_ascii=False))
             return 2

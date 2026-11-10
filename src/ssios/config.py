@@ -169,8 +169,8 @@ def load_settings(
         raw_enabled = []
     if isinstance(raw_enabled, str):
         raw_enabled = [raw_enabled]
-    if not isinstance(raw_enabled, list) or any(item not in ("drive", "gmail") for item in raw_enabled):
-        raise SsiosError("config_invalid", "connectors.enabled must list drive and/or gmail", 500)
+    if not isinstance(raw_enabled, list) or any(item not in ("drive", "gmail", "calendar") for item in raw_enabled):
+        raise SsiosError("config_invalid", "connectors.enabled must list drive, gmail, and/or calendar", 500)
     connectors_enabled = tuple(str(item) for item in raw_enabled)
     connector_max_calls = int(connectors.get("max_calls", 20))
     connector_max_bytes = int(connectors.get("max_bytes", 200000))
