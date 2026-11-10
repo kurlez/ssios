@@ -257,11 +257,9 @@ The revoke command is `ssios oauth revoke`. It first `POST`s `https://oauth2.goo
 
 A refresh token is worth protecting more than an access token. Storage uses the strictest layer the platform can actually provide:
 
-- macOS: the Keychain. Use the `security` command line or the Keychain API, and limit the item's accessor to the user running SSIOS. FileVault should be on.
-- Linux: libsecret (the desktop keyring) first. When there is no keyring, use a file encrypted with a master key. The master key does not enter the repository, MemFS, or the guest.
-- A mode `0600` file under `<state>/secrets/` is only the minimum fallback, for an environment with no Keychain and no libsecret. The directory is `0700`. When the Keychain or libsecret can be used, the refresh token is not also copied into this directory.
+- macOS and Linux: the `keyring` package, which uses the Keychain or the Secret Service in-process. Do not pass the secret to the `security` or `secret-tool` command line. FileVault should be on. If `keyring` is not installed, the connector refuses with `secure_store_unavailable` instead of writing a file.
 
-Whichever layer is used, these stay the same:
+These stay the same:
 
 - The access token stays in memory, is dropped when it has been used, and is not written to disk.
 - The guest sees no Google token. It can only send a brokered tool request.
@@ -269,7 +267,7 @@ Whichever layer is used, these stay the same:
 - The scopes are only the read-only scopes listed in the previous section. The OAuth client is for SSIOS alone and is not shared with another application. The person can also use a separate Google account prepared only for testing.
 - Authorization is the installed-app loopback flow: `code_challenge` uses PKCE, and `state` is random each time. The callback binds only a temporary port on `127.0.0.1`. The client secret stays on the host.
 - Every call is audited and is constrained by a call count and a byte quota.
-- `ssios oauth revoke` calls Google's revocation endpoint and deletes the local copies in the Keychain, libsecret, and `secrets/`.
+- `revoke_and_delete` calls Google's revocation endpoint and deletes the keyring items for that account. It does not leave a copy under `secrets/`.
 - These values do not enter Git, MemFS, logs, or diagnostics. The existing redaction has to cover `ya29.`, `Bearer`, `refresh_token`, and `client_secret`.
 
 The residual risk is that the host itself is compromised. The Keychain and FileVault stop a disk that falls into someone else's hands. They do not stop a process that is already running as the same user on this machine. Guest isolation does not reduce that risk.

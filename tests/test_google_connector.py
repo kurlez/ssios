@@ -10,11 +10,13 @@ or fixture body in return values other than the owner's one-shot result.
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from support import ROOT, PlaneTest
 
@@ -354,6 +356,57 @@ class ConnectorTest(PlaneTest):
         pdf = self.connector.take_result(self.ada, proposed["approval"]["id"])["text"]
         self.assertIn("not extracted", pdf)
         self.assertFalse(any(item["query"].get("alt") == ["media"] and "file-pdf" in item["path"] for item in _Google.seen if "query" in item))
+
+    def test_subprocess_argv_never_contains_secret_material(self) -> None:
+        secrets = {self.secret, "client-secret-bea", self.refresh_a, "refresh-account-b", "ya29.access-account-a"}
+        calls: list[list[str]] = []
+        real_run = subprocess.run
+        real_popen = subprocess.Popen
+
+        def spy_run(args, *a, **kwargs):
+            calls.append([str(part) for part in args])
+            return real_run(args, *a, **kwargs)
+
+        def spy_popen(args, *a, **kwargs):
+            calls.append([str(part) for part in args])
+            return real_popen(args, *a, **kwargs)
+
+        with mock.patch("subprocess.run", spy_run), mock.patch("subprocess.Popen", spy_popen):
+            self._consent(self.ada, "drive", "code-a")
+            proposed = self.connector.propose_fetch(
+                self.ada,
+                project_id="local-summary",
+                tool="drive.read_file",
+                arguments={"file_id": "file-1"},
+                limits={"folder_ids": ["folder-1"], "file_ids": ["file-1"], "max_bytes": 200, "max_calls": 4},
+            )
+            self._approve(proposed)
+            self.connector.take_result(self.ada, proposed["approval"]["id"])
+            self.connector.revoke_and_delete("ada")
+        blob = "\n".join(" ".join(argv) for argv in calls)
+        for secret in secrets:
+            self.assertNotIn(secret, blob)
+        source = (ROOT / "src" / "ssios" / "secret_store.py").read_text(encoding="utf-8")
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("add-generic-password", source)
+
+    def test_missing_keyring_is_refused(self) -> None:
+        import builtins
+
+        from ssios import secret_store
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "keyring":
+                raise ImportError("keyring")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", blocked):
+            with self.assertRaises(SsiosError) as caught:
+                secret_store.open_secret_store()
+        self.assertEqual(caught.exception.code, "secure_store_unavailable")
+        self.assertIn("pip install keyring", caught.exception.detail)
 
     def test_modules_do_not_write_secret_files_or_guest_paths(self) -> None:
         secret_source = (ROOT / "src" / "ssios" / "secret_store.py").read_text(encoding="utf-8")

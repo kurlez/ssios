@@ -28,7 +28,7 @@ Build `member_session` only from the login session. Do not take an account id fr
 | `take_result(session, approval_id)` | same member | `{"text": ...}` once. Another account, or an admin session, gets `not_found` or `connector_admin_denied`. |
 | `revoke_and_delete(account_id)` | account deletion and admin password reset | `{"account_id", "deleted": true, "revoke_ok"}`. Revokes at Google, then deletes the whole `ssios.google.<account_id>` secret service. No token and no content. |
 
-Tokens and the OAuth client secret are stored in the OS secret service under `ssios.google.<account_id>` (macOS Keychain via `keyring` or `security`, Linux Secret Service via `keyring` or `secret-tool`). This module does not write them to a file. One Google identity (`sub`) is kept per SSIOS account. A second consent for a different Google user is revoked and not stored.
+Tokens and the OAuth client secret are stored through the `keyring` package under the service `ssios.google.<account_id>`. That library talks to the macOS Keychain or the Linux Secret Service in-process. Secrets are not written to a file and are not passed on a command line. If `keyring` is missing, SSIOS raises `secure_store_unavailable` and tells you to run `pip install keyring`. One Google identity (`sub`) is kept per SSIOS account. A second consent for a different Google user is revoked and not stored.
 
 Allowed scopes are `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/gmail.metadata`, `https://www.googleapis.com/auth/drive.readonly`, and `https://www.googleapis.com/auth/drive.metadata.readonly`. Anything wider is rejected. `gmail.metadata` cannot request a message body.
 
@@ -42,7 +42,11 @@ Do this on the Mac that runs SSIOS. The browser consent has to be completed by y
 
 1. In Google Cloud Console, create an OAuth client of type Desktop app. Leave the project in Testing and add only the Google account you will use as a test user. Do not publish the app to skip verification.
 2. Enable the Gmail API and the Drive API for that project.
-3. Copy the client id and client secret into the OS keychain. They are not written into the repo or the state directory:
+3. Install the keyring package, then copy the client id and client secret into the OS keychain. They are not written into the repo or the state directory, and they are not passed to a shell command:
+
+```bash
+pip install keyring
+```
 
 ```bash
 PYTHONPATH=src python3 -m ssios oauth-install-client \

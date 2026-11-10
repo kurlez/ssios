@@ -1,17 +1,14 @@
 """OS secret storage for Google OAuth material.
 
-Secrets are namespaced by SSIOS account: the Keychain / Secret Service
-service name is ``ssios.google.<account_id>``. This module never writes a
-secret to a file. Tests inject ``MemorySecretStore``; production refuses to
-start a store when neither keyring, macOS ``security``, nor ``secret-tool``
-is available.
+Secrets are namespaced by SSIOS account. The keyring service name is
+``ssios.google.<account_id>``. Values go through the ``keyring`` package,
+which talks to the macOS Keychain or the Linux Secret Service in-process.
+Nothing is written to a file, and no secret is placed on a process command line.
+If ``keyring`` is missing or has no backend, the store refuses to open.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
 from typing import Protocol
 
 from ssios.errors import SsiosError
@@ -27,6 +24,7 @@ SECRET_NAMES = (
     "google-sub",
     "connected-at",
 )
+_INSTALL = "OS secret storage needs the keyring package. Run: pip install keyring"
 
 
 def validate_account_id(account_id: str) -> str:
@@ -54,22 +52,27 @@ class SecretStore(Protocol):
     def delete_service(self, account_id: str) -> None: ...
 
 
+def _accept(name: str, value: str) -> None:
+    if name not in SECRET_NAMES or not isinstance(value, str) or not value:
+        raise SsiosError("secret_rejected", "secret name rejected", 400)
+
+
 class MemorySecretStore:
-    """In-memory stand-in for tests. Not used in production."""
+    """In-memory stand-in for tests. Production never selects this store."""
 
     def __init__(self) -> None:
         self.data: dict[tuple[str, str], str] = {}
 
     def put(self, account_id: str, name: str, value: str) -> None:
-        self._check(name, value)
+        _accept(name, value)
         self.data[(service_name(account_id), name)] = value
 
     def get(self, account_id: str, name: str) -> str | None:
-        self._check(name, "x")
+        _accept(name, "x")
         return self.data.get((service_name(account_id), name))
 
     def delete(self, account_id: str, name: str) -> None:
-        self._check(name, "x")
+        _accept(name, "x")
         self.data.pop((service_name(account_id), name), None)
 
     def delete_service(self, account_id: str) -> None:
@@ -77,52 +80,27 @@ class MemorySecretStore:
         for key in [key for key in self.data if key[0] == service]:
             self.data.pop(key, None)
 
-    @staticmethod
-    def _check(name: str, value: str) -> None:
-        if name not in SECRET_NAMES or not isinstance(value, str) or not value:
-            raise SsiosError("secret_rejected", "secret name rejected", 400)
 
+class KeyringSecretStore:
+    def __init__(self, module) -> None:
+        self._keyring = module
 
-class _CommandStore:
     def put(self, account_id: str, name: str, value: str) -> None:
-        if name not in SECRET_NAMES or not value:
-            raise SsiosError("secret_rejected", "secret name rejected", 400)
-        self._put(service_name(account_id), name, value)
+        _accept(name, value)
+        self._keyring.set_password(service_name(account_id), name, value)
 
     def get(self, account_id: str, name: str) -> str | None:
-        if name not in SECRET_NAMES:
-            raise SsiosError("secret_rejected", "secret name rejected", 400)
-        return self._get(service_name(account_id), name)
+        _accept(name, "x")
+        return self._keyring.get_password(service_name(account_id), name)
 
     def delete(self, account_id: str, name: str) -> None:
-        if name not in SECRET_NAMES:
-            raise SsiosError("secret_rejected", "secret name rejected", 400)
+        _accept(name, "x")
         self._delete(service_name(account_id), name)
 
     def delete_service(self, account_id: str) -> None:
         service = service_name(account_id)
         for name in SECRET_NAMES:
             self._delete(service, name)
-
-    def _put(self, service: str, name: str, value: str) -> None:
-        raise NotImplementedError
-
-    def _get(self, service: str, name: str) -> str | None:
-        raise NotImplementedError
-
-    def _delete(self, service: str, name: str) -> None:
-        raise NotImplementedError
-
-
-class KeyringSecretStore(_CommandStore):
-    def __init__(self, module) -> None:
-        self._keyring = module
-
-    def _put(self, service: str, name: str, value: str) -> None:
-        self._keyring.set_password(service, name, value)
-
-    def _get(self, service: str, name: str) -> str | None:
-        return self._keyring.get_password(service, name)
 
     def _delete(self, service: str, name: str) -> None:
         try:
@@ -131,91 +109,13 @@ class KeyringSecretStore(_CommandStore):
             return
 
 
-class SecurityCliStore(_CommandStore):
-    """macOS Keychain via the security CLI. The secret is not written to a file."""
-
-    def _put(self, service: str, name: str, value: str) -> None:
-        completed = subprocess.run(
-            ["security", "add-generic-password", "-U", "-s", service, "-a", name, "-w", value],
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise SsiosError("secure_storage_unavailable", "keychain write failed", 500)
-
-    def _get(self, service: str, name: str) -> str | None:
-        completed = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-a", name, "-w"],
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return None
-        text = completed.stdout.decode("utf-8", "replace").strip()
-        return text or None
-
-    def _delete(self, service: str, name: str) -> None:
-        subprocess.run(
-            ["security", "delete-generic-password", "-s", service, "-a", name],
-            capture_output=True,
-            check=False,
-        )
-
-
-class SecretToolStore(_CommandStore):
-    """Linux Secret Service via secret-tool. The secret is passed on stdin."""
-
-    def _put(self, service: str, name: str, value: str) -> None:
-        completed = subprocess.run(
-            ["secret-tool", "store", "--label=ssios", "service", service, "username", name],
-            input=value.encode("utf-8"),
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise SsiosError("secure_storage_unavailable", "secret service write failed", 500)
-
-    def _get(self, service: str, name: str) -> str | None:
-        completed = subprocess.run(
-            ["secret-tool", "lookup", "service", service, "username", name],
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return None
-        text = completed.stdout.decode("utf-8", "replace")
-        return text or None
-
-    def _delete(self, service: str, name: str) -> None:
-        subprocess.run(
-            ["secret-tool", "clear", "service", service, "username", name],
-            capture_output=True,
-            check=False,
-        )
-
-
-def _keyring_store() -> SecretStore | None:
+def open_secret_store() -> SecretStore:
+    """Open the OS store. Refuses when keyring is missing instead of using a CLI or a file."""
     try:
         import keyring
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise SsiosError("secure_store_unavailable", _INSTALL, 500) from exc
     backend = keyring.get_keyring()
     if backend.__class__.__name__ == "FailKeyring":
-        return None
+        raise SsiosError("secure_store_unavailable", _INSTALL, 500)
     return KeyringSecretStore(keyring)
-
-
-def open_secret_store() -> SecretStore:
-    """Open the OS store. Raises if that would require a plaintext file."""
-    store = _keyring_store()
-    if store is not None:
-        return store
-    if sys.platform == "darwin" and shutil.which("security"):
-        return SecurityCliStore()
-    if shutil.which("secret-tool"):
-        return SecretToolStore()
-    raise SsiosError(
-        "secure_storage_unavailable",
-        "OS secret storage is required (macOS Keychain or Linux Secret Service). Refusing to write a token file.",
-        500,
-    )
