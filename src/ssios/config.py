@@ -42,6 +42,7 @@ class Settings:
     codex_allow_models: tuple[str, ...]
     codex_max_requests: int
     codex_max_request_bytes: int
+    codex_num_ctx: int
     task_timeout_seconds: float
     max_tool_calls: int
     max_output_bytes: int
@@ -153,6 +154,12 @@ def load_settings(
     codex_max_request_bytes = int(codex.get("max_request_bytes", 200000))
     if not 1024 <= codex_max_request_bytes <= 2000000:
         raise SsiosError("config_invalid", "codex max_request_bytes is out of range", 500)
+    # Codex's first request is about 4098 tokens. Ollama's OpenAI-compatible
+    # /v1/responses ignores per-request options and stays at 4096. The proxy
+    # sends this value as options.num_ctx on native /api/chat.
+    codex_num_ctx = int(codex.get("num_ctx", 16384))
+    if not 8192 <= codex_num_ctx <= 32768:
+        raise SsiosError("config_invalid", "agent.codex num_ctx must be from 8192 to 32768", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -194,6 +201,7 @@ def load_settings(
         codex_allow_models=codex_allow_models,
         codex_max_requests=codex_max_requests,
         codex_max_request_bytes=codex_max_request_bytes,
+        codex_num_ctx=codex_num_ctx,
         task_timeout_seconds=float(limits.get("task_timeout_seconds", 30)),
         max_tool_calls=int(limits.get("max_tool_calls", 8)),
         max_output_bytes=int(limits.get("max_output_bytes", 65536)),

@@ -50,6 +50,9 @@ model = "qwen2.5-coder:7b"
 allow_models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
 max_requests = 4
 max_request_bytes = 200000
+# Codex 的系统提示加工具大约 4098 token。Ollama 的 /v1/responses 忽略请求里的 options，默认上下文是 4096。
+# 代理改走原生 /api/chat，并带上 options.num_ctx。不修改已安装的模型。M4 24GB 上的 7B 用 16384，最大 32768。
+num_ctx = 16384
 
 [limits]
 task_timeout_seconds = 30

@@ -25,7 +25,9 @@ from ssios.codex_guest import (
     exec_commands_from_text,
     final_exception_line,
     guest_entry_source,
+    items_from_ollama_chat,
     ollama_smoke_preflight,
+    responses_to_chat,
     open_vsock,
     prepare_codex_binary,
     prepared_binary,
@@ -76,6 +78,8 @@ class PinAndConfigTest(unittest.TestCase):
         loaded = load_settings(Path("config/ssios.example.toml"), state_dir=Path("/tmp/ssios-codex-settings"), port=0)
         self.assertEqual(loaded.runtime_agent, "summary")
         self.assertEqual(loaded.codex_model, "qwen2.5-coder:7b")
+        self.assertEqual(loaded.codex_num_ctx, 16384)
+        self.assertEqual(loaded.codex_max_requests, 4)
         self.assertIn("qwen2.5-coder:1.5b", loaded.codex_allow_models)
         with self.assertRaises(SsiosError):
             load_settings_text('agent = "remote"\n', loaded.state_dir)
@@ -504,16 +508,122 @@ class VsockRelayTest(unittest.TestCase):
         self.assertIn("status=200", detail)
         self.assertNotIn("too_many_requests", detail.split(";")[0])
 
+    def test_chat_translation_sets_num_ctx_and_a_4xx_is_fatal(self) -> None:
+        chat = responses_to_chat(
+            {
+                "model": "qwen2.5-coder:7b",
+                "instructions": "system",
+                "input": [
+                    {"role": "user", "content": [{"type": "input_text", "text": "list files"}]},
+                    {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+                    {"type": "function_call_output", "call_id": "call_0", "output": "notes.md"},
+                ],
+                "tools": [{"type": "function", "name": "exec_command", "parameters": {"type": "object"}}],
+                "tool_choice": "required",
+                "stream": True,
+            },
+            16384,
+            1024,
+        )
+        self.assertEqual(chat["options"]["num_ctx"], 16384)
+        self.assertFalse(chat["stream"])
+        self.assertEqual(chat["messages"][0]["role"], "system")
+        self.assertEqual(chat["messages"][-1]["role"], "tool")
+        self.assertEqual(chat["tools"][0]["function"]["name"], "exec_command")
+        rendered, tokens = items_from_ollama_chat(
+            b'{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"exec_command","arguments":{"cmd":"pwd"}}}]},"done":true,"eval_count":4}\n'
+        )
+        self.assertEqual(rendered[0]["name"], "exec_command")
+        self.assertIn("pwd", rendered[0]["arguments"])
+        self.assertEqual(tokens, 4)
+
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                seen["body"] = json.loads(self.rfile.read(length))
+                body = b'{"error":{"message":"request (4098 tokens) exceeds the available context size (4096 tokens)"}}'
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        root = Path("/tmp/ssios-upstream-4xx")
+        if root.exists():
+            import shutil
+
+            shutil.rmtree(root)
+        root.mkdir()
+        os.chmod(root, 0o700)
+        proxy = ResponsesProxy(
+            root / "vsock.sock",
+            "unused",
+            "qwen2.5-coder:7b",
+            RequestBudget(4, 200000),
+            root / "proxy.log",
+            upstream=f"http://127.0.0.1:{server.server_address[1]}/api/chat",
+            allow_models=("qwen2.5-coder:7b",),
+            num_ctx=16384,
+        )
+        proxy.start()
+        self.addCleanup(proxy.close)
+
+        def once() -> None:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(proxy.listen_path))
+            payload = json.dumps({"model": "qwen2.5-coder:7b", "stream": True, "input": "SECRET-PROMPT"}).encode()
+            sock.sendall(
+                b"POST /v1/responses HTTP/1.1\r\nHost: h\r\nContent-Type: application/json\r\nContent-Length: "
+                + str(len(payload)).encode()
+                + b"\r\n\r\n"
+                + payload
+            )
+            sock.recv(400)
+            sock.close()
+
+        once()
+        once()
+        self.assertEqual(proxy.budget.requests, 1)
+        self.assertTrue(proxy.upstream_failure["fatal"])
+        self.assertEqual(proxy.upstream_failure["status"], 400)
+        self.assertEqual(seen["body"]["options"]["num_ctx"], 16384)
+        self.assertIn("SECRET-PROMPT", json.dumps(seen["body"]["messages"]))
+        log = (root / "proxy.log").read_text(encoding="utf-8")
+        self.assertNotIn("SECRET-PROMPT", log)
+        detail, code = _with_upstream(proxy, "codex guest failed: last_message_empty", None)
+        self.assertEqual(code, "upstream_error")
+        self.assertEqual(detail.count("status="), 1)
+        self.assertIn("status=400", detail)
+        self.assertNotIn("status=None", detail)
+        self.assertNotIn("too_many_requests", detail)
+
     def test_preflight_checks_the_responses_stream(self) -> None:
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         class Handler(BaseHTTPRequestHandler):
+            context_length = 16384
+
             def do_GET(self):
-                if self.path != "/api/tags":
+                if self.path == "/api/tags":
+                    body = json.dumps({"models": [{"name": "qwen2.5-coder:7b"}]}).encode()
+                elif self.path == "/api/ps":
+                    body = json.dumps({"models": [{"name": "qwen2.5-coder:7b", "context_length": self.context_length}]}).encode()
+                else:
                     self.send_error(404)
                     return
-                body = json.dumps({"models": [{"name": "qwen2.5-coder:7b"}]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -521,14 +631,11 @@ class VsockRelayTest(unittest.TestCase):
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or "0")
-                self.rfile.read(length)
-                if self.path == "/api/chat":
-                    body = json.dumps({"message": {"content": "ok"}}).encode()
-                elif self.path == "/v1/responses":
-                    body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
-                else:
+                raw = json.loads(self.rfile.read(length))
+                if self.path != "/api/chat" or raw.get("options", {}).get("num_ctx") != 16384:
                     self.send_error(404)
                     return
+                body = json.dumps({"message": {"content": "ok"}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -542,12 +649,18 @@ class VsockRelayTest(unittest.TestCase):
         thread.start()
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_address[1]}"
-        report = ollama_smoke_preflight(base, timeout=5)
+        report = ollama_smoke_preflight(base, timeout=5, num_ctx=16384)
         self.assertTrue(report["ok"], report)
-        self.assertGreater(report["responses_bytes"], 0)
-        missing = ollama_smoke_preflight(base, model="missing:1b", timeout=5)
+        self.assertEqual(report["context_length"], 16384)
+        missing = ollama_smoke_preflight(base, model="missing:1b", timeout=5, num_ctx=16384)
         self.assertFalse(missing["ok"])
         self.assertIn("ollama pull", missing["detail"])
+        Handler.context_length = 4096
+        short = ollama_smoke_preflight(base, timeout=5, num_ctx=16384)
+        self.assertFalse(short["ok"])
+        self.assertIn("4096", short["detail"])
+        self.assertIn("OLLAMA_CONTEXT_LENGTH=16384", short["detail"])
+        self.assertIn("ollama create", short["detail"])
 
 
 class PrepareSkip(unittest.TestCase):

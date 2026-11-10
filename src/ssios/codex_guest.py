@@ -13,7 +13,9 @@ A single turn completes when the SSE stream contains, in order:
   plus ``usage.output_tokens``
 
 No WebSocket and no second request were required for a plain final message.
-This proxy implements that subset only. It does not call Ollama or any other host.
+The mock path implements that subset only. The Ollama path translates the
+same request to native ``/api/chat`` and sets ``options.num_ctx``, because
+``/v1/responses`` keeps Ollama's 4096 default and ignores per-request options.
 """
 
 from __future__ import annotations
@@ -370,6 +372,166 @@ def render_codex_sse(items: list[dict]) -> bytes:
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events).encode("utf-8")
 
 
+def _message_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or ""))
+        return "".join(parts)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or "")
+    return ""
+
+
+def _object_arguments(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {"cmd": value}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def responses_to_chat(payload: dict, num_ctx: int, num_predict: int) -> dict:
+    """Turn a Codex Responses body into native Ollama /api/chat. Prompt text stays in the body only."""
+    messages: list[dict] = []
+    instructions = payload.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        messages.append({"role": "system", "content": instructions})
+    incoming = payload.get("input")
+    items = [incoming] if isinstance(incoming, str) else incoming if isinstance(incoming, list) else []
+    for item in items:
+        if isinstance(item, str):
+            if item:
+                messages.append({"role": "user", "content": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "")
+        if kind == "function_call":
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": str(item.get("name") or "exec_command"),
+                                "arguments": _object_arguments(item.get("arguments")),
+                            }
+                        }
+                    ],
+                }
+            )
+            continue
+        if kind == "function_call_output":
+            messages.append({"role": "tool", "content": _message_text(item.get("output"))})
+            continue
+        role = str(item.get("role") or "user")
+        if role not in ("system", "user", "assistant", "tool"):
+            role = "user"
+        text = _message_text(item.get("content", item.get("text", "")))
+        if text or role == "user":
+            messages.append({"role": role, "content": text})
+    tools = []
+    for tool in payload.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else None
+        if function is None and tool.get("name"):
+            function = {
+                "name": tool.get("name"),
+                "description": tool.get("description") or "",
+                "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+            }
+        if isinstance(function, dict) and function.get("name"):
+            tools.append({"type": "function", "function": function})
+    if not messages:
+        messages.append({"role": "user", "content": ""})
+    chat = {
+        "model": payload.get("model"),
+        "messages": messages,
+        "stream": False,
+        "options": {"num_ctx": int(num_ctx), "num_predict": int(num_predict)},
+    }
+    if tools:
+        chat["tools"] = tools
+    if payload.get("tool_choice"):
+        chat["tool_choice"] = payload["tool_choice"]
+    return chat
+
+
+def _json_objects(raw: bytes) -> list[dict]:
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        return []
+    if text.startswith("{") and "\n" not in text:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return [parsed]
+    objects = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            objects.append(parsed)
+    return objects
+
+
+def items_from_ollama_chat(raw: bytes) -> tuple[list[dict], int]:
+    content: list[str] = []
+    calls: list[dict] = []
+    tokens = 0
+    for chunk in _json_objects(raw):
+        message = chunk.get("message")
+        if not isinstance(message, dict):
+            continue
+        text = message.get("content")
+        if isinstance(text, str) and text:
+            content.append(text)
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else call
+            name = str(function.get("name") or "")
+            arguments = function.get("arguments")
+            rendered = json.dumps(arguments, separators=(",", ":")) if isinstance(arguments, dict) else str(arguments or "")
+            if name == "exec_command":
+                calls.append({"name": "exec_command", "arguments": clean_tool_arguments(rendered)})
+        if chunk.get("done") is True and isinstance(chunk.get("eval_count"), int):
+            tokens = int(chunk["eval_count"])
+    if not calls:
+        for cmd in exec_commands_from_text("".join(content)):
+            calls.append({"name": "exec_command", "arguments": json.dumps({"cmd": cmd}, separators=(",", ":"))})
+    if calls:
+        return calls[:3], tokens
+    return [{"name": "", "arguments": "", "text": "".join(content)}], tokens
+
+
+def items_from_upstream(raw: bytes) -> tuple[list[dict], int]:
+    stripped = raw.lstrip()
+    if stripped.startswith(b"{") and b'"message"' in raw:
+        return items_from_ollama_chat(raw)
+    return codex_items_from_ollama(raw)
+
+
 def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> tuple[int, bytes]:
     host = urllib.request.urlparse(url).hostname
     if host not in ("127.0.0.1", "localhost"):
@@ -384,8 +546,10 @@ def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> tuple[int
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return int(response.status), response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read(400).decode("utf-8", "replace")
-        raise SsiosError("llm_unavailable", f"status={exc.code} {detail[:120]}", 502) from exc
+        detail = exc.read(400).decode("utf-8", "replace").replace("\n", " ")
+        err = SsiosError("llm_unavailable", detail[:160], 502)
+        err.upstream_status = int(exc.code)
+        raise err from exc
     except urllib.error.URLError as exc:
         raise SsiosError("llm_unavailable", "local model is not reachable", 502) from exc
 
@@ -394,11 +558,14 @@ def ollama_smoke_preflight(
     base_url: str = "http://127.0.0.1:11434",
     model: str = "qwen2.5-coder:7b",
     timeout: float = 180,
+    num_ctx: int = 16384,
 ) -> dict:
-    """Check the loopback model before a Mac guest boot. No prompt text is returned."""
+    """Check the loopback model and the context it actually loaded. No prompt text is returned."""
     parsed = urllib.request.urlparse(base_url)
     if parsed.hostname not in ("127.0.0.1", "localhost"):
         return {"ok": False, "detail": "ollama must stay on loopback"}
+    if not 8192 <= int(num_ctx) <= 32768:
+        return {"ok": False, "detail": f"codex num_ctx {num_ctx} must be from 8192 to 32768"}
     root = base_url.rstrip("/")
     try:
         with urllib.request.urlopen(root + "/api/tags", timeout=10) as response:
@@ -408,27 +575,41 @@ def ollama_smoke_preflight(
     names = [str(item.get("name") or "") for item in tags.get("models") or [] if isinstance(item, dict)]
     if not any(name == model or name.startswith(model + "-") for name in names):
         return {"ok": False, "detail": f"{model} is not installed. Run: ollama pull {model}"}
-    plain = _ollama_chat(root, model, stream=False, timeout=timeout)
+    plain = _ollama_chat(root, model, stream=False, timeout=timeout, num_ctx=num_ctx)
     if not plain["ok"]:
         return plain
-    streamed = _ollama_responses(root, model, timeout=timeout)
-    if not streamed["ok"]:
-        return streamed
+    loaded = _ollama_loaded_context(root, model, timeout=10)
+    if loaded is None:
+        loaded = _probe_context(root, model, num_ctx, timeout)
+    if loaded is None or loaded <= 4096 or loaded < num_ctx:
+        return {"ok": False, "detail": _context_failure(model, loaded, num_ctx), "context_length": loaded}
     return {
         "ok": True,
-        "detail": f"{model} answered on /api/chat and /v1/responses",
+        "detail": f"{model} answered on /api/chat with context {loaded}",
         "chat_bytes": plain["bytes"],
-        "responses_bytes": streamed["bytes"],
-        "responses_status": streamed["status"],
+        "context_length": loaded,
     }
 
 
-def _ollama_chat(root: str, model: str, stream: bool, timeout: float) -> dict:
+def _context_failure(model: str, loaded: int | None, num_ctx: int) -> str:
+    seen = "missing" if loaded is None else str(loaded)
+    derived = "ssios-qwen2.5-coder-7b-16k"
+    return (
+        f"Ollama loaded {model} with context {seen}; Codex needs {num_ctx}. "
+        "The proxy already sends options.num_ctx on POST /api/chat and does not modify the installed model. "
+        f"Stop the current ollama serve and run: OLLAMA_CONTEXT_LENGTH={num_ctx} ollama serve. "
+        "If /api/ps still reports 4096, create a derived model and set [agent.codex] model to it: "
+        f"printf 'FROM {model}\\nPARAMETER num_ctx {num_ctx}\\n' > /tmp/ssios-Modelfile && "
+        f"ollama create {derived} -f /tmp/ssios-Modelfile"
+    )
+
+
+def _ollama_chat(root: str, model: str, stream: bool, timeout: float, num_ctx: int = 16384) -> dict:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply with the single word ok."}],
         "stream": stream,
-        "options": {"num_predict": 8},
+        "options": {"num_predict": 8, "num_ctx": int(num_ctx)},
     }
     request = urllib.request.Request(
         root + "/api/chat",
@@ -440,7 +621,8 @@ def _ollama_chat(root: str, model: str, stream: bool, timeout: float) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "detail": f"/api/chat status={exc.code}"}
+        detail = exc.read(200).decode("utf-8", "replace").replace("\n", " ")
+        return {"ok": False, "detail": f"/api/chat status={exc.code} {detail[:120]}"}
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return {"ok": False, "detail": f"/api/chat failed: {exc.__class__.__name__}"}
     if not raw.strip():
@@ -448,30 +630,56 @@ def _ollama_chat(root: str, model: str, stream: bool, timeout: float) -> dict:
     return {"ok": True, "bytes": len(raw)}
 
 
-def _ollama_responses(root: str, model: str, timeout: float) -> dict:
+def _model_matches(name: str, model: str) -> bool:
+    if not name or not model:
+        return False
+    return name == model or name.startswith(model + "-")
+
+
+def _ollama_loaded_context(root: str, model: str, timeout: float) -> int | None:
+    try:
+        with urllib.request.urlopen(root + "/api/ps", timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    for item in body.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "")
+        if not _model_matches(name, model):
+            continue
+        for key in ("context_length", "context"):
+            value = item.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
+
+
+def _probe_context(root: str, model: str, num_ctx: int, timeout: float) -> int | None:
+    """Ask with more than 4096 tokens when /api/ps omits the loaded length."""
     payload = {
         "model": model,
-        "input": "Reply with the single word ok.",
-        "stream": True,
-        "max_output_tokens": 8,
+        "messages": [{"role": "user", "content": "alpha " * 5000}],
+        "stream": False,
+        "options": {"num_ctx": int(num_ctx), "num_predict": 1},
     }
     request = urllib.request.Request(
-        root + "/v1/responses",
+        root + "/api/chat",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-            status = int(response.status)
+            response.read()
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "detail": f"/v1/responses status={exc.code}. /api/generate can still succeed."}
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {"ok": False, "detail": f"/v1/responses failed: {exc.__class__.__name__}"}
-    if not raw.strip():
-        return {"ok": False, "detail": "/v1/responses returned an empty body"}
-    return {"ok": True, "bytes": len(raw), "status": status}
+        detail = exc.read(400).decode("utf-8", "replace")
+        if "4096" in detail:
+            return 4096
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+    return int(num_ctx)
 
 
 def error_response(status: int, reason: str) -> bytes:
@@ -520,6 +728,7 @@ class ResponsesProxy:
         allow_models: tuple[str, ...] | None = None,
         max_output_tokens: int = 1024,
         listen_path: Path | None = None,
+        num_ctx: int = 16384,
     ) -> None:
         self.socket_path = socket_path
         self.listen_path = listen_path or Path(str(socket_path) + f"_{VSOCK_PORT}")
@@ -528,6 +737,7 @@ class ResponsesProxy:
         self.allow_models = allow_models or (model,)
         self.upstream = upstream
         self.max_output_tokens = max_output_tokens
+        self.num_ctx = num_ctx
         self.output_tokens = 0
         self.budget = budget
         self.log_path = log_path
@@ -604,6 +814,9 @@ class ResponsesProxy:
             self._log(redact_text(str(exc), []), "rejected")
             conn.sendall(error_response(400, "bad_request"))
             return
+        if isinstance(self.upstream_failure, dict) and self.upstream_failure.get("fatal"):
+            conn.sendall(error_response(502, "upstream_error"))
+            return
         decision = self.budget.allow(len(body))
         model = ""
         try:
@@ -643,15 +856,16 @@ class ResponsesProxy:
             payload = dict(payload)
             payload["tool_choice"] = "required"
         started = time.monotonic()
+        chat = responses_to_chat(payload, self.num_ctx, self.max_output_tokens)
         try:
-            status, raw = fetch_ollama_responses(self.upstream or "", payload, 120)
+            status, raw = fetch_ollama_responses(self.upstream or "", chat, 120)
         except SsiosError as exc:
             self._note_upstream(
                 "upstream_error",
                 model,
                 body,
                 digest,
-                None,
+                getattr(exc, "upstream_status", None),
                 started,
                 0,
                 exc.detail,
@@ -659,7 +873,7 @@ class ResponsesProxy:
             conn.sendall(error_response(502, "upstream_error"))
             return
         latency_ms = int((time.monotonic() - started) * 1000)
-        items, tokens = codex_items_from_ollama(raw)
+        items, tokens = items_from_upstream(raw)
         if _upstream_output_empty(items):
             self._note_upstream("upstream_empty", model, body, digest, status, started, len(raw), "model returned no text and no tool call")
             conn.sendall(error_response(502, "upstream_empty"))
@@ -712,6 +926,7 @@ class ResponsesProxy:
         detail: str,
     ) -> None:
         latency_ms = int((time.monotonic() - started) * 1000)
+        fatal = error == "upstream_error" and isinstance(status, int) and 400 <= status < 500 and status != 429
         self.rejected = True
         self.upstream_failure = {
             "error": error,
@@ -720,6 +935,7 @@ class ResponsesProxy:
             "request_bytes": len(body),
             "response_bytes": response_bytes,
             "detail": detail[:160],
+            "fatal": fatal,
         }
         self._log(
             model,
@@ -804,7 +1020,7 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
     answer = ""
     if plane.llm.provider == "ollama":
         grant = {"system": grant["system"], "user": OLLAMA_TASK_PROMPT}
-        upstream = plane.settings.ollama_base_url.rstrip("/") + "/v1/responses"
+        upstream = plane.settings.ollama_base_url.rstrip("/") + "/api/chat"
     else:
         messages = [{"role": "system", "content": grant["system"]}, {"role": "user", "content": grant["user"]}]
         response = plane.llm.complete(messages, kind=task["kind"], cancel_event=cancel, deadline=deadline)
@@ -890,6 +1106,7 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
         upstream=upstream,
         allow_models=tuple(getattr(runtime.settings, "codex_allow_models", (runtime.settings.codex_model,))),
         max_output_tokens=runtime.settings.max_output_tokens,
+        num_ctx=int(getattr(runtime.settings, "codex_num_ctx", 16384)),
     )
     before = _snapshot(session.root / "workspace")
     sockets = []
@@ -976,8 +1193,10 @@ def _with_upstream(proxy, detail: str, error_code: str | None) -> tuple[str, str
     failure = getattr(proxy, "upstream_failure", None)
     if not isinstance(failure, dict) or not failure.get("error"):
         return detail, error_code
+    status = failure.get("status")
+    status_text = "none" if status is None else str(status)
     lead = (
-        f"{failure['error']} status={failure.get('status')} latency_ms={failure.get('latency_ms')} "
+        f"{failure['error']} status={status_text} latency_ms={failure.get('latency_ms')} "
         f"request_bytes={failure.get('request_bytes')} response_bytes={failure.get('response_bytes')}"
     )
     if failure.get("detail"):

@@ -23,16 +23,6 @@ if ! command -v ollama >/dev/null 2>&1; then
 fi
 echo "If qwen2.5-coder:7b is not listed, run: ollama pull qwen2.5-coder:7b" >&2
 ollama list || true
-PYTHONPATH=src python3 - << 'PY'
-import json
-import sys
-from ssios.codex_guest import ollama_smoke_preflight
-report = ollama_smoke_preflight()
-print(json.dumps(report, ensure_ascii=False), flush=True)
-if not report["ok"]:
-    sys.stderr.write(report["detail"] + "\n")
-    raise SystemExit(1)
-PY
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vz-codex.XXXXXX")
 echo "临时状态目录：$STATE" >&2
 cleanup() {
@@ -67,6 +57,25 @@ missing = [item for item in required if item not in text]
 if missing:
     raise SystemExit("smoke config was not updated: " + ", ".join(missing))
 path.write_text(text, encoding="utf-8")
+PY
+echo "核对 Ollama 的有效上下文。仍是 4096 就停在这里，不启动客户机。" >&2
+PYTHONPATH=src python3 - "$STATE/smoke.toml" "$STATE" << 'PY'
+import json
+import sys
+from pathlib import Path
+from ssios.codex_guest import ollama_smoke_preflight
+from ssios.config import load_settings
+settings = load_settings(Path(sys.argv[1]), state_dir=Path(sys.argv[2]), port=0)
+report = ollama_smoke_preflight(
+    settings.ollama_base_url,
+    settings.codex_model,
+    num_ctx=settings.codex_num_ctx,
+)
+print(json.dumps({k: v for k, v in report.items() if k != "detail"}, ensure_ascii=False), flush=True)
+if not report["ok"]:
+    sys.stderr.write(report["detail"] + "\n")
+    raise SystemExit(1)
+print(report["detail"], flush=True)
 PY
 echo "准备钉住的 aarch64 内核和 initramfs。客户机启动时不再下载。" >&2
 # vm-prepare reads profile from the config file. It does not accept --profile.

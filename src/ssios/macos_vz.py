@@ -626,6 +626,11 @@ def supervise_process(command: list[str], proxy, deadline: float, connect_grace:
                 proc.kill()
                 stderr.extend(b"\nno vsock connection")
                 break
+            failure = getattr(proxy, "upstream_failure", None)
+            if isinstance(failure, dict) and failure.get("fatal"):
+                proc.kill()
+                stderr.extend(b"\nupstream 4xx")
+                break
             time.sleep(0.05)
         try:
             proc.wait(timeout=5)
@@ -666,6 +671,7 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
         allow_models=tuple(getattr(runtime.settings, "codex_allow_models", (runtime.settings.codex_model,))),
         max_output_tokens=runtime.settings.max_output_tokens,
         listen_path=vsock,
+        num_ctx=int(getattr(runtime.settings, "codex_num_ctx", 16384)),
     )
     before = _snapshot(session.root / "workspace")
     records: list[dict] = []

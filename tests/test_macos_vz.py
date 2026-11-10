@@ -111,6 +111,18 @@ class ConnectGraceTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3)
         self.assertNotEqual(completed.returncode, 0)
 
+    def test_upstream_4xx_stops_the_process(self) -> None:
+        class Proxy:
+            connected = 1
+            upstream_failure = {"fatal": True, "error": "upstream_error", "status": 400}
+
+        started = time.monotonic()
+        completed, timed_out = supervise_process(["sleep", "30"], Proxy(), started + 5, connect_grace=30)
+        self.assertFalse(timed_out)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(b"upstream 4xx", completed.stderr)
+
 
 class PackTest(unittest.TestCase):
     def test_initramfs_contains_the_init_script(self) -> None:

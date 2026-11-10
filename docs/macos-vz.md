@@ -27,6 +27,16 @@ bash scripts/macos-vz-codex-smoke.sh
 
 脚本把样例配置改成 `backend = "macos-vz"`、`agent = "codex"` 和本机 Ollama。`vm-prepare` 不接受 `--profile`，档位来自配置文件里的 `profile = "dev"`。`--profile dev` 只传给 `ssios up`。
 
+Ollama 的 OpenAI 兼容接口 `/v1/responses` 忽略请求里的 `options`，上下文停在默认的 4096。Codex 的系统提示加工具大约 4098 token，所以那条路径会返回 400。宿主机代理把同一份请求译成原生 `POST /api/chat`，并带上 `[agent.codex] num_ctx`（默认 16384，允许 8192 到 32768）。已安装的 `qwen2.5-coder:7b` 不会被改写。冒烟脚本在启动客户机之前读 `/api/ps` 的 `context_length`。如果仍是 4096，脚本直接退出，并打印这两条补救命令：
+
+```bash
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 16384\n' > /tmp/ssios-Modelfile
+ollama create ssios-qwen2.5-coder-7b-16k -f /tmp/ssios-Modelfile
+```
+
+第二条只在重启后的 `/api/ps` 仍是 4096 时才需要。然后把 `[agent.codex] model` 改成 `ssios-qwen2.5-coder-7b-16k`，并把它加进 `allow_models`。上游 400 这类不可重试的 4xx 会立刻停掉 vfkit，请求上限仍是 4。
+
 客户机根不会解到宿主机磁盘上。CPython 的 terminfo 里有 25 对只差大小写的路径，例如 `N/NCR260VT300WPP` 指向 `../n/ncr260vt300wpp`。在默认不区分大小写的 APFS 上这会变成指向自己的符号链接，Python 3.14 的 `tarfile` 过滤再调用 `realpath` 就会报 `Too many levels of symbolic links`。initramfs 在内存里从 tar 成员直接打成 cpio。`share/terminfo` 不放进客户机。每次冒烟都用新的临时目录，不必删上一次失败留下的目录。
 
 vsock 的宿主机套接字不放在状态目录里。macOS 的 `sun_path` 只有 104 字节，`/var/folders/...` 太长。代理在 `/tmp/ssios-<随机>`（0700）上监听，套接字是 0600。vfkit 0.6.4 的 `listen` 表示宿主机听、客户机连到 CID 2 端口 19090。没有打开 vfkit 的 REST 套接字。串口日志仍写在任务目录的 `guest/serial.log`，失败时路径和末尾会进 `diagnostics/<task>.json`。Homebrew 的 vfkit 自带 `com.apple.security.virtualization` 签名，这里不再签名。
