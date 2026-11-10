@@ -1,8 +1,10 @@
 """Transparent route classifier.
 
-Rules decide first. A local model may break a tie only when the rules are
-unsure, and only when the provider is local Ollama. Anything unsure about
-execution or writes stays on the microVM. Overrides are explicit.
+Rules decide first. A plain question, in Chinese or English, stays on local
+Ollama. A request that asks for files, commands, a workspace edit, or a tool
+goes to the guest. The local model breaks a tie only when the message looks
+like that kind of task and the rules are not sure. That tie defaults to the
+guest. Anything else stays direct. Overrides are explicit.
 """
 
 from __future__ import annotations
@@ -14,6 +16,32 @@ from ssios.calendar_intent import mentions_calendar
 
 _QUESTION = re.compile(
     r"^(what|why|how|when|who|where|explain|describe|hello|hi|thanks|thank you)\b",
+    re.IGNORECASE,
+)
+_IDENTITY = re.compile(
+    r"^(who are you|what are you|what can you|what do you|how are you)\b",
+    re.IGNORECASE,
+)
+_CN_QUESTION = (
+    "你是谁",
+    "你会什么",
+    "你能做什么",
+    "你是什么",
+    "什么是",
+    "为什么",
+    "怎么",
+    "如何",
+    "哪里",
+    "哪个",
+    "哪些",
+    "多少",
+    "是不是",
+    "吗",
+    "呢",
+)
+_CN_TASK = ("运行", "执行", "编译", "修改", "编辑", "改一下", "写一个文件", "删除文件")
+_TASK_NOUN = re.compile(
+    r"\b(file|files|workspace|readme|script|command|terminal|folder|directory|code)\b",
     re.IGNORECASE,
 )
 _EXECUTE = re.compile(
@@ -76,17 +104,39 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
         )
     if services and not (_DEFINITION.search(message) and "my" not in message.casefold() and "inbox" not in message.casefold()):
         return _decision("connector", "rule_connector", _cloud_reason(services), services)
-    if _writes(message) or _EXECUTE.search(message):
-        return _decision("vm", "rule_vm", "The message asks to run code or change a workspace, so it goes to the guest.", ())
     if _REMEMBER.search(message):
         return _decision("memory", "rule_memory", "The message asks to save memory. It is not written until you approve it.", ())
-    if _QUESTION.search(message) or message.endswith("?"):
+    if _clear_task(message):
+        return _decision("vm", "rule_vm", "The message asks to run code or change a workspace, so it goes to the guest.", ())
+    if _is_question(message):
         return _decision("direct", "rule_direct", "The message is a question, so the local model answers directly.", ())
-    return _unsure(message, llm, deadline)
+    if _taskish(message):
+        return _unsure(message, llm, deadline)
+    return _decision("direct", "rule_direct", "The message does not ask for files, commands, or a workspace change, so the local model answers directly.", ())
 
 
 def _writes(message: str) -> bool:
     return bool(_WRITE_FILE.search(message) or _WRITE.search(message))
+
+
+def _clear_task(message: str) -> bool:
+    if _writes(message) or _EXECUTE.search(message):
+        return True
+    return any(cue in message for cue in _CN_TASK)
+
+
+def _is_question(message: str) -> bool:
+    if message.endswith("?") or message.endswith("？"):
+        return True
+    if _QUESTION.search(message) or _IDENTITY.search(message):
+        return True
+    return any(cue in message for cue in _CN_QUESTION)
+
+
+def _taskish(message: str) -> bool:
+    if _clear_task(message) or _TASK_NOUN.search(message):
+        return True
+    return any(cue in message for cue in ("文件", "代码", "工作区", "脚本", "终端"))
 
 
 def _services(message: str) -> tuple[str, ...]:
@@ -121,8 +171,8 @@ def _unsure(message: str, llm, deadline: float | None) -> RouteDecision:
             verdict = "vm"
         if verdict.strip().lower() == "direct":
             return _decision("direct", "model_direct", "The local model judged this as a question.", ())
-        return _decision("vm", "model_vm", "The local model did not call this a plain question, so it goes to the guest.", ())
-    return _decision("vm", "unsure", "It is not clear that this is only a question, so it goes to the guest.", ())
+        return _decision("vm", "model_vm", "The local model treated this as a file or workspace task, so it goes to the guest.", ())
+    return _decision("vm", "unsure", "The message looks like a file or workspace task, so it goes to the guest.", ())
 
 
 def _decision(route: str, code: str, reason: str, services: tuple[str, ...]) -> RouteDecision:

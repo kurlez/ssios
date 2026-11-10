@@ -165,7 +165,7 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
     if path == "/ui/chat/events" and method == "GET":
         return Page(200, "", stream=iter(["event: ready\ndata: {}\n\n"]), content_type="text/event-stream; charset=utf-8")
     if path == "/ui/connections" and method == "GET":
-        return Page(200, _connections_page(plane, session, ""))
+        return Page(200, _connections_page(plane, session, "", peer_ip))
     if path == "/ui/connections" and method == "POST":
         _csrf(session, body)
         return _connections_post(plane, session, body, peer_ip)
@@ -326,74 +326,96 @@ def _chat_page(plane, session, conversation_id: str) -> str:
 
 
 def _connection_view(plane, account: dict) -> dict:
-    from ssios.google_connector import member_session
+    from ssios.google_connector import session_for_account
 
-    if account.get("role") == "member":
-        return plane.google.status(member_session(account["id"]))
-    return plane.google.admin_connection_status(account["id"])
+    return plane.google.status(session_for_account(account))
 
 
-def _connections_page(plane, session, notice: str) -> str:
+def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -> str:
+    from ssios.netguard import is_loopback
     from ssios.ui import _page
 
     account = session["account"]
     status = _connection_view(plane, account)
     rows = []
     connectors = status.get("connectors") if isinstance(status.get("connectors"), dict) else {}
-    for name in ("gmail", "drive", "calendar"):
-        item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
-        when = str(item.get("connected_at") or "not connected")
-        rows.append(
-            "<li>"
-            + html.escape(name)
-            + ": "
-            + ("connected" if item.get("connected") else "not connected")
-            + " / "
-            + html.escape(when)
-            + "</li>"
-        )
     csrf = html.escape(str(session.get("csrf") or ""))
     forms = []
-    for service in ("gmail", "drive", "calendar"):
+    for name in ("gmail", "drive", "calendar"):
+        item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
+        connected = bool(item.get("connected"))
+        when = str(item.get("connected_at") or "")
+        label = f"connected {when}".strip() if connected else "not connected"
+        rows.append("<li>" + html.escape(name) + ": " + html.escape(label) + "</li>")
+        action = "disconnect" if connected else "connect"
         forms.append(
             f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-            f"<input type=\"hidden\" name=\"service\" value=\"{service}\">"
-            f"<button name=\"op\" value=\"connect\" type=\"submit\">Connect {service}</button>"
-            f"<button name=\"op\" value=\"disconnect\" type=\"submit\">Disconnect {service}</button></form>"
+            f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+            f"<button name=\"op\" value=\"{action}\" type=\"submit\">{action.title()} {name}</button></form>"
         )
-    note = (
-        "<p>Consent finishes in a browser on the Mac that runs SSIOS. "
-        "Google redirects to 127.0.0.1 on that Mac. A browser on another computer cannot complete that redirect. "
-        "Copy the consent URL and open it on the host, or click Connect while you are at the Mac.</p>"
-    )
+    if is_loopback(peer_ip):
+        note = (
+            "<p>Open the consent URL in a browser on this Mac. "
+            "Google redirects to 127.0.0.1 on this Mac.</p>"
+        )
+    else:
+        note = (
+            "<p>This browser is not on the Mac that runs SSIOS. "
+            "Copy the consent URL and open it in a browser on that Mac. "
+            "Google redirects to 127.0.0.1 there. "
+            "If this browser was redirected to a 127.0.0.1 address, paste that full address below. "
+            "The consent check stays on the Mac.</p>"
+            f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<label>Service <select name=\"service\"><option>gmail</option><option>drive</option><option>calendar</option></select></label>"
+            "<label>Redirected 127.0.0.1 address <input name=\"redirect_url\"></label>"
+            "<button name=\"op\" value=\"finish\" type=\"submit\">Finish consent</button></form>"
+        )
     return _page(session, "Connections", notice + "<ul>" + "".join(rows) + "</ul>" + note + "".join(forms))
+
+
+def _connection_action(plane, own, service: str, op: str, redirect_url: str) -> dict:
+    if op == "connect":
+        return plane.google.connect(own, service, open_browser=False)
+    if op == "disconnect":
+        return plane.google.disconnect(own, service)
+    if op == "finish":
+        return plane.google.submit_redirect(own, service, redirect_url)
+    raise SsiosError("connector_rejected", "connection action rejected", 400)
 
 
 def _connections_post(plane, session, body, peer_ip):
     from ssios.ui import Page
-
-    from ssios.google_connector import member_session
+    from ssios.google_connector import session_for_account
 
     account = session["account"]
     account_id = account["id"]
-    if account.get("role") != "member":
-        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
     if body.get("account_id") and str(body.get("account_id")) != account_id:
         raise SsiosError("forbidden", "a session cannot act for another account", 403)
     service = str(body.get("service") or "")
     op = str(body.get("op") or "")
-    session_account = member_session(account_id)
+    own = session_for_account(account)
+    try:
+        result = _connection_action(plane, own, service, op, str(body.get("redirect_url") or ""))
+    except SsiosError as exc:
+        from ssios.chat import english_connector_error
+
+        return Page(exc.status, _connections_page(plane, session, f"<p>{html.escape(english_connector_error(exc))}</p>", peer_ip))
     if op == "connect":
-        result = plane.google.connect(session_account, service, open_browser=False)
         plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.connect", target=service, result="ok")
     elif op == "disconnect":
-        result = plane.google.disconnect(session_account, service)
         plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.disconnect", target=service, result="ok")
+    elif op == "finish":
+        plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.connect", target=service, result="ok")
+    if op == "connect":
+        url = html.escape(str(result.get("authorization_url") or ""))
+        detail = (
+            "<p>Consent URL is below. Open it on the Mac that runs SSIOS.</p>"
+            f"<label>Consent URL <input readonly value=\"{url}\"></label>"
+        )
+    elif op == "finish":
+        detail = "<p>Consent finished for this account.</p>"
     else:
-        raise SsiosError("connector_rejected", "connection action rejected", 400)
-    detail = html.escape("Consent URL is below. Open it on the Mac that runs SSIOS." if op == "connect" else "Disconnected.")
-    url = result.get("authorization_url")
-    extra = f"<p>Consent URL: {html.escape(str(url))}</p>" if url else ""
-    return Page(200, _connections_page(plane, session, f"<p>{detail}</p>{extra}"))
+        detail = "<p>Disconnected.</p>"
+    return Page(200, _connections_page(plane, session, detail, peer_ip))
 
 

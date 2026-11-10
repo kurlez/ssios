@@ -1,15 +1,15 @@
 """Chat guest launcher.
 
-The production path uses Cloud Hypervisor on Linux and vfkit (macos-vz) on
-macOS. Both are the existing no-NIC Codex backends. If the guest cannot
-start, the task fails closed and the host agent is not run. The guest root is
-always inside that account's workspace.
+The production path uses the backend and agent in the config. macos-vz and
+cloud-hypervisor are the no-NIC Codex backends. dev-guard and the summary
+agent are refused before any boot status. If the guest cannot start, the
+task fails closed and the host agent is not run. The guest root is always
+inside that account's workspace.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -28,16 +28,16 @@ class ChatGuestRequest:
 
 class ProductionChatGuest:
     def run(self, plane, request: ChatGuestRequest, on_status) -> dict:
-        backend = "macos-vz" if sys.platform == "darwin" else "cloud-hypervisor"
-        on_status({"phase": "booting", "backend": backend})
-        root = guest_root(request.account_home, request.task_id)
-        report = readiness(plane, backend)
+        report = chat_guest_report(plane.settings)
         if not report.get("ok"):
             raise SsiosError(
                 "microvm_fail_closed",
                 report.get("detail") or "microVM backend cannot start a guest; the task was not run on the host",
                 503,
             )
+        backend = str(plane.settings.runtime_backend)
+        on_status({"phase": "booting", "backend": backend})
+        root = guest_root(request.account_home, request.task_id)
         on_status({"phase": "running", "backend": backend})
         outcome = _boot(plane, request, root, backend)
         checks = read_checks(root)
@@ -64,6 +64,80 @@ def guest_root(account_home: Path, task_id: str) -> Path:
     if home not in root.parents:
         raise SsiosError("path_rejected", "guest root is outside the account workspace", 403)
     return root
+
+
+def vm_prepare_command(settings) -> str:
+    """The command that prepares the guest for this config. It does not accept --profile."""
+    import shlex
+
+    state = shlex.quote(str(settings.state_dir))
+    config = getattr(settings, "config_path", None)
+    if config:
+        return f"PYTHONPATH=src python3 -m ssios vm-prepare --state {state} --config {shlex.quote(str(config))}"
+    return f"PYTHONPATH=src python3 -m ssios vm-prepare --state {state}"
+
+
+def unsuitable_guest_detail(settings) -> str:
+    backend = settings.runtime_backend
+    agent = settings.runtime_agent
+    return (
+        f'This config has [runtime] backend = "{backend}" and agent = "{agent}". '
+        'A chat guest needs backend = "macos-vz" and agent = "codex" on macOS, '
+        'or backend = "cloud-hypervisor" and agent = "codex" on Linux. '
+        "Also set memory_mb = 2048 and [limits] task_timeout_seconds = 240. "
+        "[llm] ollama_model answers chat and reads calendar requests. "
+        "[agent.codex] model is only the model inside the guest. The two names are independent. "
+        "vm-prepare does not accept --profile. After saving the config, run: "
+        + vm_prepare_command(settings)
+    )
+
+
+def chat_guest_report(settings) -> dict:
+    """Prerequisites for the configured backend and agent. Does not boot a guest."""
+    backend = settings.runtime_backend
+    agent = settings.runtime_agent
+    report = {
+        "ok": False,
+        "backend": backend,
+        "agent": agent,
+        "ollama_model": settings.ollama_model,
+        "codex_model": settings.codex_model,
+        "codex_num_ctx": settings.codex_num_ctx,
+        "models_independent": True,
+        "memory_mb": settings.memory_mb,
+        "task_timeout_seconds": settings.task_timeout_seconds,
+        "vm_prepare": vm_prepare_command(settings),
+        "detail": "",
+    }
+    if backend not in ("macos-vz", "cloud-hypervisor") or agent != "codex":
+        report["detail"] = unsuitable_guest_detail(settings)
+        return report
+    if int(settings.memory_mb) < 1536:
+        report["detail"] = (
+            f'This config has memory_mb = {settings.memory_mb}. '
+            'Set [runtime] memory_mb = 2048. The guest needs at least 1536 MB.'
+        )
+        return report
+    try:
+        from ssios.codex_guest import prepared_binary
+
+        prepared_binary(settings.state_dir)
+    except SsiosError as exc:
+        report["detail"] = (
+            "The pinned Codex binary is missing for this state directory. "
+            f'This config has backend = "{backend}" and agent = "codex", so this command prepares it: '
+            + vm_prepare_command(settings)
+        )
+        if exc.code != "codex_not_prepared":
+            report["detail"] = exc.detail + " Run: " + vm_prepare_command(settings)
+        return report
+    ready = readiness(type("Plane", (), {"settings": settings})(), backend)
+    if not ready.get("ok"):
+        report["detail"] = str(ready.get("detail") or "the guest is not prepared") + " Run: " + vm_prepare_command(settings)
+        return report
+    report["ok"] = True
+    report["detail"] = "chat guest prerequisites are present"
+    return report
 
 
 def readiness(plane, backend: str) -> dict:

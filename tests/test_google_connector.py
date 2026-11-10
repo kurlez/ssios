@@ -289,6 +289,44 @@ class ConnectorTest(PlaneTest):
             self.connector.propose_fetch(self.admin, project_id="local-summary", tool="drive.search", arguments={}, limits={})
         self.assertEqual(caught.exception.code, "connector_admin_denied")
 
+    def test_admin_connects_only_their_own_account_and_paste_checks_state(self) -> None:
+        admin = self.plane.accounts.add_admin("owen", "owen-password-ok")
+        own = admin_session(admin["id"])
+        self.connector.install_client(own, "client-owen", "secret-owen")
+        started = self.connector.connect(own, "gmail", open_browser=False, timeout=5)
+        self.assertIn("/auth?", started["authorization_url"])
+        self.assertNotIn("code_verifier", started["authorization_url"])
+        self.assertNotEqual(service_name(admin["id"]), service_name("ada"))
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.status(member_session(admin["id"]))
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        parsed = urllib.parse.urlsplit(started["authorization_url"])
+        query = urllib.parse.parse_qs(parsed.query)
+        redirect = query["redirect_uri"][0]
+        state = query["state"][0]
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(own, "gmail", "https://evil.example/oauth/callback?code=code-a&state=" + state)
+        self.assertEqual(caught.exception.code, "oauth_state_mismatch")
+        self.assertNotIn("code-a", caught.exception.detail)
+        pasted = redirect + "?" + urllib.parse.urlencode({"code": "code-a", "state": state})
+        status = self.connector.submit_redirect(own, "gmail", pasted)
+        self.assertTrue(status["connectors"]["gmail"]["connected"])
+        self.assertFalse(status["connectors"]["drive"]["connected"])
+        self.assertEqual(self.store.get(admin["id"], "gmail-refresh"), "refresh-account-a")
+        self.assertIsNone(self.store.get("ada", "gmail-refresh"))
+        self._consent(self.ada, "drive", "code-b")
+        proposed = self.connector.propose_fetch(
+            self.ada,
+            project_id="local-summary",
+            tool="drive.search",
+            arguments={"q": ""},
+            limits={"max_items": 1, "max_bytes": 200, "max_calls": 4},
+        )
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.preview(proposed["approval"], own)
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        self.assertNotIn("q", caught.exception.detail)
+
     def test_two_accounts_do_not_share_tokens_or_content(self) -> None:
         self._consent(self.ada, "drive", "code-a")
         self._consent(self.bea, "drive", "code-b")

@@ -34,6 +34,25 @@ TASK_OUTPUT_SCHEMA = {
 }
 
 MARKERS = ("CORE-PROJECT-FACT", "THREE-BULLET-RULE", "NORTHWIND-FIXTURE-NOTE")
+_ROUTE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["route"],
+    "properties": {"route": {"type": "string", "enum": ["direct", "vm"]}},
+}
+
+
+def _route_word(content: str) -> str:
+    text = content.strip()
+    if text.lower() == "direct":
+        return "direct"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return "vm"
+    if isinstance(data, dict) and str(data.get("route") or "").lower() == "direct":
+        return "direct"
+    return "vm"
 
 
 @dataclass
@@ -744,17 +763,40 @@ class OllamaLLM:
         yield from _iter_chat_stream(self.base_url + "/api/chat", payload, timeout, deadline)
 
     def judge_route(self, text: str, deadline: float | None = None) -> str:
-        """One local judgment. Anything other than the word direct stays on the guest."""
+        """Local JSON judgment. Only a direct route leaves the guest. There is no cloud model."""
         limit = deadline if isinstance(deadline, float) else time.monotonic() + 10
+        if time.monotonic() >= limit:
+            return "vm"
         messages = [
-            {"role": "system", "content": "Reply with one word: direct or vm."},
+            {
+                "role": "system",
+                "content": (
+                    "Choose a route for one user message. "
+                    "direct means a question, identity, capability, general knowledge, or conversation, "
+                    "with no file, command, workspace edit, or tool. "
+                    "vm means the user asks to read or change files, run a command, edit a workspace, or use a tool. "
+                    "Return one JSON object with route set to direct or vm."
+                ),
+            },
             {"role": "user", "content": text[:1000]},
         ]
+        timeout = min(self.timeout, max(0.1, limit - time.monotonic()))
+        payload = _chat_payload(
+            self.model,
+            messages,
+            _ROUTE_SCHEMA,
+            num_predict=64,
+            think=False if self._supports_think_false(limit) else None,
+            num_ctx=self.num_ctx,
+            hint_schema=_ROUTE_SCHEMA,
+        )
         try:
-            answer = self.complete_chat(messages, cancel_event=threading_event(), deadline=limit)
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
         except (SsiosError, FlowInterrupt):
             return "vm"
-        return "direct" if answer.strip().lower() == "direct" else "vm"
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return _route_word(content)
 
 
 def threading_event():

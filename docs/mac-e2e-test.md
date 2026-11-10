@@ -13,7 +13,33 @@ The commands below use that directory. If you already keep a config at `.ssios/o
 cp config/ssios.example.toml "$SSIOS_STATE/ollama.toml"
 ```
 
-Edit only the copy. Set `[llm] provider` to `ollama` and `ollama_model` to the local name, usually `qwen2.5-coder:7b`. Under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]`. Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback.
+Edit only the copy. These are the same guest settings as `scripts/macos-vz-codex-smoke.sh`, plus the chat model. `[llm] ollama_model` answers chat and reads calendar requests. `[agent.codex] model` is only the model inside the guest. The two names are independent.
+
+```toml
+[llm]
+provider = "ollama"
+ollama_model = "qwen2.5:7b"
+
+[runtime]
+backend = "macos-vz"
+agent = "codex"
+memory_mb = 2048
+
+[agent.codex]
+model = "qwen2.5-coder:7b"
+num_ctx = 16384
+
+[limits]
+task_timeout_seconds = 240
+
+[connectors]
+enabled = ["drive", "gmail", "calendar"]
+
+[ui]
+time_zone = "America/Los_Angeles"
+```
+
+Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback. Pull both local models if they are not already installed: `ollama pull qwen2.5:7b` and `ollama pull qwen2.5-coder:7b`. Install vfkit with `brew install vfkit`.
 
 From a checkout that contains both the chat UI and the Google connector:
 
@@ -30,14 +56,35 @@ pip install 'keyring>=25'
 ```bash
 PYTHONPATH=src python3 -m ssios user add --admin --username owner \
   --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+```
+
+Type a new password twice. It is not printed.
+
+Check the guest prerequisites before starting the UI. This does not boot a guest. With the example config still on `dev-guard` and `summary`, the report names those keys and does not pretend the guest is `macos-vz`.
+
+```bash
+PYTHONPATH=src python3 -m ssios ui --check \
+  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+```
+
+After the config edits above, prepare the pinned Codex binary and the aarch64 kernel. `vm-prepare` reads `profile` from the config file. It does not accept `--profile`.
+
+```bash
+PYTHONPATH=src python3 -m ssios vm-prepare \
+  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+```
+
+Then start the UI:
+
+```bash
 PYTHONPATH=src python3 -m ssios ui \
   --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
 ```
 
-Type a new password twice. It is not printed. Open the printed `http://127.0.0.1:<port>/ui/login` URL.
+Open the printed `http://127.0.0.1:<port>/ui/login` URL.
 
-- Direct chat: sign in as `owner` and send `What is a microVM?` with route Auto. The badge says `direct`. No guest starts.
-- Guest task: send `edit readme.md`. The turn shows booting, running, and the isolation checks, then Approve and Deny. Nothing is applied until you approve.
+- Direct chat: sign in as `owner` and send `What is a microVM?` or `你是谁？你会什么？` with route Auto. The badge says `direct`. No guest starts.
+- Guest task: send `edit readme.md`. The turn does not say `Guest: booting` until the prerequisites pass. It then shows booting, running, and the isolation checks, then Approve and Deny. Nothing is applied until you approve. If a prerequisite is still missing, the page names the config keys or the exact `vm-prepare` command above, and it does not show booting.
 
 ## Home network
 
@@ -68,7 +115,7 @@ PYTHONPATH=src python3 -m ssios oauth-install-client \
   --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
 ```
 
-In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows a consent URL. Open that URL in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. A browser on another computer cannot finish that redirect. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected.
+In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows one status line and only the Connect button while that service is disconnected. The consent URL is in a field you can copy. Open it in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. From another computer, paste that full `127.0.0.1` address into Finish consent. The state check stays on the Mac. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected. An admin can connect that admin's own account the same way, and still cannot open another account's cards.
 
 In the config copy, set `[ui] time_zone = "America/Los_Angeles"` and `[llm] ollama_model = "qwen2.5:7b"`. That local model reads Chinese and English calendar sentences. Do not point it at a cloud model. If the model is down, or its JSON is still invalid after one retry, chat says so in English and nothing is read or changed. You can then use the explicit form, for example `list calendar events calendar:primary from:2026-11-10T00:00:00Z to:2026-11-17T00:00:00Z`.
 

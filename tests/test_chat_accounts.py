@@ -133,8 +133,10 @@ class RouterTest(PlaneTest):
         vm = classify("edit readme.md")
         self.assertEqual(vm.route, "vm")
         self.assertEqual(vm.source, "rule")
-        unsure = classify("take care of the project")
-        self.assertEqual((unsure.route, unsure.source), ("vm", "default"))
+        plain = classify("take care of the project")
+        self.assertEqual((plain.route, plain.source), ("direct", "rule"))
+        taskish = classify("update the readme")
+        self.assertEqual((taskish.route, taskish.source), ("vm", "default"))
         forced = classify("hello", "force_vm")
         self.assertEqual((forced.route, forced.source), ("vm", "override"))
         stayed = classify("edit readme.md", "force_direct")
@@ -155,6 +157,40 @@ class RouterTest(PlaneTest):
             self.assertEqual(routed.route, "connector", phrase)
             self.assertEqual(routed.services, ("calendar",), phrase)
         self.assertEqual(classify("edit readme.md").route, "vm")
+        questions = (
+            "你是谁？你会什么？",
+            "你是谁",
+            "什么是微虚拟机？",
+            "法国的首都在哪里",
+            "Who are you?",
+            "What can you do?",
+            "What is the capital of France?",
+        )
+        for phrase in questions:
+            routed = classify(phrase)
+            self.assertEqual(routed.route, "direct", phrase)
+            self.assertEqual(routed.source, "rule", phrase)
+        self.assertEqual(classify("帮我修改 readme.md").route, "vm")
+        self.assertEqual(classify("运行 pytest").route, "vm")
+
+        class Spy:
+            provider = "ollama"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            def judge_route(self, text, deadline=None):
+                del text, deadline
+                self.called = True
+                return "vm"
+
+        spy = Spy()
+        self.assertEqual(classify("你是谁？你会什么？", llm=spy).route, "direct")
+        self.assertFalse(spy.called)
+        judged_task = classify("update the readme", llm=spy)
+        self.assertTrue(spy.called)
+        self.assertEqual(judged_task.route, "vm")
+        self.assertEqual(judged_task.source, "model")
         mail = classify("check my inbox")
         self.assertEqual(mail.route, "connector")
         self.assertEqual(mail.services, ("gmail",))
@@ -168,7 +204,7 @@ class RouterTest(PlaneTest):
                 del text, deadline
                 return "direct"
 
-        judged = classify("take care of the project", llm=Local())
+        judged = classify("update the readme", llm=Local())
         self.assertEqual((judged.route, judged.source), ("direct", "model"))
 
         class Unclear:
@@ -178,7 +214,7 @@ class RouterTest(PlaneTest):
                 del text, deadline
                 return "maybe"
 
-        fallback = classify("take care of the project", llm=Unclear())
+        fallback = classify("update the readme", llm=Unclear())
         self.assertEqual(fallback.route, "vm")
         self.assertEqual(fallback.source, "model")
 
@@ -634,6 +670,94 @@ class HouseholdTest(PlaneTest):
         path.write_text(tampered, encoding="utf-8")
         self.assertFalse(SecurityAudit(path).verify()["ok"])
 
+    def test_signup_member_and_admin_own_connections(self) -> None:
+        created = self.plane.accounts.signup("kent", "kent-password-ok")
+        self.assertEqual(created["role"], "member")
+        self.assertFalse(created["legacy_owner"])
+        _status, pending_page = _get(self.base, "/ui/admin", self.owner)
+        forms = pending_page.split(f'action="/ui/admin/users/{created["id"]}"')[1:]
+        kent_ops = " ".join(part.split("</form>", 1)[0] for part in forms)
+        self.assertIn("approve", kent_ops)
+        self.assertIn("reject", kent_ops)
+        self.assertNotIn("role-admin", kent_ops)
+        self.assertNotIn("Reset password", kent_ops)
+        self.assertIn("New password", pending_page)
+        self.plane.accounts.set_status(created["id"], "active")
+        self.assertEqual(self.plane.accounts.get(created["id"])["role"], "member")
+        owner_id = self.plane.accounts.legacy_admin()["id"]
+        owner_ops = " ".join(part.split("</form>", 1)[0] for part in pending_page.split(f'action="/ui/admin/users/{owner_id}"')[1:])
+        self.assertIn("Make member", owner_ops)
+        self.assertNotIn("Make admin", owner_ops)
+        self.assertIn("Disable", owner_ops)
+        status, blocked, _cookie = _form(
+            self.base,
+            f"/ui/admin/users/{owner_id}",
+            {"csrf": self._csrf(self.owner), "op": "role-member"},
+            cookie=self.owner,
+        )
+        self.assertEqual(status, 403, blocked)
+        self.assertIn("own role", blocked)
+        status, blocked, _cookie = _form(
+            self.base,
+            f"/ui/admin/users/{owner_id}",
+            {"csrf": self._csrf(self.owner), "op": "delete", "confirm": "delete owner"},
+            cookie=self.owner,
+        )
+        self.assertEqual(status, 403, blocked)
+        self.assertEqual(self._role(owner_id), "admin")
+        from ssios.ui_admin import _guard_admin_target
+
+        with self.assertRaises(SsiosError) as caught:
+            _guard_admin_target(self.plane, created["id"], self.plane.accounts.get(owner_id), "delete")
+        self.assertIn("last active admin", caught.exception.detail)
+        kent = self._login("kent", "kent-password-ok")
+        _status, connections = _get(self.base, "/ui/connections", kent)
+        self.assertIn("Signed in as kent", connections)
+        self.assertNotIn(">Admin</a>", connections)
+        self.assertIn("gmail: not connected", connections)
+        self.assertNotIn("not connected / not connected", connections)
+        self.assertIn("Connect gmail", connections)
+        self.assertIn("Connect drive", connections)
+        self.assertIn("Connect calendar", connections)
+        self.assertNotIn("Disconnect gmail", connections)
+        self._install_and_connect(created["id"], "gmail", "code-a")
+        _status, connected = _get(self.base, "/ui/connections", kent)
+        self.assertIn("Disconnect gmail", connected)
+        self.assertNotIn("Connect gmail", connected)
+        self.assertIn("Connect drive", connected)
+        self.store.put(owner_id, "client-id", "client-owner")
+        self.store.put(owner_id, "client-secret", self.secret)
+        status, started, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.owner), "service": "calendar", "op": "connect"},
+            cookie=self.owner,
+        )
+        self.assertEqual(status, 200, started)
+        self.assertIn("Consent URL", started)
+        self.assertIn("readonly", started)
+        self.assertNotIn("admin cannot access", started)
+        self.assertIn("Connect calendar", started)
+        from ssios.ui_household import _connections_page
+
+        remote = _connections_page(self.plane, {"account": self.plane.accounts.get(created["id"]), "csrf": "csrf-token"}, "", "192.168.1.20")
+        self.assertIn("not on the Mac", remote)
+        self.assertIn("Finish consent", remote)
+        self.assertIn("redirect_url", remote)
+        status, page, replaced = _form(
+            self.base,
+            "/ui/login",
+            {"username": "kent", "password": "kent-password-ok"},
+            cookie=self.owner,
+        )
+        self.assertEqual(status, 200, page)
+        self.assertIn("Signed in as kent", page)
+        self.assertIsNone(self.plane.accounts.read_session(self.owner.split("=", 1)[1]))
+        both = self.owner + "; " + replaced.split(";", 1)[0]
+        _status, chat = _get(self.base, "/ui/chat", both)
+        self.assertIn("Signed in as kent", chat)
+        self.assertNotIn("Signed in as owner", chat)
+
     def test_approved_cloud_text_reaches_the_guest_only_after_approval(self) -> None:
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
         pending = self._send(self.ada, "save my inbox into readme.md")
@@ -1036,6 +1160,13 @@ class AdapterTest(PlaneTest):
                 self.assertNotIn(needle, text, f"{path} contains {needle}")
 
     def test_guest_fails_closed_without_running_on_the_host(self) -> None:
+        from dataclasses import replace
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        from ssios.chat_guest import chat_guest_report
+        from ssios.cli import build_parser, run_vm_prepare
+
         report = readiness(self.plane, "cloud-hypervisor")
         self.assertFalse(report["ok"])
         guest = ProductionChatGuest()
@@ -1045,13 +1176,58 @@ class AdapterTest(PlaneTest):
                 raise AssertionError("host agent ran")
 
         self.plane.runner = Boom()
+        statuses = []
+        request = type(
+            "R",
+            (),
+            {
+                "account_id": "acct-0011223344556677",
+                "account_home": self.state / "accounts" / "acct-0011223344556677",
+                "task_id": "task-0011223344556677",
+                "prompt": "edit",
+            },
+        )()
         with self.assertRaises(SsiosError) as caught:
-            guest.run(
-                self.plane,
-                type("R", (), {"account_id": "acct-0011223344556677", "account_home": self.state / "accounts" / "acct-0011223344556677", "task_id": "task-0011223344556677", "prompt": "edit"})(),
-                lambda payload: None,
-            )
+            guest.run(self.plane, request, statuses.append)
         self.assertEqual(caught.exception.code, "microvm_fail_closed")
+        self.assertEqual(statuses, [])
+        self.assertIn('backend = "dev-guard"', caught.exception.detail)
+        self.assertIn('agent = "summary"', caught.exception.detail)
+        self.assertIn('backend = "macos-vz"', caught.exception.detail)
+        self.assertIn("vm-prepare", caught.exception.detail)
+        self.assertIn("--state", caught.exception.detail)
+        self.assertIn("--config", caught.exception.detail)
+        self.assertIn("does not accept --profile", caught.exception.detail)
+        self.assertNotIn("--profile ", caught.exception.detail.split("run: ", 1)[1])
+        self.assertNotIn("krunvm", caught.exception.detail)
+        self.plane.settings = replace(
+            self.plane.settings,
+            runtime_backend="macos-vz",
+            runtime_agent="codex",
+            memory_mb=2048,
+        )
+        statuses.clear()
+        with self.assertRaises(SsiosError) as missing:
+            guest.run(self.plane, request, statuses.append)
+        self.assertEqual(statuses, [])
+        self.assertIn("pinned Codex binary is missing", missing.exception.detail)
+        self.assertIn("vm-prepare", missing.exception.detail)
+        self.assertIn("--config", missing.exception.detail)
+        self.assertIn('backend = "macos-vz"', missing.exception.detail)
+        checked = chat_guest_report(self.plane.settings)
+        self.assertFalse(checked["ok"])
+        self.assertTrue(checked["models_independent"])
+        self.assertEqual(checked["codex_model"], "qwen2.5-coder:7b")
+        buffer = StringIO()
+        self.plane.settings = replace(self.plane.settings, runtime_backend="dev-guard", runtime_agent="summary")
+        with redirect_stdout(buffer):
+            code = run_vm_prepare(self.plane.settings)
+        self.assertEqual(code, 1)
+        prepared = json.loads(buffer.getvalue())
+        self.assertIn('backend = "dev-guard"', prepared["detail"])
+        self.assertNotIn("krunvm image", prepared["detail"])
+        parsed = build_parser().parse_args(["ui", "--check", "--state", str(self.state), "--config", "config/ssios.example.toml"])
+        self.assertTrue(parsed.check)
 
     def test_certificate_fingerprint_when_openssl_is_present(self) -> None:
         import shutil

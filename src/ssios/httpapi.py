@@ -139,8 +139,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
-        if page.cookie:
-            self.send_header("Set-Cookie", page.cookie)
+        for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
+            self.send_header("Set-Cookie", item)
         self.end_headers()
         self.wfile.write(data)
 
@@ -152,8 +152,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
-        if page.cookie:
-            self.send_header("Set-Cookie", page.cookie)
+        for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
+            self.send_header("Set-Cookie", item)
         self.end_headers()
         try:
             for chunk in page.stream:

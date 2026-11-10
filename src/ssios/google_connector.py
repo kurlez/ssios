@@ -80,13 +80,21 @@ class AccountSession:
     role: str
 
     def owner_id(self) -> str:
-        if self.role != "member":
+        if self.role not in ("member", "admin"):
             raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
         return validate_account_id(self.account_id)
 
 
 def member_session(account_id: str) -> AccountSession:
     return AccountSession(validate_account_id(account_id), "member")
+
+
+def session_for_account(account: dict) -> AccountSession:
+    """The signed-in account, member or admin. Never a different account id."""
+    role = str(account.get("role") or "")
+    if role not in ("member", "admin"):
+        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
+    return AccountSession(str(account.get("id") or ""), role)
 
 
 def admin_session(account_id: str) -> AccountSession:
@@ -112,10 +120,11 @@ class GoogleConnector:
         self._applied: dict[str, str] = {}
         self._calls: dict[str, int] = {}
         self._errors: dict[tuple[str, str], str] = {}
+        self._pending: dict[tuple[str, str], dict] = {}
         self._lock = threading.Lock()
 
     def install_client(self, session: AccountSession, client_id: str, client_secret: str) -> dict:
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         if not client_id or not client_secret or "\n" in client_id or "\n" in client_secret:
             raise SsiosError("oauth_client_invalid", "oauth client rejected", 400)
         self.store.put(account_id, "client-id", client_id)
@@ -132,7 +141,7 @@ class GoogleConnector:
         timeout: float = 300,
     ) -> dict:
         """Start loopback PKCE consent. Returns the URL only. Tokens stay in the OS store."""
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         connector = _connector_name(connector)
         chosen = scope or DEFAULT_SCOPE[connector]
         _check_scope(connector, chosen)
@@ -161,11 +170,18 @@ class GoogleConnector:
         url = self.endpoints.auth_url + "?" + query
         holder: dict = {}
         httpd.holder = holder  # type: ignore[attr-defined]
+        with self._lock:
+            self._pending[(account_id, connector)] = {
+                "verifier": verifier,
+                "state": state,
+                "redirect": redirect,
+                "scope": chosen,
+            }
 
         def runner() -> None:
             try:
                 query_args = _wait_for_callback(httpd, holder, timeout)
-                self._complete(account_id, connector, chosen, verifier, state, redirect, query_args)
+                self._consume_pending(account_id, connector, query_args)
             except SsiosError as exc:
                 self._errors[(account_id, connector)] = exc.code
             except Exception:
@@ -179,8 +195,17 @@ class GoogleConnector:
             webbrowser.open(url)
         return {"authorization_url": url, "awaiting_consent": True}
 
+    def submit_redirect(self, session: AccountSession, connector: str, pasted: str) -> dict:
+        """Finish consent from a pasted http://127.0.0.1 callback. The PKCE verifier stays here."""
+        account_id = self._bind(session)
+        connector = _connector_name(connector)
+        query = _callback_query(pasted, self._pending.get((account_id, connector)))
+        self._consume_pending(account_id, connector, query)
+        self._errors.pop((account_id, connector), None)
+        return self.status(session)
+
     def finish_connect(self, session: AccountSession, connector: str, timeout: float = 300) -> dict:
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         connector = _connector_name(connector)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -192,15 +217,14 @@ class GoogleConnector:
         raise SsiosError("oauth_timeout", "oauth consent timed out", 408)
 
     def status(self, session: AccountSession) -> dict:
-        account_id = session.owner_id()
-        return self._status_for(account_id)
+        return self._status_for(self._bind(session))
 
     def admin_connection_status(self, account_id: str) -> dict:
         """The only cross-account read. Three fields, no tokens, no cloud content, no Google call."""
         return self._status_for(validate_account_id(account_id))
 
     def disconnect(self, session: AccountSession, connector: str) -> dict:
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         connector = _connector_name(connector)
         refresh = self.store.get(account_id, f"{connector}-refresh")
         if refresh:
@@ -236,7 +260,7 @@ class GoogleConnector:
 
     def propose_fetch(self, session: AccountSession, *, project_id: str, tool: str, arguments: dict, limits: dict) -> dict:
         """Create an approval. Google is not called until that approval is granted."""
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         tool = _tool_name(tool)
         arguments = dict(arguments or {})
         limits = _normalize_limits(limits or {}, self.plane.settings)
@@ -269,9 +293,10 @@ class GoogleConnector:
         approval_id = str(record.get("approval_id") or record.get("id") or "")
         material = self._requests.get(approval_id)
         if session is not None:
-            if session.role != "member":
-                raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
-            if not material or session.owner_id() != material["account_id"]:
+            owner = self._bind(session)
+            if not material or owner != material["account_id"]:
+                if session.role == "admin":
+                    raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
                 raise SsiosError("not_found", "fetch result not found", 404)
         if not material:
             return "Google request. The request is no longer available."
@@ -327,12 +352,34 @@ class GoogleConnector:
         return "fetched"
 
     def take_result(self, session: AccountSession, approval_id: str) -> dict:
-        account_id = session.owner_id()
+        account_id = self._bind(session)
         item = self._results.get(approval_id)
         if not item or item.get("account_id") != account_id:
             raise SsiosError("not_found", "fetch result not found", 404)
         text = self._results.pop(approval_id)["text"]
         return {"text": text}
+
+    def _bind(self, session: AccountSession) -> str:
+        """Use this session's own account. An admin role may name only that admin's id."""
+        account_id = session.owner_id()
+        accounts = getattr(self.plane, "accounts", None)
+        account = accounts.get(account_id) if accounts is not None else None
+        if account is None:
+            if session.role != "member":
+                raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
+            return account_id
+        if account.get("status") != "active" or account.get("role") != session.role:
+            raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
+        return account_id
+
+    def _consume_pending(self, account_id: str, connector: str, query: dict) -> None:
+        with self._lock:
+            pending = self._pending.get((account_id, connector))
+            if not pending or query.get("state") != pending["state"] or not query.get("code"):
+                raise SsiosError("oauth_state_mismatch", "oauth state rejected", 400)
+            self._pending.pop((account_id, connector), None)
+            saved = dict(pending)
+        self._complete(account_id, connector, saved["scope"], saved["verifier"], saved["state"], saved["redirect"], query)
 
     def _status_for(self, account_id: str) -> dict:
         connectors = {}
@@ -872,6 +919,17 @@ class _Callback(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         return
+
+
+def _callback_query(pasted: str, pending: dict | None) -> dict:
+    parsed = urllib.parse.urlsplit(str(pasted or "").strip())
+    if parsed.scheme != "http" or (parsed.hostname or "") != "127.0.0.1" or not pending:
+        raise SsiosError("oauth_state_mismatch", "paste the 127.0.0.1 redirect address from this consent", 400)
+    expected = urllib.parse.urlsplit(str(pending.get("redirect") or ""))
+    if parsed.port != expected.port or parsed.path != expected.path:
+        raise SsiosError("oauth_state_mismatch", "paste the 127.0.0.1 redirect address from this consent", 400)
+    query = urllib.parse.parse_qs(parsed.query)
+    return {key: values[-1] for key, values in query.items() if values}
 
 
 def _wait_for_callback(httpd: ThreadingHTTPServer, holder: dict, timeout: float) -> dict:

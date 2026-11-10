@@ -27,6 +27,7 @@ class Page:
         body: str,
         *,
         cookie: str | None = None,
+        cookies: list[str] | None = None,
         stream=None,
         content_type: str = "text/html; charset=utf-8",
         location: str | None = None,
@@ -34,6 +35,7 @@ class Page:
         self.status = status
         self.body = body
         self.cookie = cookie
+        self.cookies = list(cookies or ([] if not cookie else [cookie]))
         self.stream = stream
         self.content_type = content_type
         self.location = location
@@ -51,7 +53,7 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
             return Page(302, "", location="/ui/chat")
         return Page(200, _login_page(query.get("code", "")))
     if method == "POST" and path == "/ui/login":
-        return _login(plane, body, peer_ip)
+        return _login(plane, body, peer_ip, headers)
     if path in {"/ui/signup", "/ui/join"}:
         from ssios.ui_household import handle_household
 
@@ -111,7 +113,7 @@ def issue_login_code(plane) -> str:
     return raw
 
 
-def _login(plane, body: dict, peer_ip: str) -> Page:
+def _login(plane, body: dict, peer_ip: str, headers=None) -> Page:
     from ssios.netguard import is_loopback
 
     username = str(body.get("username") or "")
@@ -122,7 +124,7 @@ def _login(plane, body: dict, peer_ip: str) -> Page:
     except SsiosError as exc:
         _security(plane, "anonymous", peer_ip, "login", "rate", "denied")
         return Page(exc.status, _login_page(""))
-    if code and is_loopback(peer_ip) and _take_code(plane, code):
+    if code and not (username and password) and is_loopback(peer_ip) and _take_code(plane, code):
         admin = plane.accounts.legacy_admin()
         if admin is None:
             plane.login_limiter.fail(peer_ip)
@@ -130,7 +132,7 @@ def _login(plane, body: dict, peer_ip: str) -> Page:
             return Page(401, _login_page(""))
         plane.login_limiter.succeed(peer_ip)
         _security(plane, admin["id"], peer_ip, "login", admin["id"], "ok")
-        return _start_account_session(plane, admin)
+        return _start_account_session(plane, admin, headers)
     if username and password:
         try:
             account = plane.accounts.authenticate(username, password)
@@ -142,24 +144,27 @@ def _login(plane, body: dict, peer_ip: str) -> Page:
             return Page(401, _login_page(""))
         plane.login_limiter.succeed(peer_ip)
         _security(plane, account["id"], peer_ip, "login", account["id"], "ok")
-        return _start_account_session(plane, account)
+        return _start_account_session(plane, account, headers)
     plane.login_limiter.fail(peer_ip)
     _security(plane, "anonymous", peer_ip, "login", "password", "denied")
     return Page(401, _login_page(""))
 
 
-def _start_account_session(plane, account: dict) -> Page:
+def _start_account_session(plane, account: dict, headers=None) -> Page:
     from ssios.config import lan_enabled
 
+    for previous in _session_ids("" if headers is None else headers.get("Cookie", "")):
+        plane.accounts.drop_session(previous)
     session_id, csrf = plane.accounts.create_session(account["id"])
     fresh = plane.accounts.read_session(session_id) or {"id": session_id, "csrf": csrf, "account": account}
     cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/ui"
     if lan_enabled(plane.settings):
         cookie += "; Secure"
+    cleared = f"{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
     return Page(
         200,
-        _page(fresh, "Signed in", "<p>Signed in. The password was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"),
-        cookie=cookie,
+        _page(fresh, "Signed in", "<p>Signed in as " + html.escape(str(account.get("username") or "")) + ". The password was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"),
+        cookies=[cookie, cleared],
     )
 
 
@@ -170,14 +175,23 @@ def _security(plane, actor: str, peer_ip: str, action: str, target: str, result:
         return
 
 
+def _session_ids(header: str) -> list[str]:
+    found = []
+    for part in str(header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == SESSION_COOKIE and value and value not in found:
+            found.append(value)
+    return found
+
+
 def _session(plane, headers) -> dict | None:
-    jar = SimpleCookie(headers.get("Cookie", ""))
-    morsel = jar.get(SESSION_COOKIE)
-    if morsel is None or not morsel.value:
-        return None
-    account_session = plane.accounts.read_session(morsel.value)
-    if account_session is not None:
-        return account_session
+    found = []
+    for session_id in _session_ids(headers.get("Cookie", "")):
+        account_session = plane.accounts.read_session(session_id)
+        if account_session is not None:
+            found.append(account_session)
+    if len(found) == 1:
+        return found[0]
     return None
 
 
@@ -474,12 +488,9 @@ def _google_fetch_record(plane, approval_id: str) -> dict | None:
 
 def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_ip: str) -> Page:
     from ssios.chat import continue_after_fetch
-    from ssios.google_connector import member_session
     from ssios.ui_household import _events_html
 
     account = session["account"]
-    if account.get("role") != "member":
-        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
     material = plane.google._requests.get(record["approval_id"])
     applied_owner = plane.google._applied.get(record["approval_id"])
     owner = material.get("account_id") if isinstance(material, dict) else applied_owner
@@ -493,7 +504,9 @@ def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_i
         return Page(exc.status, _page(session, "Decided", f"<p>{html.escape(english_connector_error(exc))}</p>"))
     if result.get("status") != "consumed":
         return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
-    taken = plane.google.take_result(member_session(account["id"]), record["approval_id"])
+    from ssios.google_connector import session_for_account
+
+    taken = plane.google.take_result(session_for_account(account), record["approval_id"])
     tool = str(material.get("tool") or "")
     plane.security_audit.write(
         actor=account["id"],
@@ -697,13 +710,14 @@ def _login_page(code: str) -> str:
 def _page(session: dict, title: str, body: str) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    who = html.escape(str(account.get("username") or ""))
     admin = "<a href=\"/ui/admin\">Admin</a> " if account.get("role") == "admin" else ""
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>"
         + html.escape(title)
         + "</title>"
         + _STYLE
-        + "<body><nav><a href=\"/ui\">Console</a> <a href=\"/ui/chat\">Chat</a> <a href=\"/ui/tasks\">Tasks</a> "
+        + "<body><nav><span>Signed in as " + who + "</span> <a href=\"/ui\">Console</a> <a href=\"/ui/chat\">Chat</a> <a href=\"/ui/tasks\">Tasks</a> "
         "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/connections\">Connections</a> "
         "<a href=\"/ui/audit\">Activity</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
         "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a> "

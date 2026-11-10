@@ -97,27 +97,54 @@ def _admin_page(plane, session, notice: str) -> str:
 
 
 def _admin_forms(csrf: str, account: dict) -> str:
+    status = str(account.get("status") or "")
+    role = str(account.get("role") or "")
+    forms = []
+    if status == "pending":
+        forms.extend((_admin_button(csrf, account, "approve", "Approve"), _admin_button(csrf, account, "reject", "Reject")))
+    elif status == "active":
+        forms.append(_admin_button(csrf, account, "disable", "Disable"))
+        forms.append(_admin_reset(csrf, account))
+        if role == "admin":
+            forms.append(_admin_button(csrf, account, "role-member", "Make member"))
+        else:
+            forms.append(_admin_button(csrf, account, "role-admin", "Make admin"))
+        forms.append(_admin_delete(csrf, account))
+    elif status == "disabled":
+        forms.extend((_admin_button(csrf, account, "enable", "Enable"), _admin_delete(csrf, account)))
+    else:
+        forms.append(_admin_delete(csrf, account))
+    return "".join(forms)
+
+
+def _admin_button(csrf: str, account: dict, op: str, label: str) -> str:
     account_id = html.escape(str(account["id"]))
-    username = html.escape(str(account["username"]))
-    base = f"<form class=\"row\" method=\"post\" action=\"/ui/admin/users/{account_id}\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-    buttons = (
-        "<button name=\"op\" value=\"approve\" type=\"submit\">Approve</button>"
-        "<button name=\"op\" value=\"reject\" type=\"submit\">Reject</button>"
-        "<button name=\"op\" value=\"enable\" type=\"submit\">Enable</button>"
-        "<button name=\"op\" value=\"disable\" type=\"submit\">Disable</button>"
-        "<button name=\"op\" value=\"role-admin\" type=\"submit\">Make admin</button>"
-        "<button name=\"op\" value=\"role-member\" type=\"submit\">Make member</button>"
-        "</form>"
+    return (
+        f"<form class=\"row\" method=\"post\" action=\"/ui/admin/users/{account_id}\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<button name=\"op\" value=\"{op}\" type=\"submit\">{html.escape(label)}</button></form>"
     )
-    reset = (
-        f"{base}<input name=\"password\" type=\"password\" autocomplete=\"new-password\">"
+
+
+def _admin_reset(csrf: str, account: dict) -> str:
+    account_id = html.escape(str(account["id"]))
+    return (
+        f"<form class=\"row\" method=\"post\" action=\"/ui/admin/users/{account_id}\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>New password <input name=\"password\" type=\"password\" autocomplete=\"new-password\"></label>"
         "<button name=\"op\" value=\"reset-password\" type=\"submit\">Reset password</button></form>"
     )
-    delete = (
-        f"{base}<input name=\"confirm\" placeholder=\"delete {username}\">"
+
+
+def _admin_delete(csrf: str, account: dict) -> str:
+    account_id = html.escape(str(account["id"]))
+    username = html.escape(str(account["username"]))
+    return (
+        f"<form class=\"row\" method=\"post\" action=\"/ui/admin/users/{account_id}\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Type delete {username} <input name=\"confirm\" placeholder=\"delete {username}\"></label>"
         "<button name=\"op\" value=\"delete\" type=\"submit\">Delete</button></form>"
     )
-    return base + buttons + reset + delete
 
 
 def _admin_user(plane, session, path, body, peer_ip):
@@ -131,6 +158,7 @@ def _admin_user(plane, session, path, body, peer_ip):
     target = plane.accounts.get(account_id)
     if target is None:
         raise SsiosError("not_found", "account not found", 404)
+    _guard_admin_target(plane, actor, target, op)
     if op == "approve":
         plane.accounts.set_status(account_id, "active")
         AccountScope(plane, plane.accounts.get(account_id))
@@ -282,6 +310,19 @@ def _join_page(code: str, notice: str) -> str:
         "<label>Password <input name=\"password\" type=\"password\"></label>"
         "<button type=\"submit\">Create pending account</button></form></main></body></html>"
     )
+
+
+def _guard_admin_target(plane, actor_id: str, target: dict, op: str) -> None:
+    if target["id"] == actor_id and op in {"delete", "disable", "role-member", "role-admin"}:
+        raise SsiosError("role_rejected", "an admin cannot delete, disable, or change their own role here", 403)
+    if target.get("role") == "admin" and target.get("status") == "active" and op in {"delete", "disable", "role-member"}:
+        active = [
+            item
+            for item in plane.accounts.public_list()
+            if item.get("role") == "admin" and item.get("status") == "active"
+        ]
+        if len(active) <= 1:
+            raise SsiosError("role_rejected", "the last active admin cannot be removed", 403)
 
 
 def _admin(account: dict) -> None:

@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
         if name == "ui":
             command.add_argument("--lan", action="store_true")
+            command.add_argument("--check", action="store_true", help="print chat guest prerequisites and exit")
         if name == "user":
             command.add_argument("user_action", choices=("add",))
             command.add_argument("--admin", action="store_true")
@@ -116,6 +117,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ui":
         if getattr(args, "lan", False):
             settings = replace(settings, ui_bind="0.0.0.0")
+        if getattr(args, "check", False):
+            from ssios.chat_guest import chat_guest_report
+
+            report = chat_guest_report(settings)
+            print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+            return 0 if report.get("ok") else 1
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
@@ -234,7 +241,9 @@ def run_vm_prepare(settings) -> int:
             print(json.dumps({"ok": False, "detail": exc.detail}, ensure_ascii=False, indent=2))
             return 1
     elif settings.runtime_agent != "codex":
-        print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. This backend does not use it."}, ensure_ascii=False, indent=2))
+        from ssios.chat_guest import unsuitable_guest_detail
+
+        print(json.dumps({"ok": False, "detail": unsuitable_guest_detail(settings)}, ensure_ascii=False, indent=2))
         return 1
     ok = all(item.get("ok") for item in reports)
     print(json.dumps({"ok": ok, "steps": reports}, ensure_ascii=False, indent=2), flush=True)

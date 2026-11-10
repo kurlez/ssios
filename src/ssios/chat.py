@@ -136,18 +136,17 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> I
 
 
 def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision, *, follow_vm: bool) -> Iterator[dict]:
-    if scope.account.get("role") != "member":
-        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
     tool, arguments, limits, followup = _fetch_plan(scope.plane, message, decision.services[0])
     route_name = "connector_vm" if follow_vm else "connector"
     yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
 
 
 def _propose_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, route_name: str = "connector") -> Iterator[dict]:
-    from ssios.google_connector import member_session
+    from ssios.google_connector import session_for_account
 
+    own = session_for_account(scope.account)
     proposed = scope.plane.google.propose_fetch(
-        member_session(scope.account_id),
+        own,
         project_id=scope.project_id(),
         tool=tool,
         arguments=arguments,
@@ -155,7 +154,7 @@ def _propose_tool(scope, conversation_id: str, tool: str, arguments: dict, limit
     )
     approval = proposed["approval"]
     record = scope.plane.approvals.get(approval["id"])
-    preview = scope.plane.google.preview(record, member_session(scope.account_id))
+    preview = scope.plane.google.preview(record, own)
     message = {"role": "assistant", "text": preview, "approval_id": approval["id"], "route_name": route_name, "tool": tool}
     if followup:
         message["followup"] = followup
