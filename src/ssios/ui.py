@@ -21,12 +21,22 @@ SESSION_TTL = 12 * 3600
 
 
 class Page:
-    def __init__(self, status: int, body: str, *, cookie: str | None = None, stream=None, content_type: str = "text/html; charset=utf-8") -> None:
+    def __init__(
+        self,
+        status: int,
+        body: str,
+        *,
+        cookie: str | None = None,
+        stream=None,
+        content_type: str = "text/html; charset=utf-8",
+        location: str | None = None,
+    ) -> None:
         self.status = status
         self.body = body
         self.cookie = cookie
         self.stream = stream
         self.content_type = content_type
+        self.location = location
 
 
 def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
@@ -37,6 +47,8 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if rejected is not None:
         return rejected
     if method == "GET" and path == "/ui/login":
+        if _session(plane, headers) is not None:
+            return Page(302, "", location="/ui/chat")
         return Page(200, _login_page(query.get("code", "")))
     if method == "POST" and path == "/ui/login":
         return _login(plane, body, peer_ip)

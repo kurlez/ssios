@@ -326,13 +326,13 @@ def _up(settings) -> int:
         return 1
     server.start()
     from ssios.config import lan_enabled
-    from ssios.netguard import local_urls
+    from ssios.netguard import browser_login_urls, local_urls
 
     urls = local_urls(plane.bound_port, tls=lan_enabled(settings))
-    listen_url = urls[0]
+    shown = browser_login_urls(plane.bound_port, tls=lan_enabled(settings))
     (settings.state_dir / "listen.url").write_text("\n".join(urls) + "\n", encoding="utf-8")
-    print(f"SSIOS dev profile is listening at {listen_url}", flush=True)
-    for extra in urls[1:]:
+    print(f"SSIOS dev profile is listening at {shown[0]}", flush=True)
+    for extra in shown[1:]:
         print(f"LAN URL: {extra}", flush=True)
     if getattr(server, "fingerprint", ""):
         print(f"Certificate SHA-256 fingerprint: {server.fingerprint}", flush=True)

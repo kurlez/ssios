@@ -118,6 +118,14 @@ def origin_allowed(value: str, *, lan: bool, port: int) -> bool:
     return host_allowed(shown, lan=lan)
 
 
+def browser_login_urls(port: int, *, tls: bool) -> list[str]:
+    """LAN startup lines. Each one opens the sign-in page, not the JSON API root."""
+    urls = local_urls(port, tls=tls)
+    if not tls:
+        return urls
+    return [url + "/ui/login" for url in urls]
+
+
 def local_urls(port: int, *, tls: bool) -> list[str]:
     scheme = "https" if tls else "http"
     urls = [f"{scheme}://127.0.0.1:{port}"]

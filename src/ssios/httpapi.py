@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from ssios.config import lan_enabled
 from ssios.errors import SsiosError
-from ssios.netguard import is_loopback, require_host, require_peer
+from ssios.netguard import is_loopback, origin_allowed, require_host, require_peer
 from ssios.ui import Page, handle as handle_ui
 
 
@@ -53,6 +53,14 @@ class AppHandler(BaseHTTPRequestHandler):
             require_peer(peer, lan=lan)
             require_host(self.headers.get("Host", ""), lan=lan)
             parts = urlsplit(self.path)
+            if self.command == "GET" and parts.path == "/" and _accepts_html(self.headers):
+                origin = self.headers.get("Origin") or ""
+                if origin:
+                    port = self.server.plane.bound_port or self.server.plane.settings.port
+                    if not origin_allowed(origin, lan=lan, port=int(port)):
+                        raise SsiosError("cors_denied", "browser origins are rejected", 403)
+                self._redirect(_browser_home(self.server.plane, self.headers))
+                return
             if (self.headers.get("Upgrade") or "").lower() == "websocket" and not (parts.path == "/ui" or parts.path.startswith("/ui/")):
                 raise SsiosError("unauthorized", "authentication required", 401)
             if parts.path == "/ui" or parts.path.startswith("/ui/"):
@@ -123,6 +131,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         data = page.body.encode("utf-8")
         self.send_response(page.status)
+        if page.location:
+            self.send_header("Location", page.location)
         self.send_header("Content-Type", page.content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -208,6 +218,14 @@ class AppHandler(BaseHTTPRequestHandler):
             raise SsiosError("bad_request", "json object required", 400)
         return data
 
+    def _redirect(self, target: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+
     def _send(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -217,6 +235,18 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
+
+
+def _accepts_html(headers) -> bool:
+    return "text/html" in str(headers.get("Accept") or "").lower()
+
+
+def _browser_home(plane, headers) -> str:
+    from ssios.ui import _session
+
+    if _session(plane, headers) is not None:
+        return "/ui/chat"
+    return "/ui/login"
 
 
 class ControlServer:

@@ -48,7 +48,7 @@ PYTHONPATH=src python3 -m ssios ui --lan \
   --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
 ```
 
-The process prints `https://<hostname>.local:<port>`, the private IP URLs, and the certificate SHA-256 fingerprint. Compare that fingerprint with the browser warning before you continue. macOS may ask to allow incoming connections. Allow it if a browser on another home computer should connect. If you deny it, a browser on this Mac can still use loopback. Only private source addresses are accepted.
+The process prints full sign-in URLs: `https://<hostname>.local:<port>/ui/login` and `https://<private-ip>:<port>/ui/login`, plus the certificate SHA-256 fingerprint. Open one of those URLs. A browser that opens the site root is sent to that sign-in page, or to chat if that browser is already signed in. Compare the fingerprint with the browser warning before you continue. macOS may ask to allow incoming connections. Allow it if a browser on another home computer should connect. If you deny it, a browser on this Mac can still use loopback. Only private source addresses are accepted.
 
 ## Member, approval, and isolation
 

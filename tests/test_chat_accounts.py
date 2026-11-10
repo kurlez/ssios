@@ -235,6 +235,139 @@ class LaneTest(PlaneTest):
         self.assertFalse(origin_allowed("http://192.168.1.20:8765", lan=True, port=8765))
         self.assertFalse(origin_allowed("https://evil.example:8765", lan=True, port=8765))
 
+    def test_browser_root_goes_to_login_or_chat_and_api_stays_json(self) -> None:
+        status, headers, body = self._raw("GET", "/", {"Accept": "text/html"})
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("Location"), "/ui/login")
+        self.assertNotIn(b"authentication required", body)
+        status, _headers, body = self._raw("GET", "/", {"Accept": "application/json"})
+        self.assertEqual(status, 401)
+        self.assertIn(b"authentication required", body)
+        status, _headers, body = self._raw("GET", "/", {})
+        self.assertEqual(status, 401)
+        self.assertIn(b"authentication required", body)
+        status, headers, body = self._raw("GET", "/v1/health", {"Accept": "text/html"})
+        self.assertEqual(status, 401)
+        self.assertNotIn("Location", headers)
+        self.assertIn(b"authentication required", body)
+        status, _headers, body = self._raw(
+            "GET",
+            "/",
+            {"Accept": "text/html", "Origin": "https://evil.example:9"},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn(b"cors_denied", body)
+        self.plane.accounts.add_member("ada", "other-horse-stable")
+        _status, _page, cookie = _form(
+            self.base,
+            "/ui/login",
+            {"username": "ada", "password": "other-horse-stable"},
+        )
+        cookie = cookie.split(";", 1)[0]
+        status, headers, body = self._raw("GET", "/", {"Accept": "text/html", "Cookie": cookie})
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("Location"), "/ui/chat")
+        self.assertNotIn(b"authentication required", body)
+        status, headers, _body = self._raw("GET", "/ui/login", {"Accept": "text/html", "Cookie": cookie})
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("Location"), "/ui/chat")
+
+    def test_lan_root_redirect_keeps_peer_host_and_api_checks(self) -> None:
+        from dataclasses import replace
+
+        from ssios.httpapi import AppHandler
+
+        self.plane.settings = replace(self.plane.settings, ui_bind="0.0.0.0")
+        status, headers, body = self._dispatch(AppHandler, "/", "192.168.1.20", "192.168.1.20:8765", {"Accept": "text/html"})
+        self.assertEqual(status, 302, body)
+        self.assertEqual(headers.get("Location"), "/ui/login")
+        self.assertNotIn(b"authentication required", body)
+        status, headers, body = self._dispatch(AppHandler, "/", "8.8.8.8", "192.168.1.20:8765", {"Accept": "text/html"})
+        self.assertEqual(status, 403, body)
+        self.assertIn(b"peer_rejected", body)
+        self.assertNotIn("Location", headers)
+        status, _headers, body = self._dispatch(AppHandler, "/", "192.168.1.20", "evil.example:8765", {"Accept": "text/html"})
+        self.assertEqual(status, 403, body)
+        self.assertIn(b"bad_host", body)
+        status, headers, body = self._dispatch(
+            AppHandler,
+            "/v1/health",
+            "192.168.1.20",
+            "192.168.1.20:8765",
+            {"Accept": "text/html"},
+        )
+        self.assertEqual(status, 401, body)
+        self.assertIn(b"authentication required", body)
+        self.assertNotIn("Location", headers)
+        status, _headers, body = self._dispatch(
+            AppHandler,
+            "/",
+            "192.168.1.20",
+            "192.168.1.20:8765",
+            {"Accept": "text/html", "Origin": "https://evil.example:8765"},
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn(b"cors_denied", body)
+
+    def test_lan_startup_urls_include_the_login_path(self) -> None:
+        from unittest import mock
+
+        from ssios.netguard import browser_login_urls
+
+        addresses = [
+            (None, None, None, None, ("192.168.1.50", 0)),
+            (None, None, None, None, ("8.8.8.8", 0)),
+        ]
+        with mock.patch("ssios.netguard.socket.gethostname", return_value="mac-mini-2"), mock.patch(
+            "ssios.netguard.socket.getaddrinfo",
+            return_value=addresses,
+        ):
+            urls = browser_login_urls(8765, tls=True)
+            plain = browser_login_urls(8765, tls=False)
+        self.assertEqual(urls[0], "https://127.0.0.1:8765/ui/login")
+        self.assertIn("https://mac-mini-2.local:8765/ui/login", urls)
+        self.assertIn("https://192.168.1.50:8765/ui/login", urls)
+        self.assertNotIn("https://8.8.8.8:8765/ui/login", urls)
+        self.assertEqual(plain, ["http://127.0.0.1:8765"])
+
+    def _raw(self, method: str, path: str, headers: dict) -> tuple[int, dict, bytes]:
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.plane.bound_port, timeout=5)
+        merged = {"Host": f"127.0.0.1:{self.plane.bound_port}"}
+        merged.update(headers)
+        conn.request(method, path, headers=merged)
+        response = conn.getresponse()
+        payload = response.read()
+        found = {key: value for key, value in response.getheaders()}
+        conn.close()
+        return response.status, found, payload
+
+    def _dispatch(self, handler_type, path: str, peer: str, host: str, headers: dict) -> tuple[int, dict, bytes]:
+        from io import BytesIO
+
+        handler = handler_type.__new__(handler_type)
+        handler.client_address = (peer, 9)
+        handler.headers = {"Host": host, **headers}
+        handler.path = path
+        handler.command = "GET"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = f"GET {path} HTTP/1.1"
+        handler.server = self.server.httpd
+        handler.wfile = BytesIO()
+        handler.rfile = BytesIO()
+        handler.close_connection = False
+        handler._dispatch()
+        raw = handler.wfile.getvalue()
+        head, _, body = raw.partition(b"\r\n\r\n")
+        status = int(head.split(b" ", 2)[1])
+        found = {}
+        for line in head.split(b"\r\n")[1:]:
+            if b":" in line:
+                key, value = line.split(b":", 1)
+                found[key.decode()] = value.strip().decode()
+        return status, found, body
+
 
 class HouseholdTest(PlaneTest):
     settings_overrides = {"connectors_enabled": ("drive", "gmail", "calendar"), "connector_max_calls": 8, "connector_max_bytes": 8000}

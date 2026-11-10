@@ -52,7 +52,7 @@ The same choice can be saved as `[ui] bind = "0.0.0.0"` in the config copy. Any 
 
 When LAN mode is on, the server speaks HTTPS. The first start writes a self-signed certificate under `<state>/ui/tls/` (mode `0600`) and prints the SHA-256 fingerprint. Compare that fingerprint with the browser warning before you continue. To use mkcert instead, put `cert.pem` and `key.pem` in that directory before starting. They are used as-is and are not overwritten.
 
-Startup prints `https://<hostname>.local:<port>` and the private IP URLs it can see. Only loopback, RFC1918, IPv4 link-local, IPv6 unique-local, and IPv6 link-local clients are accepted. Other source addresses are rejected. The Host and Origin must match this server, and browser origins are not given CORS headers.
+Startup prints `https://<hostname>.local:<port>/ui/login` and the same path on each private IP it can see. Opening the site root in a browser goes to that sign-in page. Only loopback, RFC1918, IPv4 link-local, IPv6 unique-local, and IPv6 link-local clients are accepted. Other source addresses are rejected. The Host and Origin must match this server, and browser origins are not given CORS headers.
 
 macOS may show a firewall prompt the first time the process listens on all interfaces. Allow incoming connections if a browser on another computer on the home network should connect. If you deny the prompt, a browser on the Mac itself can still use the loopback URL.
 
