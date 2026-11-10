@@ -43,13 +43,24 @@ import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 text = text.replace('backend = "dev-guard"', 'backend = "macos-vz"', 1)
+text = text.replace('agent = "summary"', 'agent = "codex"', 1)
 text = text.replace('provider = "mock"', 'provider = "ollama"', 1)
 text = text.replace("memory_mb = 512", "memory_mb = 2048", 1)
 text = text.replace("task_timeout_seconds = 30", "task_timeout_seconds = 240", 1)
+required = (
+    'backend = "macos-vz"',
+    'agent = "codex"',
+    'provider = "ollama"',
+    "memory_mb = 2048",
+)
+missing = [item for item in required if item not in text]
+if missing:
+    raise SystemExit("smoke config was not updated: " + ", ".join(missing))
 path.write_text(text, encoding="utf-8")
 PY
 echo "准备钉住的 aarch64 内核和 initramfs。客户机启动时不再下载。" >&2
-PYTHONPATH=src python3 -m ssios vm-prepare --profile dev --state "$STATE" --config "$STATE/smoke.toml"
+# vm-prepare reads profile from the config file. It does not accept --profile.
+PYTHONPATH=src python3 -m ssios vm-prepare --state "$STATE" --config "$STATE/smoke.toml"
 PYTHONPATH=src PYTHONUNBUFFERED=1 python3 -u -m ssios up --profile dev --state "$STATE" --config "$STATE/smoke.toml" --port 0 >"$STATE/up.log" 2>&1 &
 PID=$!
 python3 - "$STATE" <<'PY'

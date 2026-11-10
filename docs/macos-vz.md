@@ -25,4 +25,6 @@ ollama pull qwen2.5-coder:7b
 bash scripts/macos-vz-codex-smoke.sh
 ```
 
+脚本把样例配置改成 `backend = "macos-vz"`、`agent = "codex"` 和本机 Ollama。`vm-prepare` 不接受 `--profile`，档位来自配置文件里的 `profile = "dev"`。`--profile dev` 只传给 `ssios up`。
+
 把打印出来的 `status`、`isolated`、`boot_ms`、`nic`、`outbound`、`marker`、`outside_write` 和 `sandbox_denied` 发回来。`nic` 应该只有 `lo`，`outbound` 为 false，`outside_write` 为 false，`argv_has_virtio_net` 为 false。在收到这台 Mac 的输出之前，仓库不把这次路径记成已经成功。

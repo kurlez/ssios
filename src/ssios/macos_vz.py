@@ -38,6 +38,11 @@ _INIT = """#!/bin/busybox sh
 /bin/busybox mount -t virtiofs scratch /scratch
 /bin/busybox mount -t virtiofs workspace /workspace
 /bin/busybox mount -t virtiofs tools /tools
+/bin/busybox cat > /bin/bash <<'EOF'
+#!/bin/busybox sh
+exec /bin/busybox sh "$@"
+EOF
+/bin/busybox chmod 755 /bin/bash
 /bin/busybox ip link set lo up
 /bin/busybox ip addr add 127.0.0.1/8 dev lo
 export PATH=/opt/python/bin:/usr/bin:/bin:/tools
@@ -229,17 +234,44 @@ def _download(url: str, destination: Path, timeout: float) -> None:
 def _extract_tar(archive: Path, destination: Path, strip_python_prefix: bool = False) -> None:
     with tarfile.open(archive) as tar:
         for member in tar.getmembers():
-            name = member.name
-            if name.startswith("/") or ".." in Path(name).parts:
-                raise SsiosError("macos_vz_not_prepared", "archive path rejected", 500)
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                continue
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name.startswith("/") or not name or ".." in Path(name).parts:
+                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
             if strip_python_prefix and (name == "python" or name.startswith("python/")):
-                member.name = name[len("python/") :] if name.startswith("python/") else "."
-                if member.name in ("", "."):
+                name = name[len("python/") :]
+                if name in ("", "."):
                     continue
-            target = (destination / member.name).resolve()
+            member.name = name
+            if member.issym() and (member.linkname or "").startswith("/"):
+                _place_guest_symlink(name, member.linkname, destination)
+                continue
+            target = (destination / name).resolve()
             if destination.resolve() not in target.parents and target != destination.resolve():
-                raise SsiosError("macos_vz_not_prepared", "archive path rejected", 500)
-            tar.extract(member, destination, filter="data")
+                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+            try:
+                tar.extract(member, destination, filter="data")
+            except tarfile.FilterError as exc:
+                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500) from exc
+
+
+def _place_guest_symlink(name: str, linkname: str, destination: Path) -> None:
+    """Alpine busybox applets point at /bin/busybox. Keep that path inside the guest root."""
+    if "\x00" in linkname or ".." in Path(linkname).parts:
+        raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+    parent = Path(name).parent
+    guest_parent = "/" if str(parent) in ("", ".") else "/" + parent.as_posix()
+    relative = os.path.relpath(linkname, guest_parent)
+    if relative.startswith("../"):
+        host_target = (destination / parent / relative).resolve()
+        if destination.resolve() not in host_target.parents and host_target != destination.resolve():
+            raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+    dest = destination / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink() or dest.exists():
+        dest.unlink()
+    dest.symlink_to(relative)
 
 
 def _extract_apk(archive: Path, destination: Path) -> None:
@@ -250,15 +282,23 @@ def _extract_apk(archive: Path, destination: Path) -> None:
                 continue
             name = member.name[2:] if member.name.startswith("./") else member.name
             if ".." in Path(name).parts:
-                raise SsiosError("macos_vz_not_prepared", "apk path rejected", 500)
+                raise SsiosError("macos_vz_not_prepared", f"apk member rejected: {name[:80]}", 500)
             member.name = name
-            tar.extract(member, destination, filter="data")
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                continue
+            if member.issym() and (member.linkname or "").startswith("/"):
+                _place_guest_symlink(name, member.linkname, destination)
+                continue
+            try:
+                tar.extract(member, destination, filter="data")
+            except tarfile.FilterError as exc:
+                raise SsiosError("macos_vz_not_prepared", f"apk member rejected: {name[:80]}", 500) from exc
 
 
 def _newc_header(name: str, mode: int, size: int, inode: int) -> bytes:
     encoded = name.encode() + b"\0"
-    if len(encoded) > 255:
-        raise SsiosError("macos_vz_not_prepared", "initramfs name is too long", 500)
+    if len(encoded) > 0xFFFFFFFF or size > 0xFFFFFFFF or inode > 0xFFFFFFFF:
+        raise SsiosError("macos_vz_not_prepared", "initramfs member does not fit the newc header", 500)
     fields = [
         "070701",
         f"{inode:08x}",

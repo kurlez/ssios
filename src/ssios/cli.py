@@ -24,12 +24,8 @@ from ssios.summary import run_summary
 from ssios.upstream import describe_memfs, probe_local_binary
 
 
-def main(argv: list[str] | None = None) -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(line_buffering=True)
-        except (OSError, ValueError):
-            pass
+def build_parser() -> argparse.ArgumentParser:
+    """The real command parser. `--profile` is only on commands that start or talk as a profile."""
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state", default=".ssios", help="state directory")
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
@@ -56,7 +52,16 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except (OSError, ValueError):
+            pass
+    args = build_parser().parse_args(argv)
     if args.command == "memfs-info":
         print(json.dumps({"memfs": describe_memfs(), "probe": probe_local_binary(execute=args.execute_version)}, indent=2, ensure_ascii=False))
         return 0

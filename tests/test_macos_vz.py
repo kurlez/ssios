@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import gzip
+import io
+import tarfile
 import unittest
 from pathlib import Path
 
 from ssios.errors import SsiosError
-from ssios.macos_vz import assert_no_nic, pack_newc, vfkit_command
+from ssios.macos_vz import _extract_tar, assert_no_nic, pack_newc, vfkit_command
 
 
 class ArgvTest(unittest.TestCase):
@@ -68,3 +70,32 @@ class PackTest(unittest.TestCase):
         self.assertIn(b"bin/busybox", blob)
         self.assertIn(b"bin/sh", blob)
         self.assertTrue(blob.startswith(b"070701") or b"070701" in blob[:16])
+
+
+class ExtractTest(unittest.TestCase):
+    def test_guest_absolute_symlink_stays_inside_the_root(self) -> None:
+        blob = io.BytesIO()
+        with tarfile.open(fileobj=blob, mode="w:gz") as tar:
+            info = tarfile.TarInfo("usr/bin/yes")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/bin/busybox"
+            tar.addfile(info)
+        archive = Path("/tmp/ssios-vz-abs-link.tar.gz")
+        archive.write_bytes(blob.getvalue())
+        root = Path("/tmp/ssios-vz-abs-link")
+        if root.exists():
+            import shutil
+
+            shutil.rmtree(root)
+        root.mkdir()
+        _extract_tar(archive, root)
+        link = root / "usr" / "bin" / "yes"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os_readlink(link), "../../bin/busybox")
+        self.assertIn(root.resolve(), link.resolve().parents or [link.resolve()])
+
+
+def os_readlink(path: Path) -> str:
+    import os
+
+    return os.readlink(path)
