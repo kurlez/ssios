@@ -153,25 +153,6 @@ class AccountScope:
                 raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
             write_nofollow(self.home / "accepted", str(record["approval_id"]) + ".md", data, mode=0o600)
             return {"action": action, "meta": self.staged_meta(str(record["proposal_id"]))}
-        if action == "connector.fetch":
-            data = self.staged_bytes(str(record["proposal_id"]))
-            if sha256_bytes(data) != record["payload_sha256"]:
-                raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
-            meta = self.staged_meta(str(record["proposal_id"]))
-            service = str(meta.get("service") or "")
-            query = str(meta.get("query") or "")
-            fetched = self.plane.connector.fetch(self.account_id, service, query, approved=True)
-            items = fetched.get("items") if isinstance(fetched, dict) else []
-            ids = ",".join(str(item.get("id")) for item in items if isinstance(item, dict))[:80]
-            self.plane.security_audit.write(
-                actor=self.account_id,
-                ip=peer_ip or "127.0.0.1",
-                action="connector.fetch",
-                target=service,
-                result="ok",
-                extra={"service": service, "item_count": str(fetched.get("count") or 0), "item_ids": ids},
-            )
-            return {"action": action, "fetch": fetched, "meta": meta}
         if action == "memory.commit":
             revision = self.memory().apply(
                 str(record["proposal_id"]),

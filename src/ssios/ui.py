@@ -359,7 +359,19 @@ def _approvals(plane, session: dict) -> str:
     scope = AccountScope(plane, account)
     records = []
     if account.get("legacy_owner"):
-        records.extend(record for record in plane.approvals.records() if record.get("status") == "pending")
+        records.extend(
+            record
+            for record in plane.approvals.records()
+            if record.get("status") == "pending" and record.get("action") != "connector.fetch"
+        )
+    if account.get("role") == "member":
+        records.extend(
+            record
+            for record in plane.approvals.records()
+            if record.get("status") == "pending"
+            and record.get("action") == "connector.fetch"
+            and _owns_google_fetch(plane, account["id"], record)
+        )
     records.extend(scope.list_pending())
     token = _human(plane)
     for record in records:
@@ -402,19 +414,72 @@ def _decide(plane, session: dict, approval_id: str, body: dict, peer_ip: str = "
 
     account = _account(session)
     scope = AccountScope(plane, account)
+    google_record = _google_fetch_record(plane, approval_id)
+    if google_record is not None:
+        return _decide_google(plane, session, scope, google_record, body, peer_ip)
     if scope.has_approval(approval_id):
         result = scope.decide(approval_id, body, peer_ip)
-        if result.get("status") == "consumed" and result.get("action") == "connector.fetch":
-            from ssios.chat import continue_after_fetch
-            from ssios.ui_household import _events_html
-
-            events = list(continue_after_fetch(plane, account, result, peer_ip))
-            return Page(200, _page(session, "Decided", _events_html(session, events)))
         return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
     if account.get("legacy_owner"):
         result = plane.decide(_human(plane), approval_id, body)
         return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
     raise SsiosError("not_found", "approval not found", 404)
+
+
+def _owns_google_fetch(plane, account_id: str, record: dict) -> bool:
+    google = getattr(plane, "_google", None)
+    if google is None:
+        return False
+    material = google._requests.get(record.get("approval_id"))
+    return isinstance(material, dict) and material.get("account_id") == account_id
+
+
+def _google_fetch_record(plane, approval_id: str) -> dict | None:
+    try:
+        record = plane.approvals.get(approval_id)
+    except SsiosError:
+        return None
+    if record.get("action") != "connector.fetch":
+        return None
+    return record
+
+
+def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_ip: str) -> Page:
+    from ssios.chat import continue_after_fetch
+    from ssios.google_connector import member_session
+    from ssios.ui_household import _events_html
+
+    account = session["account"]
+    if account.get("role") != "member":
+        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
+    material = plane.google._requests.get(record["approval_id"])
+    if not isinstance(material, dict) or material.get("account_id") != account["id"]:
+        raise SsiosError("forbidden", "a session cannot act for another account", 403)
+    result = plane.decide(_human(plane), record["approval_id"], body)
+    if result.get("status") != "consumed":
+        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    taken = plane.google.take_result(member_session(account["id"]), record["approval_id"])
+    tool = str(material.get("tool") or "")
+    plane.security_audit.write(
+        actor=account["id"],
+        ip=peer_ip or "127.0.0.1",
+        action="connector.fetch",
+        target=tool.split(".", 1)[0],
+        result="ok",
+        extra={"service": tool.split(".", 1)[0], "item_count": "1"},
+    )
+    found = scope.chat().find_approval(record["approval_id"])
+    conversation_id = found[0] if found else ""
+    route_name = str((found[1] if found else {}).get("route_name") or "connector")
+    events = list(
+        continue_after_fetch(
+            plane,
+            account,
+            {"meta": {"conversation_id": conversation_id, "route": route_name}, "fetch": {"text": taken["text"]}},
+            peer_ip,
+        )
+    )
+    return Page(200, _page(session, "Decided", _events_html(session, events)))
 
 
 def _ingest_form(plane, session: dict, notice: str) -> str:

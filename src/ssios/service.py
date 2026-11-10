@@ -25,7 +25,6 @@ from ssios.runtime import CloudHypervisorRuntime, DevGuardRuntime, MacOSVMRuntim
 from ssios.storage import ProjectStorage
 from ssios.upstream import describe_memfs
 from ssios.accounts import AccountStore
-from ssios.connectors import build_connector
 from ssios.netguard import AttemptLimiter
 from ssios.security_audit import SecurityAudit
 from ssios.util import assert_private, atomic_write, read_json, secure_mkdir, sha256_bytes, write_json
@@ -87,7 +86,6 @@ class ControlPlane:
         self.tasks: dict[str, dict] = {}
         self.accounts = AccountStore(settings.state_dir)
         self.security_audit = SecurityAudit(settings.state_dir / "audit" / "security.jsonl")
-        self.connector = build_connector()
         self.chat_guest = None
         self.login_limiter = AttemptLimiter(limit=5, window=600, lock_seconds=60)
         self.signup_limiter = AttemptLimiter(limit=3, window=3600, lock_seconds=600)

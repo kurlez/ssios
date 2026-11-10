@@ -78,13 +78,11 @@ An admin sees whether Gmail or Drive is connected, and the connected-at time. Th
 
 ## Gmail and Drive
 
-The chat UI talks to a small adapter. The live Google module, when it is installed, is `ssios.google_connector.build_connector(secret_store)` or `ssios.google.GoogleConnector`. Until that module is present, Connect explains that consent still has to finish on the host and does not store a token.
+The chat UI calls the connector in `src/ssios/google_connector.py`. The API, scopes, and keyring setup are in [google-connector.md](google-connector.md). A single Mac walkthrough that uses a fresh state directory is in [mac-e2e-test.md](mac-e2e-test.md).
 
-Every call carries the signed-in account id. The methods are `connect`, `status` (service, connected, connected_at only), `disconnect`, `fetch` (only after approval), and `revoke_and_delete`. None of them return a token. Scopes are `gmail.readonly` and `drive.readonly`.
+A member session can connect, disconnect, and propose a read. The admin console uses `admin_connection_status` and sees only the service name, whether it is connected, and when. Password reset and account deletion call `revoke_and_delete`. Chat uses `propose_fetch` and, after the owner approves, `take_result`. Fetched text goes to local Ollama. It enters the guest only when that same turn was also a workspace task and the read was approved.
 
-Tokens and the OAuth client secret belong in the operating system secret store, under the service name `ssios.google.<account id>`. macOS uses Keychain. Linux uses Secret Service (`secret-tool`, with the secret on stdin). They are not written to a file in the state directory or the git repository.
-
-If you click Connect from another computer, the page shows a consent URL and tells you to open it in a browser on the Mac that runs SSIOS. Google redirects to `127.0.0.1` on that Mac. A browser on another computer cannot finish that redirect. You can also sit at the Mac and click Connect there. The OAuth callback is never bound to the LAN address.
+Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `ssios oauth-install-client`, which reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file.
 
 ## Tests
 

@@ -8,14 +8,15 @@ import urllib.request
 
 from ssios.chat_guest import ProductionChatGuest, guest_root, readiness
 from ssios.chat_router import classify
-from ssios.connectors import (
-    READ_ONLY_SCOPES,
-    FakeConnector,
-    MemorySecretStore,
-    SanitizingConnector,
-    linux_secret_tool_argv,
-    service_name,
-)
+import subprocess
+import threading
+import urllib.parse
+from http.server import ThreadingHTTPServer
+from unittest import mock
+
+from ssios.google_connector import GoogleConnector, GoogleEndpoints, member_session
+from ssios.secret_store import MemorySecretStore, service_name
+from test_google_connector import _Google
 from ssios.errors import SsiosError
 from ssios.netguard import is_private_source, peer_allowed
 from ssios.security_audit import SecurityAudit
@@ -140,12 +141,32 @@ class LaneTest(PlaneTest):
 
 
 class HouseholdTest(PlaneTest):
+    settings_overrides = {"connectors_enabled": ("drive", "gmail"), "connector_max_calls": 8, "connector_max_bytes": 8000}
+
     def setUp(self) -> None:
         super().setUp()
+        _Google.seen = []
+        self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
+        self.addCleanup(self.google_http.server_close)
+        thread = threading.Thread(target=self.google_http.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.google_http.shutdown)
+        port = self.google_http.server_address[1]
+        base = f"http://127.0.0.1:{port}"
         self.store = MemorySecretStore()
-        self.fake = FakeConnector(self.store)
+        self.secret = "client-secret-fixture"
+        self.plane._google = GoogleConnector(
+            self.plane,
+            self.store,
+            GoogleEndpoints(
+                auth_url=base + "/auth",
+                token_url=base + "/token",
+                userinfo_url=base + "/userinfo",
+                revoke_url=base + "/revoke",
+                api_base=base,
+            ),
+        )
         self.guest = RecordingGuest()
-        self.plane.connector = SanitizingConnector(self.fake)
         self.plane.chat_guest = self.guest
         self.plane.accounts.add_admin("owner", PASSWORD)
         self.owner = self._login("owner", PASSWORD)
@@ -282,35 +303,28 @@ class HouseholdTest(PlaneTest):
             cookie=self.ada,
         )
         self.assertEqual(status, 403, page)
-        status, connected, _cookie = _form(
-            self.base,
-            "/ui/connections",
-            {"csrf": csrf, "service": "gmail", "op": "connect"},
-            cookie=self.ada,
-        )
-        self.assertEqual(status, 200, connected)
-        self.assertIn("http://127.0.0.1:9/oauth-callback-placeholder", connected)
-        self.assertNotIn("canary-token", connected)
-        self.assertTrue(self.store.has(self._ada_id(), "gmail"))
+        self._install_and_connect(self._ada_id(), "gmail", "code-a")
         self.assertEqual(service_name(self._ada_id()), f"ssios.google.{self._ada_id()}")
+        seen_before = len(_Google.seen)
         pending = self._send(self.ada, "check my inbox")
-        self.assertIn("Nothing has been fetched", pending)
-        self.assertEqual(self.fake.fetches, [])
+        self.assertIn("Read-only gmail.search", pending)
+        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _Google.seen[seen_before:]))
         self.assertEqual(self.guest.prompts, [])
         approved = self._approve(self.ada, pending)
         self.assertIn("Synthetic local answer using the approved cloud text", approved)
-        self.assertEqual(len(self.fake.fetches), 1)
+        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _Google.seen))
         self.assertEqual(self.guest.prompts, [])
-        self.assertEqual(self.fake.fetches[0]["account_id"], self._ada_id())
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("Synthetic gmail fixture", audit)
-        self.assertNotIn("canary-token", audit)
+        self.assertNotIn(self.secret, audit)
+        self.assertNotIn("refresh-account-a", audit)
+        self.assertNotIn("ya29.", audit)
         self.assertNotIn("check my inbox", audit)
         _status, admin = _get(self.base, "/ui/admin", self.owner)
-        self.assertIn("gmail yes", admin)
-        self.assertNotIn("canary-token", admin)
-        self.assertNotIn("Synthetic gmail fixture", admin)
-        self.assertNotIn("MEMBER-ONLY-MARKER", admin)
+        self.assertIn("ssios.google.", admin)
+        self.assertIn("yes", admin)
+        self.assertNotIn(self.secret, admin)
+        self.assertNotIn("refresh-account-a", admin)
+        self.assertNotIn("Fixture subject", admin)
         status, stolen, _cookie = _form(
             self.base,
             "/ui/connections",
@@ -343,8 +357,8 @@ class HouseholdTest(PlaneTest):
         )
         self.assertEqual(status, 403, blocked)
         self.assertEqual(self._role(beau), "member")
-        self.fake.connect(beau, "drive")
-        self.assertTrue(self.store.has(beau, "drive"))
+        self._install_and_connect(beau, "drive", "code-b")
+        self.assertEqual(self.store.get(beau, "drive-refresh"), "refresh-account-b")
         status, reset, _cookie = _form(
             self.base,
             f"/ui/admin/users/{beau}",
@@ -353,8 +367,9 @@ class HouseholdTest(PlaneTest):
         )
         self.assertEqual(status, 200, reset)
         self.assertNotIn("beau-password-new", reset)
-        self.assertNotIn("canary-token", reset)
-        self.assertFalse(self.store.has(beau, "drive"))
+        self.assertNotIn(self.secret, reset)
+        self.assertNotIn("refresh-account-b", reset)
+        self.assertIsNone(self.store.get(beau, "drive-refresh"))
         old = urllib.request.Request(self.base + "/ui/chat", headers={"Cookie": beau_cookie})
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(old, timeout=5)
@@ -368,7 +383,7 @@ class HouseholdTest(PlaneTest):
             cookie=self.owner,
         )
         self.assertEqual(status, 200, deleted)
-        self.assertFalse(self.store.has(self._ada_id(), "gmail"))
+        self.assertIsNone(self.store.get(self._ada_id(), "gmail-refresh"))
         self.assertTrue((self.state / "accounts" / "archive").is_dir())
         self.assertNotIn("hello from ada", deleted)
         with self.assertRaises(urllib.error.HTTPError):
@@ -385,24 +400,77 @@ class HouseholdTest(PlaneTest):
         self.assertFalse(SecurityAudit(path).verify()["ok"])
 
     def test_approved_cloud_text_reaches_the_guest_only_after_approval(self) -> None:
-        csrf = self._csrf(self.ada)
-        status, _connected, _cookie = _form(
-            self.base,
-            "/ui/connections",
-            {"csrf": csrf, "service": "gmail", "op": "connect"},
-            cookie=self.ada,
-        )
-        self.assertEqual(status, 200)
+        self._install_and_connect(self._ada_id(), "gmail", "code-a")
         pending = self._send(self.ada, "save my inbox into readme.md")
         self.assertIn("Route: connector_vm", pending)
-        self.assertEqual(self.fake.fetches, [])
+        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _Google.seen))
         self.assertEqual(self.guest.prompts, [])
         approved = self._approve(self.ada, pending)
-        self.assertEqual(len(self.fake.fetches), 1)
+        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _Google.seen))
         self.assertEqual(len(self.guest.prompts), 1)
-        self.assertIn("Synthetic gmail fixture", self.guest.prompts[0])
+        self.assertIn("UNTRUSTED EXTERNAL CONTENT", self.guest.prompts[0])
+        self.assertIn("msg-1", self.guest.prompts[0])
         self.assertIn("Synthetic guest result", approved)
         self.assertIn("Nothing is applied until you approve", approved)
+
+    def test_ui_flows_do_not_put_secrets_on_subprocess_argv(self) -> None:
+        argv = []
+
+        def record(args) -> None:
+            if isinstance(args, (list, tuple)):
+                argv.append([str(part) for part in args])
+
+        real_run = subprocess.run
+        real_popen = subprocess.Popen
+
+        def spy_run(args, *pos, **kwargs):
+            record(args)
+            return real_run(args, *pos, **kwargs)
+
+        def spy_popen(args, *pos, **kwargs):
+            record(args)
+            return real_popen(args, *pos, **kwargs)
+
+        with mock.patch("subprocess.run", spy_run), mock.patch("subprocess.Popen", spy_popen):
+            csrf = self._csrf(self.ada)
+            status, connected, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": csrf, "service": "gmail", "op": "connect"},
+                cookie=self.ada,
+            )
+            self.assertEqual(status, 400, connected)
+            self._install_and_connect(self._ada_id(), "gmail", "code-a")
+            status, connected, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": self._csrf(self.ada), "service": "drive", "op": "connect"},
+                cookie=self.ada,
+            )
+            self.assertEqual(status, 200, connected)
+            self.assertNotIn(self.secret, connected)
+            pending = self._send(self.ada, "check my inbox")
+            self._approve(self.ada, pending)
+            status, reset, _cookie = _form(
+                self.base,
+                f"/ui/admin/users/{self._ada_id()}",
+                {"csrf": self._csrf(self.owner), "op": "reset-password", "password": "ada-password-new1"},
+                cookie=self.owner,
+            )
+            self.assertEqual(status, 200, reset)
+            self.plane.accounts.add_member("cara", "cara-password-ok")
+            cara = self._account_named("cara")
+            self._install_and_connect(cara, "gmail", "code-b")
+            status, deleted, _cookie = _form(
+                self.base,
+                f"/ui/admin/users/{cara}",
+                {"csrf": self._csrf(self.owner), "op": "delete", "confirm": "delete cara"},
+                cookie=self.owner,
+            )
+            self.assertEqual(status, 200, deleted)
+        blob = json.dumps(argv)
+        for secret in (self.secret, "refresh-account-a", "refresh-account-b", "ya29.access-account-a", "ada-password-new1"):
+            self.assertNotIn(secret, blob)
 
     def test_memory_is_not_written_until_the_owner_approves(self) -> None:
         pending = self._send(self.ada, "remember the fixture code is HARBOR")
@@ -447,6 +515,18 @@ class HouseholdTest(PlaneTest):
         self.assertEqual(status, 200, done)
         return done
 
+    def _install_and_connect(self, account_id: str, connector: str, code: str) -> None:
+        session = member_session(account_id)
+        self.plane.google.install_client(session, "client-" + account_id[:8], self.secret)
+        started = self.plane.google.connect(session, connector, open_browser=False, timeout=5)
+        parsed = urllib.parse.urlsplit(started["authorization_url"])
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertNotIn(self.secret, started["authorization_url"])
+        redirect = query["redirect_uri"][0]
+        state = query["state"][0]
+        urllib.request.urlopen(redirect + "?" + urllib.parse.urlencode({"code": code, "state": state}), timeout=5).read()
+        self.plane.google.finish_connect(session, connector, timeout=5)
+
     def _ada_id(self) -> str:
         return self._account_named("ada")
 
@@ -464,56 +544,14 @@ class HouseholdTest(PlaneTest):
 
 
 class AdapterTest(PlaneTest):
-    def test_sanitizer_scopes_and_key_names(self) -> None:
-        self.assertTrue(all(value.endswith(".readonly") for value in READ_ONLY_SCOPES.values()))
-        store = MemorySecretStore()
+    def test_sources_do_not_pass_secrets_on_a_command_line(self) -> None:
+        from support import ROOT
 
-        class Poison:
-            def status(self, account_id):
-                return {
-                    "services": [
-                        {
-                            "service": "gmail",
-                            "connected": True,
-                            "connected_at": 1,
-                            "access_token": "ya29.secret",
-                            "refresh_token": "1//secret",
-                            "email": "person@example.com",
-                        }
-                    ]
-                }
-
-            def connect(self, account_id, service):
-                return {"ok": True, "access_token": "ya29.secret", "consent_url": "https://evil.example/phish"}
-
-            def disconnect(self, account_id, service):
-                return {"ok": True}
-
-            def fetch(self, account_id, service, query, *, approved):
-                return {"items": [{"id": "id-1", "body": "mail body"}], "text": "mail body", "access_token": "ya29.secret"}
-
-            def revoke_and_delete(self, account_id):
-                return {"revoked": True, "deleted": True, "refresh_token": "1//secret"}
-
-        safe = SanitizingConnector(Poison())
-        status = safe.status("acct-0011223344556677")
-        self.assertNotIn("ya29.secret", json.dumps(status))
-        self.assertNotIn("person@example.com", json.dumps(status))
-        self.assertEqual(status["services"][0]["connected"], True)
-        ack = safe.connect("acct-0011223344556677", "gmail")
-        self.assertNotIn("consent_url", ack)
-        self.assertNotIn("ya29", json.dumps(ack))
-        fetched = safe.fetch("acct-0011223344556677", "gmail", "q", approved=True)
-        self.assertEqual(fetched["items"], [{"id": "id-1"}])
-        self.assertNotIn("access_token", fetched)
-        revoked = safe.revoke_and_delete("acct-0011223344556677")
-        self.assertNotIn("refresh_token", revoked)
-        argv = linux_secret_tool_argv("acct-0011223344556677", "gmail")
-        self.assertNotIn("secret-value", argv)
-        self.assertIn("ssios.google.acct-0011223344556677", argv)
-        store.put("acct-0011223344556677", "gmail", "secret-value")
-        self.assertEqual(store.delete_account("acct-0011223344556677"), 1)
-        self.assertFalse(store.has("acct-0011223344556677", "gmail"))
+        needles = ("add-generic-" + "password", "secret-" + "tool")
+        for path in (ROOT / "src").rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for needle in needles:
+                self.assertNotIn(needle, text, f"{path} contains {needle}")
 
     def test_guest_fails_closed_without_running_on_the_host(self) -> None:
         report = readiness(self.plane, "cloud-hypervisor")

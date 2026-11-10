@@ -128,6 +128,7 @@ A Linux guest cannot reach `127.0.0.1` on the macOS host. Do not bind Ollama to 
 ## Docs
 
 - [Chat, accounts, and the home-network UI](docs/chat-ui.md)
+- [Mac end-to-end test](docs/mac-e2e-test.md)
 - [Architecture and trust boundary](docs/architecture.md)
 - [MemFS integration boundary](docs/memfs.md)
 - [Implementation status](docs/status.md)

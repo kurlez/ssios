@@ -59,6 +59,19 @@ class ChatStore:
         write_json(self.root / "index.json", {"ids": ids})
         return record
 
+    def find_approval(self, approval_id: str) -> tuple[str, dict] | None:
+        index = read_json(self.root / "index.json", {"ids": []})
+        ids = index.get("ids") if isinstance(index, dict) else []
+        for conv_id in ids if isinstance(ids, list) else []:
+            try:
+                record = self.get(str(conv_id))
+            except SsiosError:
+                continue
+            for message in record.get("messages") or []:
+                if message.get("approval_id") == approval_id:
+                    return record["id"], message
+        return None
+
     def get(self, conv_id: str) -> dict:
         path = self._path(conv_id)
         data = read_json(path, None)

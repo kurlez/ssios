@@ -1,6 +1,6 @@
 # Gmail, Drive, and Calendar
 
-This is the host-side connector for workstream B in `docs/requirements/chat-ui-accounts-google.md`. The chat UI does not live here. It should import this module and pass the account id from the authenticated session.
+This is the host-side connector for workstream B in `docs/requirements/chat-ui-accounts-google.md`. The chat UI imports this module. The Mac walkthrough that starts from a fresh state directory is [mac-e2e-test.md](mac-e2e-test.md). This page is the API and the OAuth client setup. It does not repeat the chat, LAN, or admin steps.
 
 Gmail and Drive are read-only. Calendar can list calendars and can read or change events. A calendar change is one approval for one event. Nothing is written, updated, or deleted until the owning household account approves that action. Approvals expire. There is no batch approval.
 

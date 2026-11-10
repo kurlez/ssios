@@ -7,6 +7,7 @@ the local model, unless the same turn was approved for the guest.
 from __future__ import annotations
 
 import queue
+import re
 import secrets
 import threading
 import time
@@ -16,8 +17,6 @@ from ssios.chat_guest import ChatGuestRequest, ProductionChatGuest
 from ssios.chat_router import RouteDecision, classify
 from ssios.errors import FlowInterrupt, SsiosError
 from ssios.scope import AccountScope, memory_excerpt
-from ssios.util import canonical_json
-
 _SYSTEM = (
     "You are SSIOS on this machine. Answer from the conversation and the memory excerpt. "
     "This turn has no tools. Do not claim that files, mail, or memory were changed."
@@ -115,24 +114,41 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> I
 
 
 def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision, *, follow_vm: bool) -> Iterator[dict]:
-    service = decision.services[0]
-    payload = canonical_json({"query": message, "service": service})
-    approval = scope.create_approval(
-        action="connector.fetch",
-        project_id="chat",
-        task_id="chat",
-        payload=payload,
-        meta={
-            "conversation_id": conversation_id,
-            "service": service,
-            "query": message,
-            "route": "connector_vm" if follow_vm else "connector",
-            "expected_revision": "chat",
-        },
+    from ssios.google_connector import member_session
+
+    if scope.account.get("role") != "member":
+        raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
+    tool, arguments, limits = _fetch_plan(message, decision.services[0])
+    proposed = scope.plane.google.propose_fetch(
+        member_session(scope.account_id),
+        project_id=scope.project_id(),
+        tool=tool,
+        arguments=arguments,
+        limits=limits,
     )
-    preview = f"Read-only {service} request. Nothing has been fetched.\n\n{message}"
-    scope.chat().append(conversation_id, {"role": "assistant", "text": preview, "approval_id": approval["id"]})
+    approval = proposed["approval"]
+    record = scope.plane.approvals.get(approval["id"])
+    preview = scope.plane.google.preview(record)
+    route_name = "connector_vm" if follow_vm else "connector"
+    scope.chat().append(
+        conversation_id,
+        {"role": "assistant", "text": preview, "approval_id": approval["id"], "route_name": route_name, "tool": tool},
+    )
     yield _approval_event(approval, preview)
+
+
+def _fetch_plan(message: str, service: str) -> tuple[str, dict, dict]:
+    limits = {"max_items": 5, "max_bytes": 4096, "include_body": False}
+    if service == "gmail":
+        return "gmail.search", {"q": ""}, {**limits, "labels": ["INBOX"]}
+    match = re.search(r"folder:([A-Za-z0-9_-]{8,})", message)
+    if not match:
+        raise SsiosError(
+            "connector_grant_denied",
+            "Drive search needs a folder id in the message, written as folder:FOLDER_ID",
+            400,
+        )
+    return "drive.search", {"q": "trashed = false"}, {**limits, "folder_ids": [match.group(1)]}
 
 
 def _vm(plane, scope: AccountScope, conversation_id: str, prompt: str, peer_ip: str) -> Iterator[dict]:
