@@ -243,6 +243,20 @@ def _bound_port(plane) -> int:
     return int(port)
 
 
+def browser_error_page(detail: str, status: int) -> Page:
+    """A normal page for a browser. API clients do not use this."""
+    safe = html.escape(detail or "The page could not be shown.")
+    body = (
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Something went wrong</title>"
+        + _STYLE
+        + "<body><main><h1>Something went wrong</h1><p>"
+        + safe
+        + "</p><p><a href=\"/ui/login\">Sign in</a> <a href=\"/ui/chat\">Chat</a> "
+        "<a href=\"/ui/connections\">Connections</a></p></main></body></html>"
+    )
+    return Page(status, body)
+
+
 def loopback_origins(port: int) -> set[str]:
     return {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
 
@@ -390,23 +404,22 @@ def _approvals(plane, session: dict) -> str:
             for record in plane.approvals.records()
             if record.get("status") == "pending" and record.get("action") not in ("connector.fetch", "connector.write")
         )
-    if account.get("role") == "member":
-        records.extend(
-            record
-            for record in plane.approvals.records()
-            if record.get("status") == "pending"
-            and record.get("action") in ("connector.fetch", "connector.write")
-            and _owns_google_fetch(plane, account["id"], record)
-        )
+    records.extend(
+        record
+        for record in plane.approvals.records()
+        if record.get("status") == "pending"
+        and record.get("action") in ("connector.fetch", "connector.write")
+        and _owns_google_fetch(plane, account["id"], record)
+    )
     records.extend(scope.list_pending())
     token = _human(plane)
     for record in records:
         if record.get("status") != "pending":
             continue
         if record.get("action") in ("connector.fetch", "connector.write"):
-            from ssios.google_connector import member_session
+            from ssios.google_connector import session_for_account
 
-            shown = plane.google.preview(record, member_session(account["id"]))
+            shown = plane.google.preview(record, session_for_account(account))
             kind = "approval danger" if shown.startswith("DESTRUCTIVE") else "approval"
             diff = html.escape(shown)
             rows.append(

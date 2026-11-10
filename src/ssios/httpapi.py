@@ -122,8 +122,17 @@ class AppHandler(BaseHTTPRequestHandler):
         raise SsiosError("not_found", "route not found", 404)
 
     def _ui(self) -> None:
-        body = self._form() if self.command == "POST" else {}
-        page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
+        try:
+            body = self._form() if self.command == "POST" else {}
+            page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
+        except SsiosError as exc:
+            if _ui_wants_html(self.headers):
+                from ssios.chat import english_connector_error
+                from ssios.ui import browser_error_page
+
+                page = browser_error_page(english_connector_error(exc), exc.status)
+            else:
+                raise
         if not isinstance(page, Page):
             raise SsiosError("internal", "internal error", 500)
         if page.stream is not None:
@@ -235,6 +244,20 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
+
+
+def _ui_wants_html(headers) -> bool:
+    """Browser page loads and form posts. Event streams and JSON clients stay JSON."""
+    accept = str(headers.get("Accept") or "").lower()
+    if "text/event-stream" in accept:
+        return False
+    if "application/json" in accept and "text/html" not in accept:
+        return False
+    if str(headers.get("X-Requested-With") or "").lower() == "xmlhttprequest" and "text/html" not in accept:
+        return False
+    if "text/html" in accept:
+        return True
+    return str(headers.get("Sec-Fetch-Mode") or "").lower() == "navigate"
 
 
 def _accepts_html(headers) -> bool:

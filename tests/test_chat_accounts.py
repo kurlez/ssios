@@ -758,6 +758,65 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Signed in as kent", chat)
         self.assertNotIn("Signed in as owner", chat)
 
+    def test_owner_admin_uses_own_connections_and_ui_errors_are_html(self) -> None:
+        status, content_type, body = self._open("/ui/connections", self.owner, "text/html")
+        self.assertEqual(status, 200, body)
+        self.assertIn("text/html", content_type)
+        text = body.decode()
+        self.assertIn("Signed in as owner", text)
+        self.assertIn("Connect gmail", text)
+        self.assertIn("Connect drive", text)
+        self.assertIn("Connect calendar", text)
+        self.assertNotIn("connector_admin_denied", text)
+        self.assertFalse(text.startswith("{"))
+        for path in ("/ui/chat", "/ui/memory?project_id=local-summary"):
+            status, content_type, page = self._open(path, self.owner, "text/html")
+            self.assertEqual(status, 200, page)
+            self.assertIn("text/html", content_type)
+            self.assertIn("Signed in as owner", page.decode())
+        status, content_type, denied = self._open("/ui/admin", self.ada, "text/html")
+        self.assertEqual(status, 403, denied)
+        self.assertIn("text/html", content_type)
+        self.assertIn(b"Something went wrong", denied)
+        self.assertIn(b"admin role required", denied)
+        self.assertNotIn(b'{"error"', denied)
+        status, content_type, raw = self._open("/ui/admin", self.ada, "application/json")
+        self.assertEqual(status, 403, raw)
+        self.assertTrue(raw.startswith(b"{"), raw)
+        self.assertIn(b"admin role required", raw)
+        self._install_and_connect(self._ada_id(), "gmail", "code-a")
+        pending = self._send(self.ada, "check my inbox")
+        status, _type, hidden = self._open("/ui/approvals", self.owner, "text/html")
+        self.assertEqual(status, 200, hidden)
+        self.assertNotIn(b"Read-only gmail.search", hidden)
+        approval = pending.split("/ui/approvals/", 1)[1].split('"', 1)[0]
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + approval,
+            {**self._binding(self.owner, pending, "approve")},
+            cookie=self.owner,
+            extra={"Accept": "text/html"},
+        )
+        self.assertEqual(status, 403, page)
+        self.assertIn("another account", page)
+        self.assertNotIn('{"error"', page)
+        self.assertIn("Something went wrong", page)
+        owner_id = self.plane.accounts.legacy_admin()["id"]
+        self.store.put(owner_id, "client-id", "client-owner")
+        self.store.put(owner_id, "client-secret", self.secret)
+        status, started, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.owner), "service": "drive", "op": "connect"},
+            cookie=self.owner,
+            extra={"Accept": "text/html"},
+        )
+        self.assertEqual(status, 200, started)
+        self.assertIn("Consent URL", started)
+        self.assertNotIn("connector_admin_denied", started)
+        self.assertIsNone(self.store.get(self._ada_id(), "drive-refresh"))
+        self.assertNotEqual(service_name(owner_id), service_name(self._ada_id()))
+
     def test_approved_cloud_text_reaches_the_guest_only_after_approval(self) -> None:
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
         pending = self._send(self.ada, "save my inbox into readme.md")
@@ -1101,6 +1160,14 @@ class HouseholdTest(PlaneTest):
         done = self._approve(self.ada, matched)
         self.assertIn("Deleted event ev0123456789abcf", done)
         self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "DELETE"]), 1)
+
+    def _open(self, path: str, cookie: str, accept: str) -> tuple[int, str, bytes]:
+        request = urllib.request.Request(self.base + path, headers={"Cookie": cookie, "Accept": accept})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.headers.get("Content-Type", ""), response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Content-Type", ""), exc.read()
 
     def _los_angeles(self) -> None:
         from dataclasses import replace
