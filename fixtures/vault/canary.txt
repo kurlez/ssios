@@ -1,0 +1,2 @@
+SYNTHETIC-VAULT-CANARY
+This file stands in for vault material. It is not a real credential.

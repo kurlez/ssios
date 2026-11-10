@@ -1,0 +1,68 @@
+# SSIOS development config sample. No credentials. `ssios init` writes real tokens into the state directory.
+# Bind to loopback by default. Do not change host to 0.0.0.0.
+
+profile = "dev"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[llm]
+# mock: deterministic, no network. ollama: local Ollama, no cloud fallback.
+provider = "mock"
+ollama_base_url = "http://127.0.0.1:11434"
+ollama_model = "llama3.1:8b"
+request_timeout_seconds = 60
+# Answer token cap. Thinking models are asked for think=false first so reasoning does not consume this budget.
+max_output_tokens = 1024
+# Context length. 8192 is the suggestion for a 7B summary. Note bodies are also truncated to max_note_chars before they reach the model.
+num_ctx = 8192
+max_note_chars = 6000
+# If the model output is not valid JSON, try once more. 0 means do not retry.
+summary_repair_retries = 1
+
+[runtime]
+# dev-guard is an in-process limit, not a microVM.
+# macos-vm uses krunvm. cloud-hypervisor boots a guest when the kernel and initramfs are present, otherwise it fails closed.
+backend = "dev-guard"
+cpus = 1
+memory_mb = 512
+kvm_path = "/dev/kvm"
+cloud_hypervisor_bin = "cloud-hypervisor"
+virtiofsd_bin = "virtiofsd"
+kernel_path = ""
+root_image_path = ""
+initramfs_path = ""
+echo_initramfs_path = ""
+krunvm_bin = "krunvm"
+# krunvm 0.2.7 stores the mount point in its own config. The default it prints is /Volumes/krunvm, and there is no matching environment variable.
+macos_vm_volume = "/Volumes/krunvm"
+# summary is the current guest summary worker. codex puts the pinned Codex CLI in the guest. The model is still served from the host.
+agent = "summary"
+# The first krunvm create pulls the image and does not consume the task timeout.
+guest_prepare_timeout_seconds = 600
+# Manifest digest of python:3.12-alpine, read from registry-1.docker.io on 2026-11-09.
+guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7"
+
+[agent.codex]
+# The provider name inside the guest config is fixed as ssios, not ollama. This field is only the model name.
+model = "qwen2.5-coder:7b"
+allow_models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
+max_requests = 4
+max_request_bytes = 200000
+# Codex's system prompt plus tools is about 4098 tokens. Ollama's /v1/responses ignores request options and keeps the 4096 default.
+# The proxy uses native /api/chat and sends options.num_ctx. Installed models are not modified. A 7B model on a 24GB M4 uses 16384, with a maximum of 32768.
+num_ctx = 16384
+
+[limits]
+task_timeout_seconds = 30
+max_tool_calls = 8
+max_output_bytes = 65536
+approval_ttl_seconds = 600
+core_token_budget = 2000
+
+[memory]
+# letta-memfs-compat: the compatibility library used when the Letta CLI is absent. It is not upstream MemFS.
+# letta-memfs-upstream: the pinned letta 0.34.45 local backend. If it is missing, fail. Do not fall back.
+mode = "letta-memfs-compat"
+letta_bin = ""

@@ -1,0 +1,22 @@
+{
+  "version": "0.167.0",
+  "tag": "rust-v0.167.0",
+  "verified": "2026-11-09",
+  "note": "Host-side prepare checks these hashes. The guest never downloads Codex.",
+  "assets": {
+    "x86_64": {
+      "archive": "codex-x86_64-unknown-linux-musl.tar.gz",
+      "archive_sha256": "9d64836106d5b374e90ee4454c7ebcde7ca7106558bd7e41a34b9f26ebda251a",
+      "binary": "codex-x86_64-unknown-linux-musl",
+      "binary_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-x86_64-unknown-linux-musl.tar.gz"
+    },
+    "aarch64": {
+      "archive": "codex-aarch64-unknown-linux-musl.tar.gz",
+      "archive_sha256": "843489acb4d4b1079745c36b03c5963b887b83155af208fd53584e33ee8eb281",
+      "binary": "codex-aarch64-unknown-linux-musl",
+      "binary_sha256": "2fe94d848540ff2a6868c7ebcc494126a974aa409711676d14fa0379e49e6143",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-aarch64-unknown-linux-musl.tar.gz"
+    }
+  }
+}

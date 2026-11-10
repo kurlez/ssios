@@ -1,0 +1,13 @@
+SSIOS
+Copyright (c) 2026 Kent Liu
+
+This repository is licensed under the MIT License. See LICENSE.
+
+Letta MemFS is the git-backed memory filesystem documented and implemented by
+Letta (https://github.com/letta-ai/letta-code, Apache License 2.0). SSIOS
+does not vendor that source. The local mode labeled letta-memfs-compat follows
+the public file layout: root Markdown is core memory, nested MEMORY.md
+directories are loaded on demand, and approved edits are git commits.
+
+The npm package named "memfs" is a different in-memory filesystem and is not
+used here.
