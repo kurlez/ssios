@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import gzip
 import io
+import os
+import stat
 import tarfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from ssios.codex_guest import UNIX_SOCKET_MAX, RequestBudget, ResponsesProxy, assert_unix_socket_path
 from ssios.errors import SsiosError
-from ssios.macos_vz import assert_no_nic, cpio_entries, pack_newc, pack_tar_bytes, vfkit_command
+from ssios.macos_vz import allocate_proxy_socket, assert_no_nic, cpio_entries, pack_newc, pack_tar_bytes, release_proxy_socket, vfkit_command
 
 
 class ArgvTest(unittest.TestCase):
@@ -52,6 +55,39 @@ class ArgvTest(unittest.TestCase):
                 cpus=1,
                 memory_mb=1536,
             )
+
+
+class SocketPathTest(unittest.TestCase):
+    def test_deep_state_dir_still_gets_a_short_socket(self) -> None:
+        deep = Path("/var/folders/qq/0123456789abcdef0123456789abcdef/T/ssios-vz-codex.Qx8f72/storage/tasks")
+        deep = deep / ("task-" + "ab" * 8) / "guest"
+        self.assertGreater(len(str(deep / "vfkit.vsock")), 104)
+        directory, path = allocate_proxy_socket(deep)
+        self.addCleanup(lambda: release_proxy_socket(directory))
+        self.assertTrue(str(path).startswith("/tmp/ssios-"))
+        self.assertLessEqual(len(os.fsencode(path)), UNIX_SOCKET_MAX)
+        self.assertNotIn("var", path.parts)
+        info = os.lstat(directory)
+        self.assertFalse(stat.S_ISLNK(info.st_mode))
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+        self.assertEqual(info.st_uid, os.getuid())
+        log = Path("/tmp/ssios-socket-log")
+        proxy = ResponsesProxy(path, "local", "mock-summary", RequestBudget(1, 1000), log, listen_path=path)
+        proxy.start()
+        try:
+            bound = os.lstat(path)
+            self.assertFalse(stat.S_ISLNK(bound.st_mode))
+            self.assertEqual(stat.S_IMODE(bound.st_mode), 0o600)
+            self.assertEqual(bound.st_uid, os.getuid())
+        finally:
+            proxy.close()
+        release_proxy_socket(directory)
+        self.assertFalse(directory.exists())
+
+    def test_socket_length_guard(self) -> None:
+        with self.assertRaises(SsiosError) as caught:
+            assert_unix_socket_path(Path("/tmp") / ("n" * 120) / "vsock")
+        self.assertEqual(caught.exception.code, "socket_path_too_long")
 
 
 class PackTest(unittest.TestCase):

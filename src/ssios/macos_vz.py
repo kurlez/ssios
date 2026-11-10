@@ -21,6 +21,7 @@ import posixpath
 import shutil
 import stat
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 
@@ -528,6 +529,58 @@ def _newc_header(name: str, mode: int, size: int, inode: int) -> bytes:
     return header + encoded + (b"\0" * pad)
 
 
+def allocate_proxy_socket(state_dir: Path | None = None) -> tuple[Path, Path]:
+    """Short AF_UNIX directory. macOS sun_path is 104 bytes, and /var/folders is longer than that.
+
+    ``state_dir`` is ignored on purpose. vfkit 0.6.4 ``listen`` means the host listens and the
+    guest connects, so this process binds the socket. ``/tmp`` may be a symlink to ``/private/tmp``;
+    the returned path is the one mkdtemp created, not a resolved path.
+    """
+    del state_dir
+    directory = Path(tempfile.mkdtemp(prefix="ssios-", dir="/tmp"))
+    try:
+        os.chmod(directory, 0o700)
+        info = os.lstat(directory)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise SsiosError("insecure_permissions", "proxy socket directory is not a real directory", 500)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise SsiosError("insecure_permissions", "proxy socket directory is not private", 500)
+        if directory.parent != Path("/tmp") or not directory.name.startswith("ssios-"):
+            raise SsiosError("insecure_permissions", "proxy socket directory is in the wrong place", 500)
+        path = directory / "vsock"
+        from ssios.codex_guest import assert_unix_socket_path
+
+        assert_unix_socket_path(path)
+        return directory, path
+    except Exception:
+        release_proxy_socket(directory)
+        raise
+
+
+def release_proxy_socket(directory: Path) -> None:
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        return
+    if directory.parent != Path("/tmp") or not directory.name.startswith("ssios-"):
+        return
+    socket_path = directory / "vsock"
+    try:
+        sock = os.lstat(socket_path)
+    except FileNotFoundError:
+        sock = None
+    if sock is not None and not stat.S_ISLNK(sock.st_mode) and sock.st_uid == os.getuid():
+        os.unlink(socket_path)
+    try:
+        directory.rmdir()
+    except OSError:
+        return
+
+
 def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None):
     del cancel
     import time
@@ -537,7 +590,10 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
 
     started = time.monotonic()
     budget = RequestBudget(runtime.settings.codex_max_requests, runtime.settings.codex_max_request_bytes)
-    vsock = session.root / "vfkit.vsock"
+    # vfkit 0.6.4 listen mode: this process binds the unix socket and the guest connects
+    # to vsock port 19090. No REST socket is configured. Homebrew vfkit is signed with
+    # com.apple.security.virtualization; this code does not re-sign it.
+    socket_dir, vsock = allocate_proxy_socket(session.root)
     proxy = ResponsesProxy(
         session.root / "vsock.sock",
         text,
@@ -553,6 +609,7 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
     records: list[dict] = []
     binary = runtime.binary()
     if not binary:
+        release_proxy_socket(socket_dir)
         return GuestOutcome("", False, runtime.name, None, "vfkit is not installed", records)
     try:
         proxy.start()
@@ -593,6 +650,7 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
         return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records)
     finally:
         proxy.close()
+        release_proxy_socket(socket_dir)
 
 
 def _reject_path(path: Path) -> None:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
+import stat
 import threading
 import time
 import traceback
@@ -742,8 +744,12 @@ class ControlPlane:
         except SsiosError as exc:
             self._save_diagnostic(task_id, exc)
             self._close_task(task_id, "failed", exc.code)
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            try:
+                self._save_internal_diagnostic(task_id, exc)
+            except Exception:
+                traceback.print_exc()
+                self._set_error_detail(task_id, f"{type(exc).__name__}: {exc}"[:500])
             self._close_task(task_id, "failed", "internal")
 
     def _finish(self, task_id: str, token: str, result: dict) -> None:
@@ -834,6 +840,9 @@ class ControlPlane:
 
     def _save_diagnostic(self, task_id: str, exc: SsiosError) -> None:
         payload = getattr(exc, "diagnostic", None)
+        if exc.code == "socket_path_too_long":
+            self._write_runtime_diagnostic(task_id, "socket_path_too_long", exc.detail, [])
+            return
         if not isinstance(payload, dict):
             self._set_error_detail(task_id, exc.detail)
             return
@@ -889,22 +898,84 @@ class ControlPlane:
                 }
             )
         detail = redact_text(str(payload.get("detail") or exc.detail), secrets)[:500]
+        self._write_runtime_diagnostic(task_id, "microvm", detail, commands, secrets)
+
+    def _save_internal_diagnostic(self, task_id: str, exc: BaseException) -> None:
+        secrets = self._task_secrets()
+        from ssios.vmguest import redact_text
+
+        detail = redact_text(f"{type(exc).__name__}: {exc}", secrets)[:500]
+        trace = redact_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-1500:], secrets)
+        self._write_runtime_diagnostic(task_id, "internal", detail, [], secrets, trace=trace)
+
+    def _task_secrets(self) -> list[str]:
+        found = []
+        for name in ("human", "worker"):
+            try:
+                secret = self.auth.read_secret(name)
+            except (SsiosError, OSError):
+                secret = ""
+            if secret:
+                found.append(secret)
+        return found
+
+    def _write_runtime_diagnostic(
+        self,
+        task_id: str,
+        classification: str,
+        detail: str,
+        commands: list,
+        secrets: list[str] | None = None,
+        trace: str = "",
+    ) -> None:
+        if not re.fullmatch(r"task-[0-9a-f]{16}", task_id):
+            self._set_error_detail(task_id, detail)
+            return
+        from ssios.vmguest import redact_text
+
+        hidden = self._task_secrets() if secrets is None else secrets
+        serial_path, serial_tail = self._serial_evidence(task_id, hidden)
         directory = self.settings.state_dir / "diagnostics"
         secure_mkdir(directory)
         path = directory / f"{task_id}.json"
-        write_json(
-            path,
-            {"task_id": task_id, "classification": "microvm", "detail": detail, "commands": commands},
-            0o600,
-        )
+        body = {
+            "task_id": task_id,
+            "classification": classification,
+            "detail": redact_text(detail, hidden)[:500],
+            "commands": commands,
+            "serial_log": serial_path,
+            "serial_tail": serial_tail,
+        }
+        if trace:
+            body["traceback"] = trace
+        write_json(path, body, 0o600)
         with self.lock:
             task = self.tasks.get(task_id)
             if task is None:
                 return
             task["diagnostic_path"] = str(path)
-            task["diagnostic_class"] = "microvm"
-            task["error_detail"] = detail
+            task["diagnostic_class"] = classification
+            task["error_detail"] = body["detail"]
             self._persist_tasks()
+
+    def _serial_evidence(self, task_id: str, secrets: list[str]) -> tuple[str, str]:
+        from ssios.vmguest import redact_text
+
+        path = self.settings.state_dir / "storage" / "tasks" / task_id / "guest" / "serial.log"
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            return "", ""
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return "", ""
+            if info.st_size > 2000:
+                os.lseek(fd, -2000, os.SEEK_END)
+            text = os.read(fd, 2000).decode("utf-8", "replace")
+        finally:
+            os.close(fd)
+        return str(path), redact_text(text, secrets)
 
     def _set_error_detail(self, task_id: str, detail: str) -> None:
         with self.lock:

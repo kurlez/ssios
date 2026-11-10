@@ -24,6 +24,7 @@ import os
 import platform
 import shutil
 import socket
+import stat
 import tarfile
 import threading
 import time
@@ -384,6 +385,27 @@ def error_response(status: int, reason: str) -> bytes:
     return header.encode("ascii") + body
 
 
+UNIX_SOCKET_MAX = 100
+
+
+def assert_unix_socket_path(path: Path) -> None:
+    text = os.fspath(path)
+    if "\x00" in text or len(os.fsencode(text)) > UNIX_SOCKET_MAX:
+        raise SsiosError("socket_path_too_long", "AF_UNIX path exceeds 100 bytes", 500)
+
+
+def _private_directory(path: Path) -> os.stat_result:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise SsiosError("insecure_permissions", "AF_UNIX directory is missing", 500) from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SsiosError("insecure_permissions", "AF_UNIX directory is not a real directory", 500)
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        raise SsiosError("insecure_permissions", "AF_UNIX directory is not private", 500)
+    return info
+
+
 class ResponsesProxy:
     """Host side of the vsock. Cloud Hypervisor connects to ``socket``_``port``."""
 
@@ -416,11 +438,31 @@ class ResponsesProxy:
         self._server: socket.socket | None = None
 
     def start(self) -> None:
-        if self.listen_path.exists():
-            self.listen_path.unlink()
+        assert_unix_socket_path(self.listen_path)
+        _private_directory(self.listen_path.parent)
+        try:
+            current = os.lstat(self.listen_path)
+        except FileNotFoundError:
+            current = None
+        if current is not None:
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISSOCK(current.st_mode):
+                raise SsiosError("insecure_permissions", "AF_UNIX path is not a socket", 500)
+            if current.st_uid != os.getuid():
+                raise SsiosError("insecure_permissions", "AF_UNIX socket is not owned by this user", 500)
+            os.unlink(self.listen_path)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(self.listen_path))
+        try:
+            server.bind(os.fspath(self.listen_path))
+        except OSError as exc:
+            server.close()
+            if "too long" in str(exc).lower():
+                raise SsiosError("socket_path_too_long", "AF_UNIX path exceeds 100 bytes", 500) from exc
+            raise
         os.chmod(self.listen_path, 0o600)
+        bound = os.lstat(self.listen_path)
+        if stat.S_ISLNK(bound.st_mode) or bound.st_uid != os.getuid() or stat.S_IMODE(bound.st_mode) != 0o600:
+            server.close()
+            raise SsiosError("insecure_permissions", "AF_UNIX socket is not private", 500)
         server.listen(4)
         server.settimeout(0.2)
         self._server = server

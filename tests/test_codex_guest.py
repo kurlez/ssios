@@ -325,6 +325,41 @@ class FailClosedTest(PlaneTest):
         self.assertIn("vm-prepare", task.get("error_detail") or "")
         self.assertFalse(any((self.state / "cache").rglob("*.tar.gz")))
 
+    def test_internal_exception_writes_a_diagnostic(self) -> None:
+        self.plane.settings = replace(self.plane.settings, runtime_backend="macos-vm")
+
+        class Boom:
+            name = "macos-vm"
+
+            def can_launch(self) -> bool:
+                return True
+
+            def run(self, session, cancel, deadline):
+                del cancel, deadline
+                (session.root / "serial.log").write_text("console: booted\n" + self_token + "\n", encoding="utf-8")
+                raise RuntimeError("AF_UNIX path too long " + self_token)
+
+        self_token = self.human
+        self.plane.guest_runtime = Boom()
+        code, created, _headers = self.call(
+            "POST",
+            "/v1/tasks",
+            token=self.human,
+            body={"project_id": "demo-alpha", "kind": "project-summary", "input_revision": "exp-1", "input_path": "notes.md"},
+        )
+        self.assertEqual(code, 202, created)
+        task = wait_task(self.base, self.human, created["id"], {"failed"})
+        self.assertEqual(task["error_code"], "internal")
+        self.assertIn("RuntimeError", task.get("error_detail") or "")
+        self.assertNotIn(self.human, task.get("error_detail") or "")
+        diagnostic = Path(task["diagnostic_path"])
+        text = diagnostic.read_text(encoding="utf-8")
+        self.assertNotIn(self.human, text)
+        self.assertIn("console: booted", text)
+        self.assertIn("serial.log", text)
+        self.assertIn("AF_UNIX path too long", text)
+        self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
+
 
 class PrepareSkip(unittest.TestCase):
     def test_prepare_is_not_called_from_unit_tests(self) -> None:
