@@ -43,4 +43,4 @@ vsock 的宿主机套接字不放在状态目录里。macOS 的 `sun_path` 只�
 
 钉住的 `Image-arm64`（Linux 7.2.8）已经包含 virtio-vsock 和 virtio-fs。M4 上的串口日志有 `NET: Registered PF_VSOCK protocol family`。失败点是 python-build-standalone 的 CPython 3.12.16 musl 没有编译 `socket.AF_VSOCK`。中继用协议族 40，并通过 musl 的 `connect` 发送 16 字节的 `sockaddr_vm`。客户机在启动后几秒内自检；60 秒内没有 vsock 连接就停掉 vfkit。
 
-把打印出来的 `status`、`isolated`、`boot_ms`、`nic`、`outbound`、`marker`、`outside_write` 和 `sandbox_denied` 发回来。`nic` 应该只有 `lo`，`outbound` 为 false，`outside_write` 为 false，`argv_has_virtio_net` 为 false。在收到这台 Mac 的输出之前，仓库不把这次路径记成已经成功。
+客户机在 Codex 跑完之后，再用同一个 `workspace-write` 沙箱执行一次固定探测：写入 `/workspace/marker.txt`，并尝试写 `/opt/ssios-outside`。这一步不调用模型。冒烟只有在 `awaiting_approval`、`isolated` 为 true、`marker` 为 true、`sandbox_denied` 为 true、`outside_write` 为 false、`nic` 只有 `lo`、`outbound` 为 false 时才通过。缺标记是 `probe_marker_missing`，沙箱没有拒绝外部写入是 `probe_sandbox_not_denied`。

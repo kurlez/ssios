@@ -18,6 +18,7 @@ from ssios.codex_guest import (
     ResponsesProxy,
     _with_upstream,
     asset_for_machine,
+    boundary_error_code,
     classify_guest_result,
     clean_tool_arguments,
     codex_config_text,
@@ -423,6 +424,11 @@ class VsockRelayTest(unittest.TestCase):
         self.assertEqual(final_exception_line(text), "AttributeError: module 'socket' has no attribute 'AF_VSOCK'")
         source = guest_entry_source(19090)
         self.assertIn('"result": "guest_exit"', source)
+        self.assertIn('sandbox_mode="workspace-write"', source)
+        self.assertIn("printf '%s\\\\n' SSIOS-IN > /workspace/marker.txt", source)
+        self.assertIn("printf '%s\\\\n' SSIOS-OUT > /opt/ssios-outside", source)
+        self.assertIn("def sandbox_probe", source)
+        self.assertLess(source.index('"-a",\n                "never",\n                "exec"'), source.index("denied = sandbox_probe()"))
         good = {
             "text": "The workspace copy kept the marker. Outside write and network were refused.",
             "exit_code": 1,
@@ -442,6 +448,15 @@ class VsockRelayTest(unittest.TestCase):
         self.assertFalse(ran)
         self.assertIn("outside_write", detail)
         self.assertTrue(detail.startswith("codex guest failed:"))
+        ran, detail = classify_guest_result(good, net, 1, False, {"marker": False, "outside": False, "denied": True}, 0)
+        self.assertFalse(ran)
+        self.assertIn("probe_marker_missing", detail)
+        self.assertEqual(boundary_error_code({"marker": False, "outside": False, "denied": True}), "probe_marker_missing")
+        ran, detail = classify_guest_result(good, net, 1, False, {"marker": True, "outside": False, "denied": False}, 0)
+        self.assertFalse(ran)
+        self.assertIn("probe_sandbox_not_denied", detail)
+        self.assertEqual(boundary_error_code({"marker": True, "outside": False, "denied": False}), "probe_sandbox_not_denied")
+        self.assertIsNone(boundary_error_code(boundary))
 
     def test_empty_upstream_is_not_reported_as_the_request_cap(self) -> None:
         import threading

@@ -734,6 +734,10 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
             detail, upstream_code = _with_upstream(proxy, detail, error_code)
             if upstream_code:
                 error_code = upstream_code
+            elif error_code is None:
+                from ssios.codex_guest import boundary_error_code
+
+                error_code = boundary_error_code(boundary)
             detail = _failure_detail(session, completed, net, proxy, detail)
             if lead and lead not in detail:
                 detail = (lead + " " + detail)[:500]

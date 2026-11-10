@@ -1165,6 +1165,8 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
         )
         if not ran:
             detail, error_code = _with_upstream(proxy, detail, None)
+            if error_code is None:
+                error_code = boundary_error_code(boundary)
             detail = _failure_detail(session, completed, net, proxy, detail)
         else:
             error_code = None
@@ -1206,6 +1208,17 @@ def _with_upstream(proxy, detail: str, error_code: str | None) -> tuple[str, str
     return detail, str(failure["error"])
 
 
+def boundary_error_code(boundary) -> str | None:
+    """Error code for the deterministic sandbox probes. None means both probes passed."""
+    if isinstance(boundary, dict) and boundary.get("outside") is True:
+        return "outside_write"
+    if not isinstance(boundary, dict) or boundary.get("marker") is not True:
+        return "probe_marker_missing"
+    if boundary.get("denied") is not True:
+        return "probe_sandbox_not_denied"
+    return None
+
+
 def classify_guest_result(output, net, served: int, rejected: bool, boundary, vmm_exit: int | None = None) -> tuple[bool, str]:
     """Say whether the guest result may be approved. The VMM process status is not an isolation check."""
     reasons = []
@@ -1224,8 +1237,9 @@ def classify_guest_result(output, net, served: int, rejected: bool, boundary, vm
         reasons.append("proxy_served=0")
     if rejected:
         reasons.append("proxy_rejected")
-    if isinstance(boundary, dict) and boundary.get("outside") is True:
-        reasons.append("outside_write")
+    probe_code = boundary_error_code(boundary)
+    if probe_code:
+        reasons.append(probe_code)
     if not reasons:
         return True, "guest wrote output.json"
     if vmm_exit not in (0, None):
@@ -1583,6 +1597,45 @@ def message_from_events(path):
     return found
 
 
+def sandbox_probe():
+    # Same Codex workspace-write profile as `codex exec --sandbox workspace-write`.
+    # The command does not call the model. It always writes the workspace marker
+    # and attempts the outside write so the denial does not depend on the model.
+    env = os.environ.copy()
+    env["CODEX_HOME"] = "/scratch/codex-home"
+    env["HOME"] = "/scratch"
+    env["PATH"] = "/usr/bin:/bin:/tools"
+    completed = subprocess.run(
+        [
+            "/tools/codex",
+            "-c",
+            'sandbox_mode="workspace-write"',
+            "sandbox",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' SSIOS-IN > /workspace/marker.txt; printf '%s\\n' SSIOS-OUT > /opt/ssios-outside",
+        ],
+        cwd="/workspace",
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    err = completed.stderr.decode("utf-8", "replace")
+    try:
+        handle = open("/scratch/probe.err", "w", encoding="utf-8")
+        handle.write(err[-1000:])
+        handle.close()
+    except OSError:
+        pass
+    return (
+        "Operation not permitted" in err
+        or "Read-only file system" in err
+        or "Permission denied" in err
+    )
+
+
 def netcheck():
     names = sorted(os.listdir("/sys/class/net"))
     outbound = False
@@ -1658,18 +1711,23 @@ def main():
         handle.write(json.dumps(result))
         handle.flush()
         os.fsync(handle.fileno())
-    denied = False
-    for folder, _dirs, files in os.walk("/scratch/codex-home"):
-        for name in files:
-            if not name.endswith(".jsonl"):
-                continue
-            try:
-                blob = open(os.path.join(folder, name), encoding="utf-8", errors="replace").read()
-            except OSError:
-                continue
-            if "Operation not permitted" in blob or "Read-only file system" in blob or "Permission denied" in blob:
-                denied = True
-    marker = os.path.exists("/workspace/marker.txt")
+    try:
+        denied = sandbox_probe()
+    except Exception as exc:
+        denied = False
+        try:
+            handle = open("/scratch/probe.err", "w", encoding="utf-8")
+            handle.write(repr(exc))
+            handle.close()
+        except OSError:
+            pass
+    marker = False
+    try:
+        handle = open("/workspace/marker.txt", encoding="utf-8")
+        marker = handle.read() == "SSIOS-IN\n"
+        handle.close()
+    except OSError:
+        marker = False
     outside = os.path.exists("/opt/ssios-outside")
     with open("/scratch/boundary.json", "w", encoding="utf-8") as handle:
         handle.write(json.dumps({

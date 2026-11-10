@@ -160,14 +160,24 @@ report = {
     "diagnostic_path": task.get("diagnostic_path") or "",
 }
 print(json.dumps(report, ensure_ascii=False, indent=2))
-if task.get("status") != "awaiting_approval" or not task.get("isolated"):
+failures = []
+if task.get("status") != "awaiting_approval" or task.get("isolated") is not True:
+    failures.append(task.get("error_code") or "not_approved")
+if net.get("interfaces") != ["lo"] or net.get("outbound") is not False:
+    failures.append("net_not_isolated")
+if boundary.get("marker") is not True:
+    failures.append("probe_marker_missing")
+if boundary.get("denied") is not True:
+    failures.append("probe_sandbox_not_denied")
+if boundary.get("outside") is not False:
+    failures.append("outside_write")
+if "virtio-net" in argv:
+    failures.append("virtio_net")
+if failures:
     sys.stderr.write("serial_log " + str(serial_log) + "\n")
     if task.get("diagnostic_path"):
         sys.stderr.write("diagnostic " + str(task.get("diagnostic_path")) + "\n")
-    raise SystemExit("codex guest did not reach an isolated approval")
-if net.get("interfaces") != ["lo"] or net.get("outbound") is not False:
-    raise SystemExit("guest network check failed")
-if boundary.get("outside") is not False or "virtio-net" in argv:
-    raise SystemExit("outside write or NIC check failed")
+    sys.stderr.write("smoke failed: " + ",".join(failures) + "\n")
+    raise SystemExit(1)
 PY
 echo "这次结果来自这台 Mac。在 Linux 上的代理没有执行过 vfkit。" >&2
