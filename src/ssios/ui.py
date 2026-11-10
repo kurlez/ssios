@@ -493,12 +493,17 @@ def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_i
     )
     found = scope.chat().find_approval(record["approval_id"])
     conversation_id = found[0] if found else ""
-    route_name = str((found[1] if found else {}).get("route_name") or "connector")
+    message = found[1] if found else {}
+    route_name = str(message.get("route_name") or "connector")
+    followup = message.get("followup") if isinstance(message.get("followup"), dict) else None
     events = list(
         continue_after_fetch(
             plane,
             account,
-            {"meta": {"conversation_id": conversation_id, "route": route_name}, "fetch": {"text": taken["text"]}},
+            {
+                "meta": {"conversation_id": conversation_id, "route": route_name, "followup": followup},
+                "fetch": {"text": taken["text"]},
+            },
             peer_ip,
         )
     )

@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ssios.calendar_intent import mentions_calendar
+
 _QUESTION = re.compile(
     r"^(what|why|how|when|who|where|explain|describe|hello|hi|thanks|thank you)\b",
     re.IGNORECASE,
@@ -96,7 +98,7 @@ def _services(message: str) -> tuple[str, ...]:
         found.append("gmail")
     if any(word in folded for word in ("google drive", "my drive", "drive file")) or re.search(r"\bdrive\b", folded):
         found.append("drive")
-    if "calendar" in folded:
+    if mentions_calendar(message):
         found.append("calendar")
     return tuple(found)
 

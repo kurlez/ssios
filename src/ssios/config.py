@@ -5,6 +5,7 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ssios.errors import SsiosError
 
@@ -54,6 +55,7 @@ class Settings:
     connector_max_calls: int
     connector_max_bytes: int
     ui_bind: str
+    ui_time_zone: str
     state_dir: Path
     config_path: Path | None
 
@@ -183,6 +185,12 @@ def load_settings(
         ui_bind = "127.0.0.1"
     if ui_bind not in ("127.0.0.1", "0.0.0.0"):
         raise SsiosError("config_invalid", "ui bind must be 127.0.0.1 or 0.0.0.0", 500)
+    ui_time_zone = str(ui.get("time_zone", "") or "")
+    if ui_time_zone:
+        try:
+            ZoneInfo(ui_time_zone)
+        except ZoneInfoNotFoundError as exc:
+            raise SsiosError("config_invalid", "ui time_zone must be an IANA time zone name", 500) from exc
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -236,6 +244,7 @@ def load_settings(
         connector_max_calls=connector_max_calls,
         connector_max_bytes=connector_max_bytes,
         ui_bind=ui_bind,
+        ui_time_zone=ui_time_zone,
         state_dir=state_path,
         config_path=config_path,
     )

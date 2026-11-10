@@ -79,6 +79,15 @@ class ChatStore:
             raise SsiosError("not_found", "conversation not found", 404)
         return data
 
+    def set_pending(self, conv_id: str, pending: dict | None) -> None:
+        record = self.get(conv_id)
+        if pending is None:
+            record.pop("pending_pick", None)
+        else:
+            record["pending_pick"] = pending
+        record["updated_at"] = time.time()
+        self._write(record)
+
     def append(self, conv_id: str, message: dict) -> dict:
         record = self.get(conv_id)
         message = dict(message)

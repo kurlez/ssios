@@ -70,14 +70,16 @@ PYTHONPATH=src python3 -m ssios oauth-install-client \
 
 In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows a consent URL. Open that URL in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. A browser on another computer cannot finish that redirect. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected.
 
+In the config copy, set `[ui] time_zone = "America/Los_Angeles"` and `[llm] ollama_model = "qwen2.5:7b"`. That local model reads Chinese and English calendar sentences. Do not point it at a cloud model. If the model is down, or its JSON is still invalid after one retry, chat says so in English and nothing is read or changed. You can then use the explicit form, for example `list calendar events calendar:primary from:2026-11-10T00:00:00Z to:2026-11-17T00:00:00Z`.
+
 Then, still as `ada`:
 
 - Send `check my inbox`. Approve the card. The model answer stays on this Mac. The approval card appears before any Gmail call.
 - Send `list files in drive folder:YOUR_FOLDER_ID`, using a folder id from your own Drive. Approve the card before Drive is called.
-- Send `list calendar events calendar:primary from:2026-11-10T00:00:00Z to:2026-11-17T00:00:00Z`. That is a 7-day window. Approve it before Calendar is called. A window longer than 31 days is refused in English and does not create an approval.
-- Send `create calendar event title:SSIOS-test start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC calendar:primary send:none`. The card shows the title, start, end, time zone, and that attendees are not emailed. Approve once. The page says created and the event id. Approving again does not create a second event.
-- Send an update with `send:all` only if you intend to email attendees. The card shows the before and after text. If the event changed in Google after the card was created, the update is not sent.
-- Send `delete calendar event ... send:none` with the event id from the create step. The card is marked destructive. Deny it if you want to keep the event. An expired card does nothing.
+- Send `What's on my calendar next week?` or `这周我有什么安排`. The card shows an absolute window in America/Los_Angeles. Approve it before Calendar is called. A window longer than 31 days is refused in English and does not create an approval.
+- Send `下周三下午三点和张三开会一小时`. The card shows the resolved Wednesday, 15:00 to 16:00, the time zone, and 张三 in the title or description. It does not invent an email address, and it says attendees are not emailed. Approve once. The page says created and the event id. Approving again does not create a second event.
+- Send `把周五的牙医改到下午四点`. The first card is only a read for that Friday. Approve it. If several events match, reply with a number. The second card shows the absolute before and after times. Approving that card is what changes the event. If the event changed in Google after the card was created, the update is not sent.
+- Send `取消明天的站会`. Approve the read, then approve the destructive card if it is the right event. Deny it if you want to keep the event. An expired card does nothing.
 
 Sign in as `owner`. Admin shows Gmail, Drive, and Calendar as yes or no, plus connected_at. It does not show message text, file text, event titles, or a token. A second household account cannot see `ada`'s cards either. Only `ada` can approve them.
 

@@ -292,9 +292,10 @@ def _chat_payload(
     think: bool | None,
     num_ctx: int = 8192,
     schema_hint: bool = True,
+    hint_schema: dict | None = None,
 ) -> dict:
     grounded = []
-    schema_note = "JSON schema for the answer content: " + json.dumps(TASK_OUTPUT_SCHEMA, separators=(",", ":"))
+    schema_note = "JSON schema for the answer content: " + json.dumps(hint_schema or TASK_OUTPUT_SCHEMA, separators=(",", ":"))
     for message in _to_ollama(messages):
         content = message["content"]
         if schema_hint and not grounded and message.get("role") == "system":
@@ -552,6 +553,22 @@ class MockLLM:
                 raise FlowInterrupt("timeout")
             yield part if index == len(parts) - 1 else part + " "
 
+    def extract_calendar_intent(self, message: str, *, deadline: float, repair: bool = False):
+        """Fake local extractor. Tests can set intent_script to a list of replies."""
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        script = getattr(self, "intent_script", None)
+        if script is not None:
+            if not script:
+                return "not-json"
+            item = script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        from ssios.calendar_intent import scripted_intent
+
+        return scripted_intent(message)
+
 
 class OllamaLLM:
     provider = "ollama"
@@ -680,6 +697,33 @@ class OllamaLLM:
 
     def complete_chat(self, messages: list[dict], *, cancel_event, deadline: float) -> str:
         return "".join(self.stream_chat(messages, cancel_event=cancel_event, deadline=deadline)).strip()
+
+    def extract_calendar_intent(self, message: str, *, deadline: float, repair: bool = False) -> str:
+        """Local Ollama only. One caller retries once. There is no cloud fallback."""
+        from ssios.calendar_intent import INTENT_SCHEMA, intent_messages
+
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        think = False if self._supports_think_false(deadline) else None
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = _chat_payload(
+            self.model,
+            intent_messages(message, repair=repair),
+            INTENT_SCHEMA,
+            num_predict=min(self.max_output_tokens, 512),
+            think=think,
+            num_ctx=self.num_ctx,
+            hint_schema=INTENT_SCHEMA,
+        )
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
+        except SsiosError as exc:
+            if exc.code == "llm_unavailable" and "timed out" in exc.detail and time.monotonic() >= deadline:
+                raise FlowInterrupt("timeout") from exc
+            raise
+        answer = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = answer.get("content") if isinstance(answer.get("content"), str) else ""
+        return content
 
     def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
         """Stream native /api/chat. There is no cloud fallback."""

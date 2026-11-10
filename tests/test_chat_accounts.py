@@ -19,11 +19,23 @@ from ssios.secret_store import MemorySecretStore, service_name
 from test_google_connector import _Google
 
 
+def _event(event_id: str, title: str, start: str, end: str) -> dict:
+    return {
+        "id": event_id,
+        "summary": title,
+        "description": "",
+        "location": "",
+        "start": {"dateTime": start, "timeZone": "America/Los_Angeles"},
+        "end": {"dateTime": end, "timeZone": "America/Los_Angeles"},
+    }
+
+
 class _CalendarApi(_Google):
     """Local Google stand-in that also answers Calendar."""
 
     writes: list[dict] = []
     mismatch = False
+    listed = None
 
     def do_GET(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
@@ -56,15 +68,23 @@ class _CalendarApi(_Google):
         if method == "GET" and path.endswith("/calendarList"):
             payload = {"items": [{"id": "primary", "summary": "Primary"}]}
         elif method == "GET" and "/events/" in path:
-            title = "Other" if self.mismatch else "Standup"
-            payload = {
-                "id": path.rsplit("/", 1)[-1],
-                "summary": title,
-                "start": {"dateTime": "2026-11-12T15:00:00Z", "timeZone": "UTC"},
-                "end": {"dateTime": "2026-11-12T15:30:00Z", "timeZone": "UTC"},
-            }
+            event_id = path.rsplit("/", 1)[-1]
+            listed = [item for item in (_CalendarApi.listed or []) if item.get("id") == event_id]
+            if listed:
+                payload = listed[0]
+            else:
+                title = "Other" if self.mismatch else "Standup"
+                payload = {
+                    "id": event_id,
+                    "summary": title,
+                    "start": {"dateTime": "2026-11-12T15:00:00Z", "timeZone": "UTC"},
+                    "end": {"dateTime": "2026-11-12T15:30:00Z", "timeZone": "UTC"},
+                }
         elif method == "GET":
-            payload = {"items": [{"id": "ev0123456789abcd", "summary": "Standup", "start": {"dateTime": "2026-11-12T15:00:00Z"}, "end": {"dateTime": "2026-11-12T15:30:00Z"}}]}
+            if _CalendarApi.listed is not None:
+                payload = {"items": _CalendarApi.listed}
+            else:
+                payload = {"items": [{"id": "ev0123456789abcd", "summary": "Standup", "start": {"dateTime": "2026-11-12T15:00:00Z"}, "end": {"dateTime": "2026-11-12T15:30:00Z"}}]}
         elif method == "DELETE":
             self.send_response(204)
             self.end_headers()
@@ -123,6 +143,18 @@ class RouterTest(PlaneTest):
         self.assertEqual(calendar.route, "connector")
         self.assertEqual(calendar.services, ("calendar",))
         self.assertEqual(classify("what is a calendar?").route, "direct")
+        for phrase in (
+            "这周我有什么安排",
+            "明天下午有空吗",
+            "下周三下午三点和张三开会一小时",
+            "把周五的牙医改到下午四点",
+            "取消明天的站会",
+            "What's on my calendar next week?",
+        ):
+            routed = classify(phrase)
+            self.assertEqual(routed.route, "connector", phrase)
+            self.assertEqual(routed.services, ("calendar",), phrase)
+        self.assertEqual(classify("edit readme.md").route, "vm")
         mail = classify("check my inbox")
         self.assertEqual(mail.route, "connector")
         self.assertEqual(mail.services, ("gmail",))
@@ -212,6 +244,7 @@ class HouseholdTest(PlaneTest):
         _CalendarApi.seen = []
         _CalendarApi.writes = []
         _CalendarApi.mismatch = False
+        _CalendarApi.listed = None
         self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _CalendarApi)
         self.addCleanup(self.google_http.server_close)
         thread = threading.Thread(target=self.google_http.serve_forever, daemon=True)
@@ -250,11 +283,14 @@ class HouseholdTest(PlaneTest):
         _status, page = _get(self.base, "/ui/chat", cookie)
         return page.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
-    def _send(self, cookie: str, message: str, override: str = "auto") -> str:
+    def _send(self, cookie: str, message: str, override: str = "auto", conversation: str = "") -> str:
+        payload = {"csrf": self._csrf(cookie), "message": message, "override": override}
+        if conversation:
+            payload["conversation"] = conversation
         status, page, _cookie = _form(
             self.base,
             "/ui/chat/send",
-            {"csrf": self._csrf(cookie), "message": message, "override": override},
+            payload,
             cookie=cookie,
         )
         self.assertEqual(status, 200, page)
@@ -704,6 +740,119 @@ class HouseholdTest(PlaneTest):
         self.assertIn("calendar yes", admin)
         self.assertNotIn("Standup", admin)
         self.assertNotIn(self.secret, admin)
+
+    def test_natural_language_calendar_examples_need_approval(self) -> None:
+        from ssios.errors import SsiosError
+
+        self._install_and_connect(self._ada_id(), "calendar", "code-a")
+        self._los_angeles()
+        _CalendarApi.writes.clear()
+        week = self._send(self.ada, "这周我有什么安排")
+        self.assertIn("Route: connector", week)
+        self.assertNotIn("Route: vm", week)
+        self.assertIn("2026-11-09T00:00:00-08:00", week)
+        self.assertIn("2026-11-16T00:00:00-08:00", week)
+        self.assertIn("Monday 00:00", week)
+        afternoon = self._send(self.ada, "明天下午有空吗")
+        self.assertIn("2026-11-11T13:00:00-08:00", afternoon)
+        self.assertIn("2026-11-11T17:00:00-08:00", afternoon)
+        nxt = self._send(self.ada, "What's on my calendar next week?")
+        self.assertIn("Route: connector", nxt)
+        self.assertIn("2026-11-16T00:00:00-08:00", nxt)
+        self.assertIn("2026-11-23T00:00:00-08:00", nxt)
+        created = self._send(self.ada, "下周三下午三点和张三开会一小时")
+        self.assertIn("2026-11-18T15:00:00-08:00", created)
+        self.assertIn("2026-11-18T16:00:00-08:00", created)
+        self.assertIn("America/Los_Angeles", created)
+        self.assertIn("张三", created)
+        self.assertIn("Attendees: (none)", created)
+        self.assertIn("Attendees are not emailed", created)
+        self.assertNotIn("@", created)
+        self.assertEqual(_CalendarApi.writes, [])
+        self.plane.llm.intent_script = ["nope"]
+        explicit = self._send(
+            self.ada,
+            "create calendar event title:Standup start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC calendar:primary send:none",
+        )
+        self.assertIn("Create event", explicit)
+        self.assertIn("Standup", explicit)
+        self.assertEqual(self.plane.llm.intent_script, ["nope"])
+        self.plane.llm.intent_script = ["nope", "still-nope"]
+        status, failed, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "这周我有什么安排"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 400, failed)
+        self.assertIn("explicit form", failed)
+        self.assertIn("Nothing was read or changed", failed)
+        self.plane.llm.intent_script = [SsiosError("llm_unavailable", "down", 503)]
+        status, down, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "取消明天的站会"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 400, down)
+        self.assertIn("Nothing was read or changed", down)
+        self.assertEqual(_CalendarApi.writes, [])
+
+    def test_natural_language_update_and_delete_ask_before_writing(self) -> None:
+        self._install_and_connect(self._ada_id(), "calendar", "code-a")
+        self._los_angeles()
+        _CalendarApi.listed = [
+            _event("ev0123456789abcd", "牙医", "2026-11-13T09:00:00-08:00", "2026-11-13T10:00:00-08:00"),
+            _event("ev0123456789abce", "牙医复查", "2026-11-13T11:00:00-08:00", "2026-11-13T12:00:00-08:00"),
+        ]
+        _CalendarApi.writes.clear()
+        listed = self._send(self.ada, "把周五的牙医改到下午四点")
+        self.assertIn("2026-11-13T00:00:00-08:00", listed)
+        self.assertNotIn("Today is that weekday", listed)
+        self.assertEqual(_CalendarApi.writes, [])
+        found = self._approve(self.ada, listed)
+        self.assertIn("Several events match", found)
+        self.assertIn("Reply with a number", found)
+        self.assertNotIn("Update event", found)
+        self.assertFalse(any(item["method"] == "PUT" for item in _CalendarApi.writes))
+        conversation = found.split('class="conversation">', 1)[1].split("<", 1)[0]
+        chosen = self._send(self.ada, "2", conversation=conversation)
+        self.assertIn("Update event", chosen)
+        self.assertIn("ev0123456789abce", chosen)
+        self.assertNotIn("ev0123456789abcd", chosen)
+        self.assertIn("2026-11-13T16:00:00-08:00", chosen)
+        self.assertIn("Attendees are not emailed", chosen)
+        self.assertFalse(any(item["method"] == "PUT" for item in _CalendarApi.writes))
+        saved = self._approve(self.ada, chosen)
+        self.assertIn("Updated event ev0123456789abce", saved)
+        puts = [item for item in _CalendarApi.writes if item["method"] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"].get("summary"), "牙医复查")
+        self.assertEqual(puts[0]["body"].get("attendees"), [])
+        _CalendarApi.listed = [
+            _event("ev0123456789abcf", "站会", "2026-11-11T09:00:00-08:00", "2026-11-11T09:15:00-08:00"),
+        ]
+        _CalendarApi.writes.clear()
+        removal = self._send(self.ada, "取消明天的站会")
+        self.assertEqual(_CalendarApi.writes, [])
+        matched = self._approve(self.ada, removal)
+        self.assertIn("DESTRUCTIVE", matched)
+        self.assertIn("approval danger", matched)
+        self.assertIn("2026-11-11T09:00:00-08:00", matched)
+        self.assertIn("ev0123456789abcf", matched)
+        self.assertFalse(any(item["method"] == "DELETE" for item in _CalendarApi.writes))
+        done = self._approve(self.ada, matched)
+        self.assertIn("Deleted event ev0123456789abcf", done)
+        self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "DELETE"]), 1)
+
+    def _los_angeles(self) -> None:
+        from dataclasses import replace
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo("America/Los_Angeles")
+        self.plane.settings = replace(self.plane.settings, ui_time_zone="America/Los_Angeles")
+        self.plane.calendar_now = datetime(2026, 11, 10, 9, 0, tzinfo=zone)
 
     def _binding(self, cookie: str, page: str, decision: str) -> dict:
         return {

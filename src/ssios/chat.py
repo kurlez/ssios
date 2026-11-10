@@ -14,9 +14,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from collections.abc import Iterator
 
+from ssios.calendar_intent import account_zone, clock_now, deadline_from, is_legacy_calendar, plan_calendar
 from ssios.chat_guest import ChatGuestRequest, ProductionChatGuest
 from ssios.chat_router import RouteDecision, classify
 from ssios.errors import FlowInterrupt, SsiosError
+from ssios.google_calendar import parse_event_snapshots
 from ssios.scope import AccountScope, memory_excerpt
 _SYSTEM = (
     "You are SSIOS on this machine. Answer from the conversation and the memory excerpt. "
@@ -30,6 +32,13 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     message = " ".join(str(text or "").split())
     if not message or len(message) > _MAX_MESSAGE:
         raise SsiosError("chat_rejected", "message rejected", 400)
+    if conversation_id:
+        pending = scope.chat().get(conversation_id).get("pending_pick")
+        if isinstance(pending, dict):
+            if re.fullmatch(r"[1-9]", message):
+                yield from _choose_calendar(plane, scope, conversation_id, message, pending, peer_ip)
+                return
+            scope.chat().set_pending(conversation_id, None)
     decision = classify(message, override or "auto", llm=plane.llm, deadline=None)
     _audit_route(plane, account["id"], peer_ip, decision)
     store = scope.chat()
@@ -68,7 +77,12 @@ def continue_after_fetch(plane, account: dict, applied: dict, peer_ip: str) -> I
     route = str(meta.get("route") or "connector")
     summary = outcome_line(text)
     write = summary.startswith(("Created event ", "Updated event ", "Deleted event "))
+    followup = meta.get("followup") if isinstance(meta.get("followup"), dict) else None
     yield {"event": "conversation", "data": {"id": conversation_id}}
+    if followup and not write:
+        yield from _match_calendar(scope, conversation_id, text, followup)
+        yield {"event": "done", "data": {"ok": True}}
+        return
     yield {"event": "outcome", "data": {"text": summary}}
     if write and route != "connector_vm":
         scope.chat().append(conversation_id, {"role": "assistant", "text": summary})
@@ -122,11 +136,16 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> I
 
 
 def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision, *, follow_vm: bool) -> Iterator[dict]:
-    from ssios.google_connector import member_session
-
     if scope.account.get("role") != "member":
         raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
-    tool, arguments, limits = _fetch_plan(message, decision.services[0])
+    tool, arguments, limits, followup = _fetch_plan(scope.plane, message, decision.services[0])
+    route_name = "connector_vm" if follow_vm else "connector"
+    yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
+
+
+def _propose_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, route_name: str = "connector") -> Iterator[dict]:
+    from ssios.google_connector import member_session
+
     proposed = scope.plane.google.propose_fetch(
         member_session(scope.account_id),
         project_id=scope.project_id(),
@@ -137,20 +156,19 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
     approval = proposed["approval"]
     record = scope.plane.approvals.get(approval["id"])
     preview = scope.plane.google.preview(record, member_session(scope.account_id))
-    route_name = "connector_vm" if follow_vm else "connector"
-    scope.chat().append(
-        conversation_id,
-        {"role": "assistant", "text": preview, "approval_id": approval["id"], "route_name": route_name, "tool": tool},
-    )
+    message = {"role": "assistant", "text": preview, "approval_id": approval["id"], "route_name": route_name, "tool": tool}
+    if followup:
+        message["followup"] = followup
+    scope.chat().append(conversation_id, message)
     yield _approval_event(approval, preview)
 
 
-def _fetch_plan(message: str, service: str) -> tuple[str, dict, dict]:
+def _fetch_plan(plane, message: str, service: str) -> tuple[str, dict, dict, dict | None]:
     limits = {"max_items": 5, "max_bytes": 4096, "include_body": False}
     if service == "gmail":
-        return "gmail.search", {"q": ""}, {**limits, "labels": ["INBOX"]}
+        return "gmail.search", {"q": ""}, {**limits, "labels": ["INBOX"]}, None
     if service == "calendar":
-        return _calendar_plan(message, limits)
+        return _calendar_plan(plane, message, limits)
     match = re.search(r"folder:([A-Za-z0-9_-]{8,})", message)
     if not match:
         raise SsiosError(
@@ -158,10 +176,26 @@ def _fetch_plan(message: str, service: str) -> tuple[str, dict, dict]:
             "Drive search needs a folder id in the message, written as folder:FOLDER_ID",
             400,
         )
-    return "drive.search", {"q": "trashed = false"}, {**limits, "folder_ids": [match.group(1)]}
+    return "drive.search", {"q": "trashed = false"}, {**limits, "folder_ids": [match.group(1)]}, None
 
 
-def _calendar_plan(message: str, limits: dict) -> tuple[str, dict, dict]:
+def _calendar_plan(plane, message: str, limits: dict) -> tuple[str, dict, dict, dict | None]:
+    if not is_legacy_calendar(message):
+        zone, zone_name = account_zone(plane.settings)
+        tool, arguments, followup = plan_calendar(
+            message,
+            now=clock_now(plane, zone),
+            zone_name=zone_name,
+            llm=plane.llm,
+            deadline=deadline_from(plane.settings),
+        )
+        if followup:
+            limits = {**limits, "max_items": 10}
+        return tool, arguments, limits, followup
+    return (*_legacy_calendar_plan(message, limits), None)
+
+
+def _legacy_calendar_plan(message: str, limits: dict) -> tuple[str, dict, dict]:
     folded = message.casefold()
     calendar_id = _field(message, "calendar") or "primary"
     if "list" in folded and "event" not in folded:
@@ -372,6 +406,140 @@ def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> lis
         if text:
             tail.append({"role": item["role"], "content": text[:2000]})
     return messages + tail[-6:]
+
+
+def _match_calendar(scope, conversation_id: str, text: str, followup: dict) -> Iterator[dict]:
+    needle = str(followup.get("match_text") or "").casefold()
+    events = []
+    for item in parse_event_snapshots(text):
+        if not _event_id_ok(item.get("id")):
+            continue
+        haystack = (str(item.get("title") or "") + " " + str(item.get("description") or "")).casefold()
+        if needle and needle not in haystack:
+            continue
+        events.append(item)
+    if not events:
+        note = "No matching event was found. Nothing was changed."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": note})
+        yield {"event": "outcome", "data": {"text": note}}
+        return
+    if len(events) > 1:
+        lines = ["Several events match. Reply with a number. Nothing was changed."]
+        candidates = []
+        for index, item in enumerate(events[:9], start=1):
+            lines.append(f"{index}. {item.get('title') or ''} {item.get('start') or ''}")
+            candidates.append(dict(item))
+        listed = "\n".join(lines)
+        scope.chat().append(conversation_id, {"role": "assistant", "text": listed})
+        scope.chat().set_pending(conversation_id, {"followup": followup, "candidates": candidates})
+        yield {"event": "outcome", "data": {"text": listed}}
+        return
+    yield from _propose_matched(scope, conversation_id, followup, events[0])
+
+
+def _choose_calendar(plane, scope, conversation_id: str, message: str, pending: dict, peer_ip: str) -> Iterator[dict]:
+    candidates = pending.get("candidates") if isinstance(pending.get("candidates"), list) else []
+    followup = pending.get("followup") if isinstance(pending.get("followup"), dict) else None
+    index = int(message) - 1
+    if followup is None or index < 0 or index >= len(candidates):
+        raise SsiosError("calendar_intent_unclear", "Reply with one of the listed numbers. Nothing was changed.", 400)
+    scope.chat().set_pending(conversation_id, None)
+    scope.chat().append(conversation_id, {"role": "user", "text": message})
+    decision = RouteDecision(
+        "connector",
+        "The numbered reply chooses one calendar event. Nothing is changed until you approve it.",
+        "rule_connector",
+        "rule",
+        ("calendar",),
+    )
+    _audit_route(plane, scope.account_id, peer_ip, decision)
+    yield {"event": "conversation", "data": {"id": conversation_id}}
+    yield {"event": "route", "data": decision.public()}
+    yield from _propose_matched(scope, conversation_id, followup, candidates[index])
+    yield {"event": "done", "data": {"ok": True}}
+
+
+def _propose_matched(scope, conversation_id: str, followup: dict, item: dict) -> Iterator[dict]:
+    zone_name = str(followup.get("zone") or item.get("time_zone") or "")
+    before = {
+        "title": str(item.get("title") or ""),
+        "description": str(item.get("description") or ""),
+        "location": str(item.get("location") or ""),
+        "start": str(item.get("start") or ""),
+        "end": str(item.get("end") or ""),
+        "time_zone": str(item.get("time_zone") or zone_name),
+        "attendees": [str(value) for value in item.get("attendees") or [] if isinstance(value, str)],
+    }
+    send_updates = str(followup.get("send_updates") or "none")
+    calendar_id = str(followup.get("calendar_id") or "primary")
+    if followup.get("op") == "delete":
+        arguments = {**before, "calendar_id": calendar_id, "event_id": item["id"], "send_updates": send_updates}
+        tool = "calendar.delete_event"
+    else:
+        arguments = {
+            "calendar_id": calendar_id,
+            "event_id": item["id"],
+            "before": before,
+            "after": _moved_snapshot(before, followup, zone_name),
+            "send_updates": send_updates,
+        }
+        tool = "calendar.update_event"
+    limits = {"max_items": 5, "max_bytes": 4096, "include_body": False}
+    yield from _propose_tool(scope, conversation_id, tool, arguments, limits)
+
+
+def _moved_snapshot(before: dict, followup: dict, zone_name: str) -> dict:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    after = dict(before)
+    hour = followup.get("hour")
+    if type(hour) is int and hour >= 0:
+        try:
+            zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise SsiosError(
+                "calendar_intent_unclear",
+                "Set [ui] time_zone to an IANA name such as America/Los_Angeles. Nothing was changed.",
+                400,
+            ) from exc
+        day = datetime.fromisoformat(str(followup.get("day"))).date()
+        start = datetime(day.year, day.month, day.day, hour, int(followup.get("minute") or 0), tzinfo=zone)
+        duration = int(followup.get("duration_minutes") or 0) or _span_minutes(before.get("start"), before.get("end"))
+        end = start + timedelta(minutes=duration)
+        after["start"] = start.replace(microsecond=0).isoformat()
+        after["end"] = end.replace(microsecond=0).isoformat()
+        after["time_zone"] = zone_name
+    note = str(followup.get("note") or "")
+    description = str(before.get("description") or "")
+    if note and note not in description and "\n" not in description and "\r" not in description:
+        combined = f"{description}. {note}".strip(". ") if description else note
+        if len(combined) <= 4000:
+            description = combined
+    after["description"] = description
+    if followup.get("title"):
+        after["title"] = str(followup["title"])
+    if followup.get("location"):
+        after["location"] = str(followup["location"])
+    if followup.get("attendees"):
+        after["attendees"] = [str(value) for value in followup["attendees"]]
+    return after
+
+
+def _span_minutes(start, end) -> int:
+    try:
+        opened = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        closed = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        minutes = int((closed - opened).total_seconds() // 60)
+    except ValueError:
+        return 60
+    if minutes <= 0 or minutes > 1440:
+        return 60
+    return minutes
+
+
+def _event_id_ok(value) -> bool:
+    text = str(value or "")
+    return 5 <= len(text) <= 1024 and all(char in "0123456789abcdefghijklmnopqrstuv" for char in text)
 
 
 def _approval_event(approval: dict, preview: str) -> dict:

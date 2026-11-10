@@ -251,10 +251,14 @@ def _frame(event: dict) -> str:
 
 def _events_html(session, events: list[dict]) -> str:
     parts = []
+    conversation_id = ""
     for event in events:
         name = event["event"]
         data = event["data"]
-        if name == "route":
+        if name == "conversation":
+            conversation_id = str(data.get("id") or "")
+            parts.append("<p class=\"conversation\">" + html.escape(conversation_id) + "</p>")
+        elif name == "route":
             parts.append("<p class=\"route\">Route: " + html.escape(str(data.get("route"))) + " (" + html.escape(str(data.get("source"))) + "). " + html.escape(str(data.get("reason"))) + "</p>")
         elif name == "token":
             parts.append(html.escape(str(data.get("text") or "")))
@@ -268,7 +272,8 @@ def _events_html(session, events: list[dict]) -> str:
             parts.append(_approval_card(session, data))
         elif name == "error":
             parts.append("<p>" + html.escape(str(data.get("detail") or "")) + "</p>")
-    return "<article class=\"turn\">" + "".join(parts) + "</article><p><a href=\"/ui/chat\">Back to chat</a></p>"
+    back = "/ui/chat?conversation=" + html.escape(conversation_id) if conversation_id else "/ui/chat"
+    return "<article class=\"turn\">" + "".join(parts) + "</article><p><a href=\"" + back + "\">Back to chat</a></p>"
 
 
 def _approval_card(session, data: dict) -> str:

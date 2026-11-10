@@ -11,14 +11,14 @@ The router prints its choice and the reason on the turn:
 - A plain question goes to local Ollama. No guest is started.
 - A request to run code, edit or create files, or touch a workspace starts the no-NIC Codex guest. On macOS that is `macos-vz` (vfkit). On Linux it is Cloud Hypervisor. If the guest cannot start, the turn fails closed. Codex is not run on the host.
 - If the router is not sure the message is only a question, it uses the guest.
-- Gmail and Drive stay read-only. Calendar can list calendars and events, and can create, update, or delete one event. None of those calls happen until you approve the card. A calendar write is performed by the host connector, including when the proposal came from a direct answer or from a guest task.
+- Gmail and Drive stay read-only. Calendar can list calendars and events, and can create, update, or delete one event. None of those calls happen until you approve the card. A calendar write is performed by the host connector. A calendar request stays on that connector path unless the same message also asks for a workspace change.
 - Force direct and Force virtual machine override the router. Force direct still does not run tools on the host. A cloud read still waits for approval.
 
 Nothing from a guest is applied until the owning account approves the card. An admin cannot approve another account's card, and cannot read that account's chat, memory, or mail.
 
 ## Start on the Mac
 
-Ollama stays on `127.0.0.1:11434`. Copy the sample config and set `provider` to `ollama` and `ollama_model` to the local name, usually `qwen2.5-coder:7b`. Do not point it at a cloud model. There is no cloud fallback.
+Ollama stays on `127.0.0.1:11434`. Copy the sample config and set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to `America/Los_Angeles` on Wenfeng's Mac. An empty value uses the computer's local zone.
 
 ```bash
 cp config/ssios.example.toml .ssios/ollama.toml
@@ -75,6 +75,30 @@ Delete revokes the Google tokens, deletes the keychain items for `ssios.google.<
 An admin sees whether Gmail or Drive is connected, and the connected-at time. The console does not show tokens, message bodies, Drive file contents, conversations, or memory. There is no impersonation.
 
 `/ui/audit` is the signed-in account's own activity. `/ui/admin/audit` is the full log, with filters and an export. `ssios audit-verify` checks the hash chain. The log records logins, sign-ups, account decisions, connection and fetch metadata (service, item ids, counts), guest start and finish, and routing decisions. It does not record message text, memory text, mail, file contents, tokens, or passwords.
+
+## Calendar in ordinary language
+
+Say what you want in Chinese or English. The local Ollama model only fills a small JSON intent. It does not choose the calendar date. The program resolves "this week", "tomorrow afternoon", "下周三", and "周五" from today's date and the account time zone, then the approval card shows the absolute date, time, and zone.
+
+Examples:
+
+- `这周我有什么安排`
+- `明天下午有空吗`
+- `下周三下午三点和张三开会一小时`
+- `把周五的牙医改到下午四点`
+- `取消明天的站会`
+- `What's on my calendar next week?`
+
+Rules shown on the card:
+
+- A week is Monday 00:00 through the next Monday 00:00.
+- Next week, and 下周三, means that day in the following week.
+- A bare 周五 or Friday means the next one, and today counts when today is that weekday. If the clock time has already passed, the card still uses today and says so.
+- A read with no range is today through seven days. No window can be longer than 31 days.
+- A name such as 张三 is kept in the title and description. The program does not invent an email address. Attendees are not emailed unless you explicitly ask to notify them.
+- Changing or cancelling an event first asks you to approve a bounded read. If more than one event matches, reply with a number. A second card is the only thing that can change or delete the event.
+
+The older field form still works: `list calendar events calendar:primary from:2026-11-10T00:00:00Z to:2026-11-17T00:00:00Z` and `create calendar event title:SSIOS-test start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC calendar:primary send:none`. If Ollama is down, or its JSON is still invalid after one retry, chat shows that in English and suggests this form. It does not read or change the calendar.
 
 ## Gmail and Drive
 

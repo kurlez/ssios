@@ -7,6 +7,7 @@ a socket and does not see tokens.
 
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -101,9 +102,12 @@ def preview_card(tool: str, arguments: dict, limits: dict) -> str:
     if tool == "calendar.list_calendars":
         return f"List calendars. Max items {limits.get('max_items')}. Google is contacted only after approval."
     if tool == "calendar.list_events":
+        resolution = arguments.get("resolution")
+        resolved = f"{resolution}\n" if isinstance(resolution, str) and resolution else ""
         return (
             f"List events on {arguments.get('calendar_id')}\n"
             f"Window: {arguments.get('time_min')} to {arguments.get('time_max')}\n"
+            f"{resolved}"
             f"Max items {limits.get('max_items')}. Google is contacted only after approval."
         )
     if tool == "calendar.get_event":
@@ -157,6 +161,28 @@ def snapshot_from_google(event: dict) -> dict:
         "time_zone": str(start.get("timeZone") or ""),
         "attendees": sorted(attendees),
     }
+
+
+def event_snapshot_suffix(event: dict) -> str:
+    """One machine-readable snapshot on the same result line the user can read."""
+    view = snapshot_from_google(event)
+    payload = {"id": str(event.get("id") or ""), **view}
+    return " || event-snapshot " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_event_snapshots(text: str) -> list[dict]:
+    found = []
+    marker = " || event-snapshot "
+    for line in str(text or "").splitlines():
+        if marker not in line:
+            continue
+        try:
+            payload = json.loads(line.split(marker, 1)[1])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("id") and payload.get("start") and payload.get("end"):
+            found.append(payload)
+    return found
 
 
 def same_snapshot(current: dict, expected: dict) -> bool:

@@ -39,6 +39,7 @@ from ssios.google_calendar import (
     check_scope as check_calendar_scope,
     default_scope as calendar_default_scope,
     event_resource,
+    event_snapshot_suffix,
     op_name,
     prepare as prepare_calendar,
     preview_card,
@@ -736,7 +737,7 @@ def _event_line(event: dict) -> str:
     view = snapshot_from_google(event)
     description = _html_text(view["description"]) if "<" in view["description"] else view["description"]
     attendees = ",".join(view["attendees"])
-    return " ".join(
+    human = " ".join(
         part
         for part in (
             str(event.get("id") or ""),
@@ -749,6 +750,7 @@ def _event_line(event: dict) -> str:
         )
         if part
     )
+    return human + event_snapshot_suffix(event)
 
 
 def _normalize_limits(limits: dict, settings) -> dict:
