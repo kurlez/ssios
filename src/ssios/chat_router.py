@@ -27,7 +27,7 @@ _WRITE_FILE = re.compile(
     re.IGNORECASE,
 )
 _GOOGLE = re.compile(
-    r"\b(gmail|inbox|e-mail|email|unread|google drive|my drive|drive file)\b",
+    r"\b(gmail|inbox|e-mail|email|unread|google drive|my drive|drive file|calendar|calendars)\b",
     re.IGNORECASE,
 )
 _DEFINITION = re.compile(r"^(what|who|explain|describe)\b", re.IGNORECASE)
@@ -73,7 +73,7 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
             services,
         )
     if services and not (_DEFINITION.search(message) and "my" not in message.casefold() and "inbox" not in message.casefold()):
-        return _decision("connector", "rule_connector", "The message asks for Gmail or Drive. Nothing is fetched until you approve it.", services)
+        return _decision("connector", "rule_connector", _cloud_reason(services), services)
     if _writes(message) or _EXECUTE.search(message):
         return _decision("vm", "rule_vm", "The message asks to run code or change a workspace, so it goes to the guest.", ())
     if _REMEMBER.search(message):
@@ -96,7 +96,17 @@ def _services(message: str) -> tuple[str, ...]:
         found.append("gmail")
     if any(word in folded for word in ("google drive", "my drive", "drive file")) or re.search(r"\bdrive\b", folded):
         found.append("drive")
+    if "calendar" in folded:
+        found.append("calendar")
     return tuple(found)
+
+
+def _cloud_reason(services: tuple[str, ...]) -> str:
+    if services == ("calendar",):
+        return "The message asks for Google Calendar. Nothing is read or changed until you approve it."
+    if "calendar" in services:
+        return "The message asks for Google Calendar and other cloud data. Nothing is read or changed until you approve it."
+    return "The message asks for Gmail or Drive. Nothing is fetched until you approve it."
 
 
 def _unsure(message: str, llm, deadline: float | None) -> RouteDecision:

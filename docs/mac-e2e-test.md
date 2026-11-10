@@ -13,7 +13,7 @@ The commands below use that directory. If you already keep a config at `.ssios/o
 cp config/ssios.example.toml "$SSIOS_STATE/ollama.toml"
 ```
 
-Edit only the copy. Set `[llm] provider` to `ollama` and `ollama_model` to the local name, usually `qwen2.5-coder:7b`. Under `[connectors]`, set `enabled = ["drive", "gmail"]`. Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback.
+Edit only the copy. Set `[llm] provider` to `ollama` and `ollama_model` to the local name, usually `qwen2.5-coder:7b`. Under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]`. Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback.
 
 From a checkout that contains both the chat UI and the Google connector:
 
@@ -56,9 +56,9 @@ On the sign-up page, request an account for `ada` with a password of at least 12
 
 As `ada`, send `remember the fixture code is HARBOR` and approve the memory card. Sign out, sign in as `owner`, and open Memory. That note is not there. `owner` also cannot open `ada`'s chat. An admin password reset or delete does not show `ada`'s mail or files.
 
-## Gmail and Drive
+## Gmail, Drive, and Calendar
 
-Create a Desktop OAuth client in a Google Cloud project that stays in Testing. Add only your test user. Enable the Gmail API and the Drive API. Do not publish the app.
+Create a Desktop OAuth client in a Google Cloud project that stays in Testing. Add only your test user. Enable the Gmail API, the Drive API, and the Google Calendar API. Do not publish the app. Calendar consent uses `https://www.googleapis.com/auth/calendar.events` and `https://www.googleapis.com/auth/calendar.calendarlist.readonly`. Do not request the broad `https://www.googleapis.com/auth/calendar` scope.
 
 The account id is the `acct-...` value on the admin row for `ada`, not the username. Install the client for that member. The secret prompt does not echo.
 
@@ -68,14 +68,18 @@ PYTHONPATH=src python3 -m ssios oauth-install-client \
   --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
 ```
 
-In the UI, signed in as `ada`, open Connections and click Connect gmail, then Connect drive. Each page shows a consent URL. Open that URL in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. A browser on another computer cannot finish that redirect. Use the same Google user for both. A second Google user is refused.
+In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows a consent URL. Open that URL in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. A browser on another computer cannot finish that redirect. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected.
 
 Then, still as `ada`:
 
 - Send `check my inbox`. Approve the card. The model answer stays on this Mac. The approval card appears before any Gmail call.
 - Send `list files in drive folder:YOUR_FOLDER_ID`, using a folder id from your own Drive. Approve the card before Drive is called.
+- Send `list calendar events calendar:primary from:2026-11-10T00:00:00Z to:2026-11-17T00:00:00Z`. That is a 7-day window. Approve it before Calendar is called. A window longer than 31 days is refused in English and does not create an approval.
+- Send `create calendar event title:SSIOS-test start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC calendar:primary send:none`. The card shows the title, start, end, time zone, and that attendees are not emailed. Approve once. The page says created and the event id. Approving again does not create a second event.
+- Send an update with `send:all` only if you intend to email attendees. The card shows the before and after text. If the event changed in Google after the card was created, the update is not sent.
+- Send `delete calendar event ... send:none` with the event id from the create step. The card is marked destructive. Deny it if you want to keep the event. An expired card does nothing.
 
-Sign in as `owner`. Admin shows `ssios.google.<ada's id>`, connected or not, and a time. It does not show message text, file text, or a token.
+Sign in as `owner`. Admin shows Gmail, Drive, and Calendar as yes or no, plus connected_at. It does not show message text, file text, event titles, or a token. A second household account cannot see `ada`'s cards either. Only `ada` can approve them.
 
 Reset `ada`'s password from Admin. That revokes `ada`'s sessions and Google connection. `ada` must sign in again and connect again before another read works.
 

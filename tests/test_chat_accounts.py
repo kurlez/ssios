@@ -17,6 +17,66 @@ from unittest import mock
 from ssios.google_connector import GoogleConnector, GoogleEndpoints, member_session
 from ssios.secret_store import MemorySecretStore, service_name
 from test_google_connector import _Google
+
+
+class _CalendarApi(_Google):
+    """Local Google stand-in that also answers Calendar."""
+
+    writes: list[dict] = []
+    mismatch = False
+
+    def do_GET(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        if path.startswith("/calendar/"):
+            self._calendar("GET", path)
+            return
+        super().do_GET()
+
+    def do_POST(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        if path.startswith("/calendar/"):
+            self._calendar("POST", path)
+            return
+        super().do_POST()
+
+    def do_PUT(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        self._calendar("PUT", path)
+
+    def do_DELETE(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        self._calendar("DELETE", path)
+
+    def _calendar(self, method: str, path: str) -> None:
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length) if length else b""
+        body = json.loads(raw.decode("utf-8")) if raw else {}
+        self.writes.append({"method": method, "path": path, "body": body})
+        self.seen.append({"method": method, "path": path, "query": {}, "auth": self.headers.get("Authorization", "")})
+        if method == "GET" and path.endswith("/calendarList"):
+            payload = {"items": [{"id": "primary", "summary": "Primary"}]}
+        elif method == "GET" and "/events/" in path:
+            title = "Other" if self.mismatch else "Standup"
+            payload = {
+                "id": path.rsplit("/", 1)[-1],
+                "summary": title,
+                "start": {"dateTime": "2026-11-12T15:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-12T15:30:00Z", "timeZone": "UTC"},
+            }
+        elif method == "GET":
+            payload = {"items": [{"id": "ev0123456789abcd", "summary": "Standup", "start": {"dateTime": "2026-11-12T15:00:00Z"}, "end": {"dateTime": "2026-11-12T15:30:00Z"}}]}
+        elif method == "DELETE":
+            self.send_response(204)
+            self.end_headers()
+            return
+        else:
+            payload = {"id": body.get("id") or "ev0123456789abcd", "summary": body.get("summary") or ""}
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 from ssios.errors import SsiosError
 from ssios.netguard import is_private_source, peer_allowed
 from ssios.security_audit import SecurityAudit
@@ -59,6 +119,10 @@ class RouterTest(PlaneTest):
         self.assertEqual((forced.route, forced.source), ("vm", "override"))
         stayed = classify("edit readme.md", "force_direct")
         self.assertEqual(stayed.route, "direct")
+        calendar = classify("list my calendars")
+        self.assertEqual(calendar.route, "connector")
+        self.assertEqual(calendar.services, ("calendar",))
+        self.assertEqual(classify("what is a calendar?").route, "direct")
         mail = classify("check my inbox")
         self.assertEqual(mail.route, "connector")
         self.assertEqual(mail.services, ("gmail",))
@@ -141,12 +205,14 @@ class LaneTest(PlaneTest):
 
 
 class HouseholdTest(PlaneTest):
-    settings_overrides = {"connectors_enabled": ("drive", "gmail"), "connector_max_calls": 8, "connector_max_bytes": 8000}
+    settings_overrides = {"connectors_enabled": ("drive", "gmail", "calendar"), "connector_max_calls": 8, "connector_max_bytes": 8000}
 
     def setUp(self) -> None:
         super().setUp()
-        _Google.seen = []
-        self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
+        _CalendarApi.seen = []
+        _CalendarApi.writes = []
+        _CalendarApi.mismatch = False
+        self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _CalendarApi)
         self.addCleanup(self.google_http.server_close)
         thread = threading.Thread(target=self.google_http.serve_forever, daemon=True)
         thread.start()
@@ -305,14 +371,14 @@ class HouseholdTest(PlaneTest):
         self.assertEqual(status, 403, page)
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
         self.assertEqual(service_name(self._ada_id()), f"ssios.google.{self._ada_id()}")
-        seen_before = len(_Google.seen)
+        seen_before = len(_CalendarApi.seen)
         pending = self._send(self.ada, "check my inbox")
         self.assertIn("Read-only gmail.search", pending)
-        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _Google.seen[seen_before:]))
+        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _CalendarApi.seen[seen_before:]))
         self.assertEqual(self.guest.prompts, [])
         approved = self._approve(self.ada, pending)
         self.assertIn("Synthetic local answer using the approved cloud text", approved)
-        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _Google.seen))
+        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _CalendarApi.seen))
         self.assertEqual(self.guest.prompts, [])
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertNotIn(self.secret, audit)
@@ -320,8 +386,8 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("ya29.", audit)
         self.assertNotIn("check my inbox", audit)
         _status, admin = _get(self.base, "/ui/admin", self.owner)
-        self.assertIn("ssios.google.", admin)
-        self.assertIn("yes", admin)
+        self.assertIn("gmail yes", admin)
+        self.assertIn("calendar no", admin)
         self.assertNotIn(self.secret, admin)
         self.assertNotIn("refresh-account-a", admin)
         self.assertNotIn("Fixture subject", admin)
@@ -403,10 +469,10 @@ class HouseholdTest(PlaneTest):
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
         pending = self._send(self.ada, "save my inbox into readme.md")
         self.assertIn("Route: connector_vm", pending)
-        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _Google.seen))
+        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _CalendarApi.seen))
         self.assertEqual(self.guest.prompts, [])
         approved = self._approve(self.ada, pending)
-        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _Google.seen))
+        self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _CalendarApi.seen))
         self.assertEqual(len(self.guest.prompts), 1)
         self.assertIn("UNTRUSTED EXTERNAL CONTENT", self.guest.prompts[0])
         self.assertIn("msg-1", self.guest.prompts[0])
@@ -514,6 +580,140 @@ class HouseholdTest(PlaneTest):
         )
         self.assertEqual(status, 200, done)
         return done
+
+    def test_calendar_connections_approvals_and_errors(self) -> None:
+        from ssios.chat import english_connector_error
+        from ssios.errors import SsiosError
+
+        self.assertIn("not requested", english_connector_error(SsiosError("oauth_scope_widened", "raw", 409)))
+        self.assertIn("31 days", english_connector_error(SsiosError("connector_window_denied", "raw", 400)))
+        self.assertIn("was not sent", english_connector_error(SsiosError("connector_conflict", "raw", 409)))
+        self._install_and_connect(self._ada_id(), "calendar", "code-a")
+        _status, connections = _get(self.base, "/ui/connections", self.ada)
+        self.assertIn("calendar: connected", connections)
+        self.assertIn("gmail: not connected", connections)
+        self.assertIn("drive: not connected", connections)
+        self.assertNotIn(self.secret, connections)
+        status, window, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "list calendar events from:2026-01-01T00:00:00Z to:2026-03-01T00:00:00Z"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 400, window)
+        self.assertIn("cannot be longer than 31 days", window)
+        self.assertEqual(_CalendarApi.writes, [])
+        created = self._send(
+            self.ada,
+            "create calendar event title:Standup start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC calendar:primary send:none",
+        )
+        self.assertIn("Create event", created)
+        self.assertIn("Attendees are not emailed", created)
+        event_id = created.split("Event id: ", 1)[1].split("\n", 1)[0].strip()
+        updated = self._send(
+            self.ada,
+            "update calendar event event:ev0123456789abcd calendar:primary send:none "
+            "before_title:Standup before_start:2026-11-12T15:00:00Z before_end:2026-11-12T15:30:00Z before_zone:UTC "
+            "after_title:Later after_start:2026-11-12T16:00:00Z after_end:2026-11-12T16:30:00Z after_zone:UTC",
+        )
+        self.assertIn("Before:", updated)
+        self.assertIn("After:", updated)
+        self.assertIn("Standup", updated)
+        self.assertIn("Later", updated)
+        deleted = self._send(
+            self.ada,
+            "delete calendar event event:ev0123456789abcd calendar:primary title:Standup "
+            "start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z zone:UTC send:none",
+        )
+        self.assertIn("DESTRUCTIVE", deleted)
+        self.assertIn("approval danger", deleted)
+        _status, inbox = _get(self.base, "/ui/approvals", self.ada)
+        self.assertIn("Create event", inbox)
+        self.assertIn("approval danger", inbox)
+        _status, hidden = _get(self.base, "/ui/approvals", self.owner)
+        self.assertNotIn("Standup", hidden)
+        self.plane.accounts.add_member("bea", "bea-password-ok")
+        bea = self._login("bea", "bea-password-ok")
+        _status, foreign = _get(self.base, "/ui/approvals", bea)
+        self.assertNotIn("Standup", foreign)
+        status, blocked, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + created.split("/ui/approvals/", 1)[1].split('"', 1)[0],
+            {"csrf": self._csrf(self.owner), "decision": "approve", "action": "connector.write", "payload_sha256": "x", "expected_revision": "connector", "bound_hash": "y"},
+            cookie=self.owner,
+        )
+        self.assertEqual(status, 403, blocked)
+        delete_id = deleted.split("/ui/approvals/", 1)[1].split('"', 1)[0]
+        status, denied_page, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + delete_id,
+            self._binding(self.ada, deleted, "deny"),
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, denied_page)
+        self.assertIn("denied", denied_page)
+        self.assertFalse(any(item["method"] == "DELETE" for item in _CalendarApi.writes))
+        done = self._approve(self.ada, created)
+        self.assertIn(f"Created event {event_id}", done)
+        posts = [item for item in _CalendarApi.writes if item["method"] == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["body"].get("id"), event_id)
+        self.assertEqual(posts[0]["body"].get("summary"), "Standup")
+        status, replay, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + created.split("/ui/approvals/", 1)[1].split('"', 1)[0],
+            self._binding(self.ada, created, "approve"),
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 409, replay)
+        self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "POST"]), 1)
+        record = self.plane.approvals.get(updated.split("/ui/approvals/", 1)[1].split('"', 1)[0])
+        record["expires_at"] = 0
+        self.plane.approvals.save()
+        status, expired, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + record["approval_id"],
+            self._binding(self.ada, updated, "approve"),
+            cookie=self.ada,
+        )
+        self.assertIn(str(status), {"200", "409"}, expired)
+        self.assertNotIn("Updated event", expired)
+        self.assertFalse(any(item["method"] == "PUT" for item in _CalendarApi.writes))
+        fresh = self._send(
+            self.ada,
+            "update calendar event event:ev0123456789abcd calendar:primary send:all "
+            "before_title:Standup before_start:2026-11-12T15:00:00Z before_end:2026-11-12T15:30:00Z before_zone:UTC "
+            "after_title:Later after_start:2026-11-12T16:00:00Z after_end:2026-11-12T16:30:00Z after_zone:UTC",
+        )
+        self.assertIn("This will email attendees", fresh)
+        _CalendarApi.mismatch = True
+        status, conflict, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + fresh.split("/ui/approvals/", 1)[1].split('"', 1)[0],
+            self._binding(self.ada, fresh, "approve"),
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 409, conflict)
+        self.assertIn("was not sent", conflict)
+        self.assertFalse(any(item["method"] == "PUT" for item in _CalendarApi.writes))
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("Standup", audit)
+        self.assertNotIn(self.secret, audit)
+        self.assertNotIn("refresh-account", audit)
+        _status, admin = _get(self.base, "/ui/admin", self.owner)
+        self.assertIn("calendar yes", admin)
+        self.assertNotIn("Standup", admin)
+        self.assertNotIn(self.secret, admin)
+
+    def _binding(self, cookie: str, page: str, decision: str) -> dict:
+        return {
+            "csrf": self._csrf(cookie),
+            "decision": decision,
+            "action": page.split('name="action" value="', 1)[1].split('"', 1)[0],
+            "payload_sha256": page.split('name="payload_sha256" value="', 1)[1].split('"', 1)[0],
+            "expected_revision": page.split('name="expected_revision" value="', 1)[1].split('"', 1)[0],
+            "bound_hash": page.split('name="bound_hash" value="', 1)[1].split('"', 1)[0],
+        }
 
     def _install_and_connect(self, account_id: str, connector: str, code: str) -> None:
         session = member_session(account_id)

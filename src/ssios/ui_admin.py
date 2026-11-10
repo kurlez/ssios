@@ -71,8 +71,11 @@ def _admin_page(plane, session, notice: str) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     for account in plane.accounts.public_list():
         status = plane.google.admin_connection_status(account["id"])
-        when = str(status.get("connected_at") or "")
-        flags = [f"{status.get('service')} {'yes' if status.get('connected') else 'no'} {when}".strip()]
+        connectors = status.get("connectors") if isinstance(status.get("connectors"), dict) else {}
+        flags = []
+        for name in ("gmail", "drive", "calendar"):
+            item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
+            flags.append(f"{name} {'yes' if item.get('connected') else 'no'} {item.get('connected_at') or ''}".strip())
         rows.append(
             "<tr><td>" + html.escape(str(account["username"])) + "</td><td>" + html.escape(str(account["role"]))
             + "</td><td>" + html.escape(str(account["status"])) + "</td><td>" + html.escape(", ".join(flags)) + "</td><td>"

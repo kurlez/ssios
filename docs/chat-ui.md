@@ -11,7 +11,7 @@ The router prints its choice and the reason on the turn:
 - A plain question goes to local Ollama. No guest is started.
 - A request to run code, edit or create files, or touch a workspace starts the no-NIC Codex guest. On macOS that is `macos-vz` (vfkit). On Linux it is Cloud Hypervisor. If the guest cannot start, the turn fails closed. Codex is not run on the host.
 - If the router is not sure the message is only a question, it uses the guest.
-- Gmail or Drive is not fetched until you approve the read. The text then goes to local Ollama. It is placed in the guest only when the same turn also needs the guest and you approved the read.
+- Gmail and Drive stay read-only. Calendar can list calendars and events, and can create, update, or delete one event. None of those calls happen until you approve the card. A calendar write is performed by the host connector, including when the proposal came from a direct answer or from a guest task.
 - Force direct and Force virtual machine override the router. Force direct still does not run tools on the host. A cloud read still waits for approval.
 
 Nothing from a guest is applied until the owning account approves the card. An admin cannot approve another account's card, and cannot read that account's chat, memory, or mail.
@@ -80,7 +80,7 @@ An admin sees whether Gmail or Drive is connected, and the connected-at time. Th
 
 The chat UI calls the connector in `src/ssios/google_connector.py`. The API, scopes, and keyring setup are in [google-connector.md](google-connector.md). A single Mac walkthrough that uses a fresh state directory is in [mac-e2e-test.md](mac-e2e-test.md).
 
-A member session can connect, disconnect, and propose a read. The admin console uses `admin_connection_status` and sees only the service name, whether it is connected, and when. Password reset and account deletion call `revoke_and_delete`. Chat uses `propose_fetch` and, after the owner approves, `take_result`. Fetched text goes to local Ollama. It enters the guest only when that same turn was also a workspace task and the read was approved.
+A member session can connect, disconnect, and propose a read or a calendar change. The Connections page shows Gmail, Drive, and Calendar separately from `status(session)["connectors"]`. Connecting Calendar does not mark Gmail or Drive connected. The admin console uses `admin_connection_status` and sees only connected and connected_at for each connector. Password reset and account deletion call `revoke_and_delete`, which includes Calendar. Chat uses `propose_fetch`. After the owning member approves, `take_result` shows the read text or `created` / `updated` / `deleted` plus the event id. A calendar update card shows the before and after text. A delete card is marked destructive. Attendees are not emailed unless `send_updates` is `all` or `externalOnly`. An admin cannot open or approve those cards.
 
 Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `ssios oauth-install-client`, which reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file.
 

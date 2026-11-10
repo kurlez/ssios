@@ -362,20 +362,36 @@ def _approvals(plane, session: dict) -> str:
         records.extend(
             record
             for record in plane.approvals.records()
-            if record.get("status") == "pending" and record.get("action") != "connector.fetch"
+            if record.get("status") == "pending" and record.get("action") not in ("connector.fetch", "connector.write")
         )
     if account.get("role") == "member":
         records.extend(
             record
             for record in plane.approvals.records()
             if record.get("status") == "pending"
-            and record.get("action") == "connector.fetch"
+            and record.get("action") in ("connector.fetch", "connector.write")
             and _owns_google_fetch(plane, account["id"], record)
         )
     records.extend(scope.list_pending())
     token = _human(plane)
     for record in records:
         if record.get("status") != "pending":
+            continue
+        if record.get("action") in ("connector.fetch", "connector.write"):
+            from ssios.google_connector import member_session
+
+            shown = plane.google.preview(record, member_session(account["id"]))
+            kind = "approval danger" if shown.startswith("DESTRUCTIVE") else "approval"
+            diff = html.escape(shown)
+            rows.append(
+                "<article class=\"" + kind + "\"><h2>"
+                + html.escape(str(record.get("action")))
+                + "</h2><pre>"
+                + diff
+                + "</pre>"
+                + _decision_form(session, record)
+                + "</article>"
+            )
             continue
         if record.get("approval_id") in {item.get("approval_id") for item in scope.list_pending()}:
             diff = html.escape(scope.preview(record))
@@ -439,7 +455,7 @@ def _google_fetch_record(plane, approval_id: str) -> dict | None:
         record = plane.approvals.get(approval_id)
     except SsiosError:
         return None
-    if record.get("action") != "connector.fetch":
+    if record.get("action") not in ("connector.fetch", "connector.write"):
         return None
     return record
 
@@ -453,9 +469,16 @@ def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_i
     if account.get("role") != "member":
         raise SsiosError("connector_admin_denied", "admin cannot access a member's Google connection", 403)
     material = plane.google._requests.get(record["approval_id"])
-    if not isinstance(material, dict) or material.get("account_id") != account["id"]:
+    applied_owner = plane.google._applied.get(record["approval_id"])
+    owner = material.get("account_id") if isinstance(material, dict) else applied_owner
+    if owner != account["id"]:
         raise SsiosError("forbidden", "a session cannot act for another account", 403)
-    result = plane.decide(_human(plane), record["approval_id"], body)
+    try:
+        result = plane.decide(_human(plane), record["approval_id"], body)
+    except SsiosError as exc:
+        from ssios.chat import english_connector_error
+
+        return Page(exc.status, _page(session, "Decided", f"<p>{html.escape(english_connector_error(exc))}</p>"))
     if result.get("status") != "consumed":
         return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
     taken = plane.google.take_result(member_session(account["id"]), record["approval_id"])
@@ -463,7 +486,7 @@ def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_i
     plane.security_audit.write(
         actor=account["id"],
         ip=peer_ip or "127.0.0.1",
-        action="connector.fetch",
+        action=str(record.get("action") or "connector.fetch"),
         target=tool.split(".", 1)[0],
         result="ok",
         extra={"service": tool.split(".", 1)[0], "item_count": "1"},
@@ -629,6 +652,8 @@ pre { white-space: pre-wrap; background: #fff; padding: 1rem; }
 article { border-top: 1px solid #d9d0c1; padding-top: 1rem; }
 .route { color: #6b3a1f; }
 .approval { background: #fff; padding: 1rem; }
+.approval.danger { border: 2px solid #8b1e1e; background: #fde8e4; }
+.outcome { font-weight: 600; }
 table { width: 100%; border-collapse: collapse; }
 td, th { text-align: left; vertical-align: top; padding: 0.4rem; border-bottom: 1px solid #d9d0c1; }
 nav { flex-wrap: wrap; }

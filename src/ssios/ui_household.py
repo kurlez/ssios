@@ -86,6 +86,12 @@ CHAT_JS = r"""
       iso.textContent = "Isolation: nic " + JSON.stringify(payload.nic || []) + ", outbound " + String(payload.outbound) + ", marker " + String(payload.marker) + ", sandbox denied " + String(payload.sandbox_denied) + ", outside write " + String(payload.outside_write);
       block.appendChild(iso);
     }
+    if (name === "outcome") {
+      var outcome = document.createElement("p");
+      outcome.className = "outcome";
+      outcome.textContent = payload.text || "";
+      block.appendChild(outcome);
+    }
     if (name === "approval") addApproval(block, payload);
     if (name === "error") answer.textContent = payload.detail || "The turn failed.";
     if (name === "conversation" && payload.id) {
@@ -96,7 +102,7 @@ CHAT_JS = r"""
 
   function addApproval(block, payload) {
     var card = document.createElement("article");
-    card.className = "approval";
+    card.className = (payload.destructive || String(payload.preview || "").indexOf("DESTRUCTIVE") === 0) ? "approval danger" : "approval";
     var pre = document.createElement("pre");
     pre.textContent = payload.preview || "";
     card.appendChild(pre);
@@ -223,7 +229,9 @@ def _send(plane, session, body, peer_ip, headers):
     try:
         events = list(iter_turn(plane, account, text, override, peer_ip, conversation))
     except SsiosError as exc:
-        return Page(exc.status, _page(session, "Chat", f"<p>{html.escape(exc.detail)}</p>"))
+        from ssios.chat import english_connector_error
+
+        return Page(exc.status, _page(session, "Chat", f"<p>{html.escape(english_connector_error(exc))}</p>"))
     return Page(200, _page(session, "Chat", _events_html(session, events)))
 
 
@@ -232,7 +240,9 @@ def _sse(plane, account, text, override, peer_ip, conversation):
         for event in iter_turn(plane, account, text, override, peer_ip, conversation):
             yield _frame(event)
     except SsiosError as exc:
-        yield _frame({"event": "error", "data": {"detail": exc.detail}})
+        from ssios.chat import english_connector_error
+
+        yield _frame({"event": "error", "data": {"detail": english_connector_error(exc)}})
 
 
 def _frame(event: dict) -> str:
@@ -252,6 +262,8 @@ def _events_html(session, events: list[dict]) -> str:
             parts.append("<p>Guest: " + html.escape(str(data.get("phase") or "")) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
         elif name == "isolation":
             parts.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
+        elif name == "outcome":
+            parts.append("<p class=\"outcome\">" + html.escape(str(data.get("text") or "")) + "</p>")
         elif name == "approval":
             parts.append(_approval_card(session, data))
         elif name == "error":
@@ -269,7 +281,8 @@ def _approval_card(session, data: dict) -> str:
         "expected_revision": data.get("expected_revision"),
         "bound_hash": data.get("bound_hash"),
     }
-    return "<article class=\"approval\"><pre>" + html.escape(str(data.get("preview") or "")) + "</pre>" + _decision_form(session, record) + "</article>"
+    kind = "approval danger" if data.get("destructive") or str(data.get("preview") or "").startswith("DESTRUCTIVE") else "approval"
+    return "<article class=\"" + kind + "\"><pre>" + html.escape(str(data.get("preview") or "")) + "</pre>" + _decision_form(session, record) + "</article>"
 
 
 def _chat_page(plane, session, conversation_id: str) -> str:
@@ -320,19 +333,23 @@ def _connections_page(plane, session, notice: str) -> str:
 
     account = session["account"]
     status = _connection_view(plane, account)
-    when = str(status.get("connected_at") or "not connected")
-    rows = [
-        "<li>"
-        + html.escape(str(status.get("service") or ""))
-        + ": "
-        + ("connected" if status.get("connected") else "not connected")
-        + " / "
-        + html.escape(when)
-        + "</li>"
-    ]
+    rows = []
+    connectors = status.get("connectors") if isinstance(status.get("connectors"), dict) else {}
+    for name in ("gmail", "drive", "calendar"):
+        item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
+        when = str(item.get("connected_at") or "not connected")
+        rows.append(
+            "<li>"
+            + html.escape(name)
+            + ": "
+            + ("connected" if item.get("connected") else "not connected")
+            + " / "
+            + html.escape(when)
+            + "</li>"
+        )
     csrf = html.escape(str(session.get("csrf") or ""))
     forms = []
-    for service in ("gmail", "drive"):
+    for service in ("gmail", "drive", "calendar"):
         forms.append(
             f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
             f"<input type=\"hidden\" name=\"service\" value=\"{service}\">"
