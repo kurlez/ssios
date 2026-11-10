@@ -35,7 +35,7 @@ PYTHONPATH=src python3 -m ssios ui --state .ssios --config .ssios/ollama.toml
 
 Open the printed `http://127.0.0.1:<port>/ui/login` URL. Sign in with the username and password. Chat is at `/ui/chat`.
 
-- Direct answer: send `What is a microVM?` and leave the route on Auto. The badge says `direct`.
+- Direct answer: send `What is a microVM?` and leave the route on Auto. The badge says `direct`. The conversation stays in the sidebar for that account. Reopening the page, or restarting the server, reloads the messages, the route, and any approval card with its current state. Another account cannot see it.
 - Guest task: send `edit readme.md`. The turn shows booting, running, and the isolation checks, then an approval card. Approving records the result. It does not run the change on the host outside the account workspace.
 
 `ssios up` still serves the same UI on loopback. `ssios ui` is the same server with the `--lan` switch below.

@@ -681,25 +681,61 @@ def _settings(plane, session: dict) -> str:
 
 _STYLE = """
 <style>
-body { margin: 0; font: 16px/1.5 Georgia, "Iowan Old Style", serif; color: #1c1915; background: #f6f1e7; }
-nav, main { max-width: 46rem; margin: 0 auto; }
-nav { display: flex; gap: 1rem; padding: 1rem 0; }
-a { color: #6b3a1f; }
-h1 { font-weight: 500; }
+:root {
+  color-scheme: light dark;
+  --bg: #f4f1ea; --ink: #1c1915; --muted: #6d645b; --panel: #fffdf8; --line: #e4dccf;
+  --user: #1c1915; --user-ink: #f6f1e7; --accent: #6b3a1f; --danger: #8b1e1e; --danger-bg: #fde8e4;
+  --code: #f3eee6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141311; --ink: #f3eee6; --muted: #b3a89c; --panel: #211e1a; --line: #3a342c;
+    --user: #efe6d6; --user-ink: #1c1915; --accent: #e0b089; --danger: #ffb4a8; --danger-bg: #3a201c;
+    --code: #2a2622;
+  }
+}
+html, body { height: 100%; }
+body { margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 16px/1.5 "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", sans-serif; color: var(--ink); background: var(--bg); }
+a { color: var(--accent); }
+h1 { font-weight: 560; font-size: 1.4rem; }
+main { max-width: 52rem; margin: 0 auto; overflow: auto; width: 100%; flex: 1; min-height: 0; }
+.top { display: flex; align-items: center; gap: 0.75rem; padding: 0.7rem 1rem; flex: none; }
+.brand { font-weight: 650; color: var(--ink); text-decoration: none; }
+.account { margin-left: auto; }
+.account summary { cursor: pointer; }
+.account a, .account button { display: block; margin: 0.35rem 0; }
 form { display: grid; gap: 0.75rem; }
 label { display: grid; gap: 0.25rem; }
-input, textarea, select, button { font: inherit; padding: 0.45rem 0.6rem; }
-button { background: #1c1915; color: #f6f1e7; border: 0; width: max-content; }
+input, textarea, select, button { font: inherit; padding: 0.45rem 0.6rem; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 0.5rem; }
+button { background: var(--ink); color: var(--bg); border: 0; width: max-content; cursor: pointer; }
 form.row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-pre { white-space: pre-wrap; background: #fff; padding: 1rem; }
-article { border-top: 1px solid #d9d0c1; padding-top: 1rem; }
-.route { color: #6b3a1f; }
-.approval { background: #fff; padding: 1rem; }
-.approval.danger { border: 2px solid #8b1e1e; background: #fde8e4; }
-.outcome { font-weight: 600; }
+pre, code { font-family: ui-monospace, "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace; }
+pre { white-space: pre-wrap; background: var(--code); padding: 0.8rem; border-radius: 0.6rem; }
 table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; vertical-align: top; padding: 0.4rem; border-bottom: 1px solid #d9d0c1; }
-nav { flex-wrap: wrap; }
+td, th { text-align: left; vertical-align: top; padding: 0.4rem; border-bottom: 1px solid var(--line); }
+.app { flex: 1; min-height: 0; display: flex; }
+.shell { flex: 1; display: flex; min-height: 0; width: 100%; }
+.sidebar { width: 16rem; border-right: 1px solid var(--line); padding: 0.8rem; overflow: auto; }
+.sidebar a { display: block; margin: 0.25rem 0; }
+.thread { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.log { flex: 1; overflow: auto; padding: 1rem 1rem 0; }
+.column { max-width: 44rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.8rem; }
+.bubble { max-width: 85%; padding: 0.7rem 0.9rem; border-radius: 1rem; }
+.bubble.user { margin-left: auto; background: var(--user); color: var(--user-ink); }
+.bubble.assistant { margin-right: auto; background: var(--panel); border: 1px solid var(--line); }
+.badge { font-size: 0.75rem; color: var(--muted); border: 0; background: transparent; padding: 0; cursor: help; }
+.composer { flex: none; background: var(--bg); padding: 0.8rem 1rem 1rem; border-top: 1px solid var(--line); }
+.composer form { max-width: 44rem; margin: 0 auto; display: flex; gap: 0.5rem; align-items: end; }
+.composer textarea { flex: 1; resize: none; min-height: 2.6rem; max-height: 10rem; }
+.typing { color: var(--muted); font-size: 0.9rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 0.8rem; padding: 0.8rem; margin-top: 0.4rem; }
+.card.danger { border: 2px solid var(--danger); background: var(--danger-bg); }
+.card form { display: flex; gap: 0.5rem; }
+body.sidebar-closed .sidebar { display: none; }
+@media (max-width: 800px) {
+  .sidebar { position: fixed; inset: 3.2rem auto 0 0; z-index: 2; background: var(--bg); width: min(18rem, 86vw); }
+  body:not(.sidebar-open) .sidebar { display: none; }
+}
 </style>
 """
 
@@ -720,23 +756,28 @@ def _login_page(code: str) -> str:
     )
 
 
-def _page(session: dict, title: str, body: str) -> str:
+def _account_menu(session: dict) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     account = session.get("account") if isinstance(session.get("account"), dict) else {}
     who = html.escape(str(account.get("username") or ""))
-    admin = "<a href=\"/ui/admin\">Admin</a> " if account.get("role") == "admin" else ""
+    admin = "<a href=\"/ui/admin\">Admin</a>" if account.get("role") == "admin" else ""
     return (
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>"
-        + html.escape(title)
-        + "</title>"
-        + _STYLE
-        + "<body><nav><span>Signed in as " + who + "</span> <a href=\"/ui\">Console</a> <a href=\"/ui/chat\">Chat</a> <a href=\"/ui/tasks\">Tasks</a> "
-        "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/connections\">Connections</a> "
-        "<a href=\"/ui/audit\">Activity</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
-        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a> "
+        "<header class=\"top\"><a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
+        "<details class=\"account\"><summary>Signed in as " + who + "</summary>"
+        "<a href=\"/ui/connections\">Connections</a>"
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
+        "<a href=\"/ui/settings\">Settings</a>"
         + admin
-        + "</nav>"
-        f"<main><h1>{html.escape(title)}</h1>{body}"
+        + "<a href=\"/ui/approvals\">Approvals</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
         f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<button type=\"submit\">Sign out</button></form></main></body></html>"
+        "<button type=\"submit\">Sign out</button></form></details></header>"
+    )
+
+
+def _page(session: dict, title: str, body: str, *, chat: bool = False) -> str:
+    shell = body if chat else f"<main><h1>{html.escape(title)}</h1>{body}</main>"
+    return (
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>" + html.escape(title) + "</title>" + _STYLE
+        + "<body>" + _account_menu(session) + shell + "</body></html>"
     )

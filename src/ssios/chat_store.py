@@ -79,6 +79,22 @@ class ChatStore:
             raise SsiosError("not_found", "conversation not found", 404)
         return data
 
+    def rename(self, conv_id: str, title: str) -> dict:
+        record = self.get(conv_id)
+        record["title"] = _title(title)
+        record["updated_at"] = time.time()
+        self._write(record)
+        return {"id": record["id"], "title": record["title"]}
+
+    def delete(self, conv_id: str) -> None:
+        path = self._path(conv_id)
+        if path.is_file():
+            path.unlink()
+        index = read_json(self.root / "index.json", {"ids": []})
+        ids = index.get("ids") if isinstance(index, dict) else []
+        if isinstance(ids, list):
+            write_json(self.root / "index.json", {"ids": [item for item in ids if item != conv_id]})
+
     def set_pending(self, conv_id: str, pending: dict | None) -> None:
         record = self.get(conv_id)
         if pending is None:

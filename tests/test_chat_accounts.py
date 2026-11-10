@@ -1083,7 +1083,8 @@ class HouseholdTest(PlaneTest):
         self.assertIn("张三", created)
         self.assertIn("Attendees: (none)", created)
         self.assertIn("Attendees are not emailed", created)
-        self.assertNotIn("@", created)
+        card = created.split("<pre>", 1)[1].split("</pre>", 1)[0]
+        self.assertNotIn("@", card)
         self.assertEqual(_CalendarApi.writes, [])
         self.plane.llm.intent_script = ["nope"]
         explicit = self._send(
@@ -1160,6 +1161,61 @@ class HouseholdTest(PlaneTest):
         done = self._approve(self.ada, matched)
         self.assertIn("Deleted event ev0123456789abcf", done)
         self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "DELETE"]), 1)
+
+    def test_chat_history_sidebar_and_sanitized_markdown(self) -> None:
+        first = self._send(self.ada, "What is a microVM?")
+        self.assertIn("Route: direct", first)
+        conv = first.split('class="conversation">', 1)[1].split("<", 1)[0]
+        home = self.plane.accounts.home(self._ada_id())
+        self.assertTrue((home / "chat" / f"{conv}.json").is_file())
+        from ssios.chat_store import ChatStore
+        from ssios.service import ControlPlane
+
+        reloaded = ChatStore(home).get(conv)
+        self.assertIn("What is a microVM?", json.dumps(reloaded))
+        restarted = ControlPlane(self.plane.settings)
+        restarted.open()
+        again = restarted.accounts.public_list()
+        self.assertTrue(any(item["username"] == "ada" for item in again))
+        self.assertIn("What is a microVM?", json.dumps(ChatStore(home).get(conv)))
+        page = self._open("/ui/chat?conversation=" + conv, self.ada, "text/html")[2].decode()
+        self.assertIn("What is a microVM?", page)
+        self.assertIn("New chat", page)
+        self.assertIn("Rename", page)
+        self.assertIn("Delete", page)
+        _status, owner_view = _get(self.base, "/ui/chat?conversation=" + conv, self.owner)
+        self.assertNotIn("What is a microVM?", owner_view)
+        status, renamed, _cookie = _form(
+            self.base,
+            "/ui/chat/rename",
+            {"csrf": self._csrf(self.ada), "conversation": conv, "title": "Harbor notes"},
+            cookie=self.ada,
+        )
+        self.assertIn("Harbor notes", renamed)
+        self.assertEqual(ChatStore(home).get(conv)["title"], "Harbor notes")
+        poisoned = "<script>alert(1)</script> [x](javascript:alert(1))"
+        ChatStore(home).append(conv, {"role": "assistant", "text": poisoned})
+        shown = self._open("/ui/chat?conversation=" + conv, self.ada, "text/html")[2].decode()
+        self.assertNotIn("<script>alert(1)</script>", shown)
+        self.assertNotIn('href="javascript:', shown)
+        self.assertIn("\\u003cscript\\u003e", shown)
+        guest = self._send(self.ada, "edit readme.md", conversation=conv)
+        self.assertIn("Approve", guest)
+        history = self._open("/ui/chat?conversation=" + conv, self.ada, "text/html")[2].decode()
+        self.assertIn('"status": "pending"', history)
+        self.assertIn('"actionable": true', history)
+        self._approve(self.ada, guest)
+        after = self._open("/ui/chat?conversation=" + conv, self.ada, "text/html")[2].decode()
+        self.assertIn('"status": "approved"', after)
+        self.assertIn('"actionable": false', after)
+        status, deleted, _cookie = _form(
+            self.base,
+            "/ui/chat/delete",
+            {"csrf": self._csrf(self.ada), "conversation": conv},
+            cookie=self.ada,
+        )
+        self.assertNotIn("Harbor notes", deleted)
+        self.assertFalse((home / "chat" / f"{conv}.json").is_file())
 
     def _open(self, path: str, cookie: str, accept: str) -> tuple[int, str, bytes]:
         request = urllib.request.Request(self.base + path, headers={"Cookie": cookie, "Accept": accept})

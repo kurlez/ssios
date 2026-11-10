@@ -17,18 +17,47 @@ CHAT_JS = r"""
 (function () {
   var form = document.getElementById("chat-form");
   var log = document.getElementById("chat-log");
-  if (!form || !log) return;
+  var column = log ? log.querySelector(".column") : null;
+  var dataNode = document.getElementById("chat-data");
+  if (!form || !column) return;
+  var csrf = (form.querySelector("input[name=csrf]") || {}).value || "";
+  var state = {};
+  try { state = JSON.parse(dataNode ? dataNode.textContent || "{}" : "{}"); } catch (err) { state = {}; }
+  (state.messages || []).forEach(renderMessage);
+  var box = form.querySelector("textarea");
+  box.addEventListener("input", grow);
+  box.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (box.value.trim()) form.requestSubmit();
+    }
+  });
+  var toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.id = "sidebar-toggle";
+  toggle.textContent = "Conversations";
+  toggle.setAttribute("aria-controls", "sidebar");
+  toggle.setAttribute("aria-expanded", "true");
+  toggle.addEventListener("click", function () {
+    var open = document.body.classList.toggle("sidebar-open");
+    document.body.classList.toggle("sidebar-closed", !open && window.innerWidth > 800);
+    if (window.innerWidth > 800) document.body.classList.toggle("sidebar-closed");
+    toggle.setAttribute("aria-expanded", String(!document.body.classList.contains("sidebar-closed") && (window.innerWidth > 800 || document.body.classList.contains("sidebar-open"))));
+  });
+  var top = document.querySelector(".top");
+  if (top) top.insertBefore(toggle, top.firstChild);
   form.addEventListener("submit", function (event) {
     event.preventDefault();
+    var text = box.value;
+    renderMessage({role: "user", text: text});
+    var answer = renderMessage({role: "assistant", text: ""});
+    var typing = document.createElement("p");
+    typing.className = "typing";
+    typing.textContent = "Assistant is writing";
+    answer.appendChild(typing);
     var params = new URLSearchParams(new FormData(form));
-    var block = document.createElement("article");
-    block.className = "turn";
-    log.appendChild(block);
-    var user = document.createElement("p");
-    user.textContent = params.get("message") || "";
-    block.appendChild(user);
-    var answer = document.createElement("p");
-    block.appendChild(answer);
+    box.value = "";
+    grow();
     fetch(form.action, {
       method: "POST",
       headers: {"Accept": "text/event-stream", "Content-Type": "application/x-www-form-urlencoded"},
@@ -36,96 +65,191 @@ CHAT_JS = r"""
       credentials: "same-origin"
     }).then(function (response) {
       if (!response.ok || !response.body) {
+        typing.remove();
         answer.textContent = "The request was rejected.";
         return;
       }
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
       var buffer = "";
+      var raw = "";
       function pump() {
         return reader.read().then(function (chunk) {
-          if (chunk.done) return;
+          if (chunk.done) { typing.remove(); renderMarkdown(answer, raw); return; }
           buffer += decoder.decode(chunk.value, {stream: true});
           var parts = buffer.split("\n\n");
           buffer = parts.pop();
-          parts.forEach(function (part) { applyEvent(block, answer, part); });
+          parts.forEach(function (part) { raw = applyEvent(answer, raw, part) || raw; });
           return pump();
         });
       }
       return pump();
     }).catch(function () {
+      typing.remove();
       answer.textContent = "The stream stopped.";
     });
-    form.querySelector("textarea").value = "";
   });
 
-  function applyEvent(block, answer, raw) {
+  function grow() {
+    box.style.height = "auto";
+    box.style.height = Math.min(box.scrollHeight, 160) + "px";
+  }
+
+  function renderMessage(message) {
+    var role = message.role === "user" ? "user" : "assistant";
+    var bubble = document.createElement("div");
+    bubble.className = "bubble " + role;
+    if (role === "assistant") renderMarkdown(bubble, message.text || "");
+    else bubble.textContent = message.text || "";
+    column.appendChild(bubble);
+    if (message.route) {
+      var badge = document.createElement("button");
+      badge.type = "button";
+      badge.className = "badge";
+      badge.textContent = message.route;
+      badge.title = message.reason || message.route;
+      badge.setAttribute("aria-label", "Route " + message.route + ". " + (message.reason || ""));
+      column.appendChild(badge);
+    }
+    if (message.approval) addApproval(message.approval);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+  }
+
+  function renderMarkdown(node, text) {
+    node.textContent = "";
+    String(text || "").split(/```/).forEach(function (part, index) {
+      if (index % 2 === 1) {
+        var pre = document.createElement("pre");
+        var code = document.createElement("code");
+        code.textContent = part.replace(/^\w+\n/, "");
+        pre.appendChild(code);
+        node.appendChild(pre);
+        return;
+      }
+      part.split(/\n{2,}/).forEach(function (block) {
+        var lines = block.split("\n");
+        if (lines.every(function (line) { return /^\s*[-*] /.test(line); })) {
+          var list = document.createElement("ul");
+          lines.forEach(function (line) { var li = document.createElement("li"); appendInline(li, line.replace(/^\s*[-*] /, "")); list.appendChild(li); });
+          node.appendChild(list);
+          return;
+        }
+        if (!block.trim()) return;
+        var para = document.createElement("p");
+        appendInline(para, block);
+        node.appendChild(para);
+      });
+    });
+  }
+
+  function appendInline(node, text) {
+    var rest = String(text || "");
+    var pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)]+\))/;
+    while (rest) {
+      var match = pattern.exec(rest);
+      if (!match) { node.appendChild(document.createTextNode(rest)); break; }
+      if (match.index) node.appendChild(document.createTextNode(rest.slice(0, match.index)));
+      var token = match[0];
+      if (token.charAt(0) === "`") {
+        var code = document.createElement("code");
+        code.textContent = token.slice(1, -1);
+        node.appendChild(code);
+      } else if (token.slice(0, 2) === "**") {
+        var strong = document.createElement("strong");
+        strong.textContent = token.slice(2, -2);
+        node.appendChild(strong);
+      } else {
+        var label = token.slice(1, token.indexOf("]"));
+        var url = token.slice(token.indexOf("(") + 1, -1);
+        var safe = safeUrl(url);
+        if (safe) {
+          var link = document.createElement("a");
+          link.href = safe;
+          link.rel = "noopener noreferrer";
+          link.textContent = label;
+          node.appendChild(link);
+        } else node.appendChild(document.createTextNode(label));
+      }
+      rest = rest.slice(match.index + token.length);
+    }
+  }
+
+  function safeUrl(url) {
+    try {
+      var parsed = new URL(url, "https://invalid.local");
+      if (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:") {
+        if (parsed.hostname === "invalid.local") return "";
+        return parsed.href;
+      }
+    } catch (err) { return ""; }
+    return "";
+  }
+
+  function applyEvent(answer, raw, part) {
     var name = "message";
     var data = "";
-    raw.split("\n").forEach(function (line) {
+    part.split("\n").forEach(function (line) {
       if (line.indexOf("event:") === 0) name = line.slice(6).trim();
       if (line.indexOf("data:") === 0) data += line.slice(5).trim();
     });
-    if (!data) return;
+    if (!data) return raw;
     var payload = {};
-    try { payload = JSON.parse(data); } catch (err) { return; }
-    if (name === "token") answer.textContent += payload.text || "";
+    try { payload = JSON.parse(data); } catch (err) { return raw; }
+    if (name === "token") return raw + (payload.text || "");
     if (name === "route") {
-      var note = document.createElement("p");
-      note.className = "route";
-      note.textContent = "Route: " + (payload.route || "") + " (" + (payload.source || "") + "). " + (payload.reason || "");
-      block.appendChild(note);
+      var badge = document.createElement("button");
+      badge.type = "button";
+      badge.className = "badge";
+      badge.textContent = payload.route || "route";
+      badge.title = payload.reason || "";
+      column.appendChild(badge);
     }
-    if (name === "status") {
-      var status = document.createElement("p");
-      status.textContent = "Guest: " + (payload.phase || "") + (payload.backend ? " / " + payload.backend : "");
-      block.appendChild(status);
-    }
-    if (name === "isolation") {
-      var iso = document.createElement("p");
-      iso.textContent = "Isolation: nic " + JSON.stringify(payload.nic || []) + ", outbound " + String(payload.outbound) + ", marker " + String(payload.marker) + ", sandbox denied " + String(payload.sandbox_denied) + ", outside write " + String(payload.outside_write);
-      block.appendChild(iso);
-    }
-    if (name === "outcome") {
-      var outcome = document.createElement("p");
-      outcome.className = "outcome";
-      outcome.textContent = payload.text || "";
-      block.appendChild(outcome);
-    }
-    if (name === "approval") addApproval(block, payload);
+    if (name === "approval") addApproval({id: payload.id, status: "pending", actionable: true, preview: payload.preview || "", destructive: !!payload.destructive, action: payload.action, payload_sha256: payload.payload_sha256, expected_revision: payload.expected_revision, bound_hash: payload.bound_hash});
     if (name === "error") answer.textContent = payload.detail || "The turn failed.";
     if (name === "conversation" && payload.id) {
       var hidden = form.querySelector("input[name=conversation]");
       if (hidden) hidden.value = payload.id;
     }
+    if (name === "outcome" || name === "status") {
+      var note = document.createElement("p");
+      note.textContent = name === "outcome" ? (payload.text || "") : ("Guest: " + (payload.phase || ""));
+      column.appendChild(note);
+    }
+    return raw;
   }
 
-  function addApproval(block, payload) {
+  function addApproval(payload) {
     var card = document.createElement("article");
-    card.className = (payload.destructive || String(payload.preview || "").indexOf("DESTRUCTIVE") === 0) ? "approval danger" : "approval";
+    card.className = payload.destructive ? "card danger" : "card";
+    var state = document.createElement("p");
+    state.textContent = payload.status || "pending";
+    card.appendChild(state);
     var pre = document.createElement("pre");
     pre.textContent = payload.preview || "";
     card.appendChild(pre);
-    var approval = document.createElement("form");
-    approval.method = "post";
-    approval.action = "/ui/approvals/" + encodeURIComponent(payload.id || "");
-    ["csrf", "action", "payload_sha256", "expected_revision", "bound_hash"].forEach(function (key) {
-      var input = document.createElement("input");
-      input.type = "hidden";
-      input.name = key;
-      input.value = key === "csrf" ? (form.querySelector("input[name=csrf]") || {}).value || "" : (payload[key] || "");
-      approval.appendChild(input);
-    });
-    ["approve", "deny"].forEach(function (value) {
-      var button = document.createElement("button");
-      button.type = "submit";
-      button.name = "decision";
-      button.value = value;
-      button.textContent = value === "approve" ? "Approve" : "Deny";
-      approval.appendChild(button);
-    });
-    card.appendChild(approval);
-    block.appendChild(card);
+    if (payload.actionable) {
+      var approval = document.createElement("form");
+      approval.method = "post";
+      approval.action = "/ui/approvals/" + encodeURIComponent(payload.id || "");
+      [["csrf", csrf], ["action", payload.action], ["payload_sha256", payload.payload_sha256], ["expected_revision", payload.expected_revision], ["bound_hash", payload.bound_hash]].forEach(function (pair) {
+        var input = document.createElement("input");
+        input.type = "hidden";
+        input.name = pair[0];
+        input.value = pair[1] || "";
+        approval.appendChild(input);
+      });
+      [["approve", "Approve"], ["deny", "Deny"]].forEach(function (pair) {
+        var button = document.createElement("button");
+        button.type = "submit";
+        button.name = "decision";
+        button.value = pair[0];
+        button.textContent = pair[1];
+        approval.appendChild(button);
+      });
+      card.appendChild(approval);
+    }
+    column.appendChild(card);
   }
 })();
 """
@@ -159,6 +283,12 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
         return Page(404, _page(session, "Not available", "<p>WebSocket is not enabled. Chat uses a same-origin event stream.</p>"))
     if path == "/ui/chat" and method == "GET":
         return Page(200, _chat_page(plane, session, query.get("conversation", "")))
+    if path == "/ui/chat/rename" and method == "POST":
+        _csrf(session, body)
+        return _chat_rename(plane, session, body)
+    if path == "/ui/chat/delete" and method == "POST":
+        _csrf(session, body)
+        return _chat_delete(plane, session, body)
     if path == "/ui/chat/send" and method == "POST":
         _csrf(session, body)
         return _send(plane, session, body, peer_ip, headers)
@@ -290,39 +420,134 @@ def _approval_card(session, data: dict) -> str:
     return "<article class=\"" + kind + "\"><pre>" + html.escape(str(data.get("preview") or "")) + "</pre>" + _decision_form(session, record) + "</article>"
 
 
+def _transcript(plane, account: dict, record: dict) -> list[dict]:
+    messages = []
+    for message in record.get("messages") or []:
+        route = message.get("route") if isinstance(message.get("route"), dict) else {}
+        item = {
+            "role": str(message.get("role") or ""),
+            "text": str(message.get("text") or ""),
+            "route": str(route.get("route") or ""),
+            "reason": str(route.get("reason") or ""),
+        }
+        if message.get("approval_id"):
+            item["approval"] = _approval_view(plane, account, str(message["approval_id"]), item["text"])
+        messages.append(item)
+    return messages
+
+
+def _approval_view(plane, account: dict, approval_id: str, preview: str) -> dict:
+    import time
+
+    record = _load_own_approval(plane, account, approval_id)
+    destructive = preview.startswith("DESTRUCTIVE")
+    if record is None:
+        return {"id": approval_id, "status": "missing", "actionable": False, "preview": preview, "destructive": destructive}
+    status = str(record.get("status") or "pending")
+    try:
+        expires = float(record.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires = 0
+    if status == "pending" and expires and expires <= time.time():
+        status = "expired"
+    shown = "approved" if status == "consumed" else status
+    view = {"id": approval_id, "status": shown, "actionable": shown == "pending", "preview": preview, "destructive": destructive}
+    if view["actionable"]:
+        view.update(
+            {
+                "action": str(record.get("action") or ""),
+                "payload_sha256": str(record.get("payload_sha256") or ""),
+                "expected_revision": str(record.get("expected_revision") or ""),
+                "bound_hash": str(record.get("bound_hash") or ""),
+            }
+        )
+    return view
+
+
+def _load_own_approval(plane, account: dict, approval_id: str):
+    try:
+        record = plane.approvals.get(approval_id)
+    except SsiosError:
+        record = None
+    if isinstance(record, dict) and record.get("action") in ("connector.fetch", "connector.write"):
+        google = getattr(plane, "_google", None)
+        material = google._requests.get(approval_id) if google is not None else None
+        applied = google._applied.get(approval_id) if google is not None else None
+        owner = material.get("account_id") if isinstance(material, dict) else applied
+        if owner != account.get("id"):
+            return None
+        return record
+    scope = AccountScope(plane, account)
+    if scope.has_approval(approval_id):
+        return scope.approvals().get(approval_id)
+    if isinstance(record, dict) and account.get("legacy_owner"):
+        return record
+    return None
+
+
+def _chat_rename(plane, session, body) -> "Page":
+    from ssios.ui import Page
+
+    scope = AccountScope(plane, session["account"])
+    conv = str(body.get("conversation") or "")
+    scope.chat().rename(conv, str(body.get("title") or ""))
+    return Page(303, "", location="/ui/chat?conversation=" + conv)
+
+
+def _chat_delete(plane, session, body) -> "Page":
+    from ssios.ui import Page
+
+    scope = AccountScope(plane, session["account"])
+    scope.chat().delete(str(body.get("conversation") or ""))
+    return Page(303, "", location="/ui/chat")
+
+
 def _chat_page(plane, session, conversation_id: str) -> str:
     from ssios.ui import _page
 
     scope = AccountScope(plane, session["account"])
     rows = []
-    for item in scope.chat().list_conversations():
-        rows.append(f"<li><a href=\"/ui/chat?conversation={html.escape(item['id'])}\">{html.escape(str(item['title']))}</a></li>")
-    transcript = ""
+    csrf = html.escape(str(session.get("csrf") or ""))
+    conversations = sorted(scope.chat().list_conversations(), key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    for item in conversations:
+        conv_id = html.escape(str(item["id"]))
+        title = html.escape(str(item["title"]))
+        rows.append(
+            "<li><a href=\"/ui/chat?conversation=" + conv_id + "\">" + title + "</a>"
+            + f"<form method=\"post\" action=\"/ui/chat/rename\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            + f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\">"
+            + f"<label>Rename <input name=\"title\" value=\"{title}\"></label><button type=\"submit\">Rename</button></form>"
+            + f"<form method=\"post\" action=\"/ui/chat/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            + f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\"><button type=\"submit\">Delete</button></form></li>"
+        )
+    record = None
     if conversation_id:
         try:
             record = scope.chat().get(conversation_id)
         except SsiosError:
             record = None
-        if record:
-            blocks = []
-            for message in record.get("messages") or []:
-                blocks.append("<p><strong>" + html.escape(str(message.get("role") or "")) + "</strong> " + html.escape(str(message.get("text") or "")) + "</p>")
-            transcript = "".join(blocks)
-    csrf = html.escape(str(session.get("csrf") or ""))
-    conv = html.escape(conversation_id)
+    state = {
+        "conversation": record["id"] if record else "",
+        "messages": _transcript(plane, session["account"], record) if record else [],
+    }
+    blob = json.dumps(state, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    conv = html.escape(state["conversation"])
     body = (
-        "<ul>" + "".join(rows) + "</ul>"
-        + "<div id=\"chat-log\">" + transcript + "</div>"
-        + f"<form id=\"chat-form\" method=\"post\" action=\"/ui/chat/send\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        + f"<input type=\"hidden\" name=\"conversation\" value=\"{conv}\">"
-        + "<label>Message <textarea name=\"message\" rows=\"4\" required></textarea></label>"
-        + "<label>Route <select name=\"override\"><option value=\"auto\">Auto</option>"
-        + "<option value=\"force_direct\">Force direct</option><option value=\"force_vm\">Force virtual machine</option></select></label>"
-        + "<button type=\"submit\">Send</button></form>"
+        "<div class=\"app\"><div class=\"shell\">"
+        "<aside id=\"sidebar\" class=\"sidebar\"><a href=\"/ui/chat\">New chat</a><ul>" + "".join(rows) + "</ul></aside>"
+        "<section class=\"thread\" aria-label=\"Conversation\">"
+        "<div id=\"chat-log\" class=\"log\" aria-live=\"polite\"><div class=\"column\"></div></div>"
+        "<div class=\"composer\"><form id=\"chat-form\" method=\"post\" action=\"/ui/chat/send\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"conversation\" value=\"{conv}\">"
+        "<label class=\"grow\">Message <textarea name=\"message\" rows=\"1\" required></textarea></label>"
+        "<label>Route <select name=\"override\"><option value=\"auto\">Auto</option>"
+        "<option value=\"force_direct\">Force direct</option><option value=\"force_vm\">Force virtual machine</option></select></label>"
+        "<button type=\"submit\">Send</button></form></div></section></div></div>"
+        + "<script type=\"application/json\" id=\"chat-data\">" + blob + "</script>"
         + "<script src=\"/ui/assets/chat.js\"></script>"
         + "<noscript><p>The form still sends the message when the script does not run.</p></noscript>"
     )
-    return _page(session, "Chat", body)
+    return _page(session, "Chat", body, chat=True)
 
 
 def _connection_view(plane, account: dict) -> dict:

@@ -46,7 +46,7 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
         record = store.get(conversation_id)
     else:
         record = store.create(message)
-    store.append(record["id"], {"role": "user", "text": message})
+    store.append(record["id"], {"role": "user", "text": message, "route": decision.public()})
     yield {"event": "conversation", "data": {"id": record["id"]}}
     yield {"event": "route", "data": decision.public()}
     if decision.route == "direct":
