@@ -27,4 +27,6 @@ bash scripts/macos-vz-codex-smoke.sh
 
 脚本把样例配置改成 `backend = "macos-vz"`、`agent = "codex"` 和本机 Ollama。`vm-prepare` 不接受 `--profile`，档位来自配置文件里的 `profile = "dev"`。`--profile dev` 只传给 `ssios up`。
 
+客户机根不会解到宿主机磁盘上。CPython 的 terminfo 里有 25 对只差大小写的路径，例如 `N/NCR260VT300WPP` 指向 `../n/ncr260vt300wpp`。在默认不区分大小写的 APFS 上这会变成指向自己的符号链接，Python 3.14 的 `tarfile` 过滤再调用 `realpath` 就会报 `Too many levels of symbolic links`。initramfs 在内存里从 tar 成员直接打成 cpio。`share/terminfo` 不放进客户机。每次冒烟都用新的临时目录，不必删上一次失败留下的目录。
+
 把打印出来的 `status`、`isolated`、`boot_ms`、`nic`、`outbound`、`marker`、`outside_write` 和 `sandbox_denied` 发回来。`nic` 应该只有 `lo`，`outbound` 为 false，`outside_write` 为 false，`argv_has_virtio_net` 为 false。在收到这台 Mac 的输出之前，仓库不把这次路径记成已经成功。

@@ -7,9 +7,10 @@ import io
 import tarfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ssios.errors import SsiosError
-from ssios.macos_vz import _extract_tar, assert_no_nic, pack_newc, vfkit_command
+from ssios.macos_vz import assert_no_nic, cpio_entries, pack_newc, pack_tar_bytes, vfkit_command
 
 
 class ArgvTest(unittest.TestCase):
@@ -72,30 +73,68 @@ class PackTest(unittest.TestCase):
         self.assertTrue(blob.startswith(b"070701") or b"070701" in blob[:16])
 
 
-class ExtractTest(unittest.TestCase):
-    def test_guest_absolute_symlink_stays_inside_the_root(self) -> None:
-        blob = io.BytesIO()
-        with tarfile.open(fileobj=blob, mode="w:gz") as tar:
-            info = tarfile.TarInfo("usr/bin/yes")
-            info.type = tarfile.SYMTYPE
-            info.linkname = "/bin/busybox"
-            tar.addfile(info)
-        archive = Path("/tmp/ssios-vz-abs-link.tar.gz")
-        archive.write_bytes(blob.getvalue())
-        root = Path("/tmp/ssios-vz-abs-link")
-        if root.exists():
-            import shutil
+def _tar_bytes(members: list[tuple[str, str, bytes | None]]) -> bytes:
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w") as tar:
+        for name, kind, payload in members:
+            info = tarfile.TarInfo(name)
+            if kind == "file":
+                data = payload or b""
+                info.size = len(data)
+                info.mode = 0o755
+                tar.addfile(info, io.BytesIO(data))
+            elif kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = payload.decode() if isinstance(payload, bytes) else str(payload)
+                tar.addfile(info)
+            elif kind == "dir":
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            elif kind == "char":
+                info.type = tarfile.CHRTYPE
+                tar.addfile(info)
+            else:
+                raise AssertionError(kind)
+    return blob.getvalue()
 
-            shutil.rmtree(root)
-        root.mkdir()
-        _extract_tar(archive, root)
-        link = root / "usr" / "bin" / "yes"
-        self.assertTrue(link.is_symlink())
-        self.assertEqual(os_readlink(link), "../../bin/busybox")
-        self.assertIn(root.resolve(), link.resolve().parents or [link.resolve()])
 
+class ArchivePackTest(unittest.TestCase):
+    def test_case_collision_never_touches_the_host_filesystem(self) -> None:
+        blob = _tar_bytes(
+            [
+                ("share/terminfo/n/ncr260vt300wpp", "file", b"term"),
+                ("share/terminfo/N/NCR260VT300WPP", "symlink", b"../n/ncr260vt300wpp"),
+            ]
+        )
+        with mock.patch("os.symlink", side_effect=AssertionError("symlink")), mock.patch(
+            "os.path.realpath", side_effect=AssertionError("realpath")
+        ), mock.patch("pathlib.Path.resolve", side_effect=AssertionError("resolve")):
+            payload = pack_tar_bytes(blob)
+        entries = cpio_entries(payload)
+        self.assertEqual(entries["share/terminfo/n/ncr260vt300wpp"], b"term")
+        self.assertEqual(entries["share/terminfo/N/NCR260VT300WPP"], b"../n/ncr260vt300wpp")
 
-def os_readlink(path: Path) -> str:
-    import os
+    def test_absolute_busybox_link_stays_inside_the_guest(self) -> None:
+        blob = _tar_bytes([("usr/bin/yes", "symlink", b"/bin/busybox")])
+        entries = cpio_entries(pack_tar_bytes(blob))
+        self.assertEqual(entries["usr/bin/yes"], b"../../bin/busybox")
 
-    return os.readlink(path)
+    def test_escaping_link_and_device_node_are_rejected(self) -> None:
+        with self.assertRaises(SsiosError):
+            pack_tar_bytes(_tar_bytes([("usr/bin/evil", "symlink", b"/../../etc/passwd")]))
+        with self.assertRaises(SsiosError):
+            pack_tar_bytes(_tar_bytes([("../etc/passwd", "file", b"no")]))
+        entries = cpio_entries(pack_tar_bytes(_tar_bytes([("dev/null", "char", None), ("bin/sh", "file", b"sh")])))
+        self.assertNotIn("dev/null", entries)
+        self.assertEqual(entries["bin/sh"], b"sh")
+
+    def test_python_share_tree_can_be_omitted(self) -> None:
+        blob = _tar_bytes(
+            [
+                ("python/bin/python3", "symlink", b"python3.12"),
+                ("python/share/terminfo/n/ncr260vt300wpp", "file", b"term"),
+            ]
+        )
+        entries = cpio_entries(pack_tar_bytes(blob, dest_prefix="opt/python", strip_prefix="python/", skip=("share",)))
+        self.assertEqual(entries["opt/python/bin/python3"], b"python3.12")
+        self.assertFalse(any("terminfo" in name for name in entries))

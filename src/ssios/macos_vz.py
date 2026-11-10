@@ -17,11 +17,12 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import shutil
 import stat
 import tarfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ssios.codex_guest import VSOCK_PORT
 from ssios.errors import SsiosError
@@ -126,7 +127,13 @@ def prepared_initramfs(state_dir: Path) -> Path:
 
 
 def prepare_macos_vz(state_dir: Path, timeout: float = 600) -> dict:
-    """Download pinned pieces on the host and pack the initramfs. Not used inside the guest."""
+    """Download pinned pieces on the host and pack the initramfs. Not used inside the guest.
+
+    The guest tree is never extracted onto the host filesystem. Case-insensitive
+    APFS folds terminfo names such as ``N/`` and ``n/`` together, and Python's
+    tar filter then loops in ``realpath``. The cpio is built from tar members in
+    memory, so host case folding cannot apply.
+    """
     pin = load_pin()
     cache = cache_dir(state_dir)
     cache.mkdir(parents=True, exist_ok=True)
@@ -135,33 +142,298 @@ def prepare_macos_vz(state_dir: Path, timeout: float = 600) -> dict:
     python_tar = _cached(cache, pin["python"], timeout)
     bwrap = _cached(cache, pin["bubblewrap"], timeout)
     libcap = _cached(cache, pin["libcap2"], timeout)
-    root = cache / "root"
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir()
-    _extract_tar(alpine, root)
-    python_root = root / "opt" / "python"
-    python_root.mkdir(parents=True)
-    _extract_tar(python_tar, python_root, strip_python_prefix=True)
-    _extract_apk(bwrap, root)
-    _extract_apk(libcap, root)
-    init = root / "init"
-    init.write_text(_INIT, encoding="utf-8")
-    init.chmod(0o755)
-    if not (python_root / "bin" / "python3").exists() and not (python_root / "bin" / "python3.12").exists():
+    leftover = cache / "root"
+    if leftover.exists():
+        shutil.rmtree(leftover)
+    image = GuestImage()
+    collisions = {
+        "alpine": len(case_collisions(archive_names(alpine))),
+        "python": len(case_collisions(archive_names(python_tar))),
+        "bubblewrap": len(case_collisions(archive_names(bwrap))),
+        "libcap2": len(case_collisions(archive_names(libcap))),
+    }
+    add_tar(image, alpine)
+    add_tar(image, python_tar, dest_prefix="opt/python", strip_prefix="python/", skip=_PYTHON_SKIP)
+    add_apk(image, bwrap)
+    add_apk(image, libcap)
+    if "opt/python/bin/python3" not in image.names and "opt/python/bin/python3.12" in image.names:
+        image.add_link("opt/python/bin/python3", "python3.12")
+    if "opt/python/bin/python3" not in image.names:
         raise SsiosError("macos_vz_not_prepared", "pinned python has no python3 binary", 500)
-    if not (python_root / "bin" / "python3").exists():
-        (python_root / "bin" / "python3").symlink_to("python3.12")
+    image.add_file("init", _INIT.encode(), 0o755, replace=True)
     destination = cache / "codex-initrd.img"
-    pack_newc(root, destination)
+    image.write_gzip(destination)
     return {
         "ok": True,
         "backend": "macos-vz",
         "vfkit": VFKIT_VERSION,
         "kernel": str(kernel),
         "initramfs": str(destination),
-        "detail": "aarch64 kernel and initramfs are cached on the host. The guest was not booted.",
+        "case_collisions": collisions,
+        "detail": (
+            "aarch64 initramfs was packed from archive members without extracting onto the host. "
+            f"Case-only name pairs: alpine {collisions['alpine']}, python {collisions['python']} "
+            "(python share/terminfo is omitted), "
+            f"bubblewrap {collisions['bubblewrap']}, libcap2 {collisions['libcap2']}. "
+            "The guest was not booted."
+        ),
     }
+
+
+_PYTHON_SKIP = (
+    "share",
+    "include",
+    "lib/python3.12/test",
+    "lib/python3.12/idlelib",
+    "lib/python3.12/tkinter",
+    "lib/python3.12/turtledemo",
+    "lib/python3.12/ensurepip",
+)
+
+
+def case_collisions(names: list[str]) -> list[tuple[str, str]]:
+    """Pairs whose paths differ only by case. The guest keeps both; the host must not."""
+    seen: dict[str, str] = {}
+    found: list[tuple[str, str]] = []
+    for name in names:
+        key = name.casefold()
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = name
+        elif previous != name:
+            found.append((previous, name))
+    return found
+
+
+class GuestImage:
+    """Cpio members addressed by guest path. Nothing is created on the host filesystem."""
+
+    def __init__(self) -> None:
+        self.items: list[tuple[str, int, bytes]] = []
+        self.names: set[str] = set()
+        self._files: dict[str, bytes] = {}
+
+    def add_file(self, name: str, data: bytes, mode: int = 0o644, *, replace: bool = False) -> None:
+        self._put(name, stat.S_IFREG | (mode & 0o777), data, replace=replace)
+        self._files[self._clean(name)] = data
+
+    def add_dir(self, name: str, mode: int = 0o755) -> None:
+        self._put(name, stat.S_IFDIR | (mode & 0o777), b"")
+
+    def add_link(self, name: str, target: str, *, replace: bool = False) -> None:
+        relative = _link_target(name, target)
+        self._put(name, stat.S_IFLNK | 0o777, relative.encode(), replace=replace)
+
+    def cpio(self) -> bytes:
+        blob = bytearray()
+        ordered = [(".", stat.S_IFDIR | 0o755, b"")] + self.items
+        for index, (name, mode, body) in enumerate(ordered, start=1):
+            blob += _newc_header(name, mode, len(body), index)
+            blob += body
+            blob += b"\0" * ((4 - (len(body) % 4)) % 4)
+        blob += _newc_header("TRAILER!!!", 0, 0, len(ordered) + 1)
+        return bytes(blob)
+
+    def write_gzip(self, destination: Path) -> None:
+        temporary = destination.with_suffix(destination.suffix + ".partial")
+        temporary.write_bytes(gzip.compress(self.cpio(), mtime=0))
+        os.replace(temporary, destination)
+
+    def _put(self, name: str, mode: int, body: bytes, *, replace: bool = False) -> None:
+        cleaned = self._clean(name)
+        self._ensure_parents(cleaned)
+        if cleaned in self.names:
+            if not replace:
+                return
+            self.items = [(item_name, item_mode, item_body) for item_name, item_mode, item_body in self.items if item_name != cleaned]
+            self.names.discard(cleaned)
+        self.items.append((cleaned, mode, body))
+        self.names.add(cleaned)
+
+    def _ensure_parents(self, name: str) -> None:
+        parent = PurePosixPath(name).parent.as_posix()
+        if parent in ("", "."):
+            return
+        parts = PurePosixPath(parent).parts
+        for index in range(1, len(parts) + 1):
+            directory = "/".join(parts[:index])
+            if directory not in self.names:
+                self.items.append((directory, stat.S_IFDIR | 0o755, b""))
+                self.names.add(directory)
+
+    @staticmethod
+    def _clean(name: str) -> str:
+        return _clean_member_name(name)
+
+
+def archive_names(path: Path) -> list[str]:
+    names: list[str] = []
+    for member, _payload in _open_archive(path):
+        names.append(member.name)
+    return names
+
+
+def add_tar(
+    image: GuestImage,
+    path: Path,
+    *,
+    dest_prefix: str = "",
+    strip_prefix: str = "",
+    skip: tuple[str, ...] = (),
+) -> None:
+    for member, payload in _open_archive(path):
+        _add_member(image, member, payload, dest_prefix=dest_prefix, strip_prefix=strip_prefix, skip=skip)
+
+
+def add_apk(image: GuestImage, path: Path) -> None:
+    for member, payload in _open_archive(path):
+        name = _display_name(member.name)
+        if not (name == "usr" or name.startswith("usr/") or name == "lib" or name.startswith("lib/")):
+            continue
+        _add_member(image, member, payload)
+
+
+def cpio_entries(blob: bytes) -> dict[str, bytes]:
+    entries: dict[str, bytes] = {}
+    position = 0
+    while position + 110 <= len(blob):
+        if blob[position : position + 6] != b"070701":
+            break
+        namesize = int(blob[position + 94 : position + 102], 16)
+        filesize = int(blob[position + 54 : position + 62], 16)
+        name_at = position + 110
+        name = blob[name_at : name_at + namesize].split(b"\0", 1)[0].decode()
+        data_at = name_at + namesize
+        data_at += (4 - (data_at % 4)) % 4
+        body = blob[data_at : data_at + filesize]
+        position = data_at + filesize
+        position += (4 - (position % 4)) % 4
+        if name == "TRAILER!!!":
+            break
+        entries[name] = body
+    return entries
+
+
+def pack_tar_bytes(blob: bytes, *, dest_prefix: str = "", strip_prefix: str = "", skip: tuple[str, ...] = ()) -> bytes:
+    """Pack one tar from memory. Used by tests so nothing is written to the host."""
+    image = GuestImage()
+    with tarfile.open(fileobj=io.BytesIO(blob)) as tar:
+        for member in tar.getmembers():
+            payload = tar.extractfile(member) if member.isreg() else None
+            data = b"" if payload is None else payload.read()
+            _add_member(image, member, data, dest_prefix=dest_prefix, strip_prefix=strip_prefix, skip=skip)
+    return image.cpio()
+
+
+def _add_member(
+    image: GuestImage,
+    member: tarfile.TarInfo,
+    payload: bytes,
+    *,
+    dest_prefix: str = "",
+    strip_prefix: str = "",
+    skip: tuple[str, ...] = (),
+) -> None:
+    if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
+        return
+    if not (member.isdir() or member.isreg() or member.issym() or member.islnk()):
+        return
+    name = _display_name(member.name)
+    if name in ("", "."):
+        return
+    if strip_prefix:
+        if name == strip_prefix.rstrip("/"):
+            return
+        prefix = strip_prefix if strip_prefix.endswith("/") else strip_prefix + "/"
+        if not name.startswith(prefix):
+            raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+        name = name[len(prefix) :]
+    if _skipped(name, skip):
+        return
+    if dest_prefix:
+        name = dest_prefix.rstrip("/") + "/" + name
+    if member.isdir():
+        image.add_dir(name, member.mode or 0o755)
+        return
+    if member.issym():
+        image.add_link(name, member.linkname or "")
+        return
+    if member.islnk():
+        target = _display_name(member.linkname or "")
+        if strip_prefix and target.startswith(strip_prefix if strip_prefix.endswith("/") else strip_prefix + "/"):
+            target = target[len(strip_prefix if strip_prefix.endswith("/") else strip_prefix + "/") :]
+        if dest_prefix:
+            target = dest_prefix.rstrip("/") + "/" + target
+        body = image._files.get(_clean_member_name(target))
+        if body is None:
+            raise SsiosError("macos_vz_not_prepared", f"hard link target is missing: {name[:80]}", 500)
+        image.add_file(name, body, member.mode or 0o644)
+        return
+    image.add_file(name, payload, member.mode or 0o644)
+
+
+def _skipped(name: str, skip: tuple[str, ...]) -> bool:
+    parts = PurePosixPath(name).parts
+    if "__pycache__" in parts:
+        return True
+    for prefix in skip:
+        if name == prefix or name.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _display_name(name: str) -> str:
+    if name.startswith("./"):
+        name = name[2:]
+    return name
+
+
+def _clean_member_name(name: str) -> str:
+    if "\x00" in name or "\\" in name or name.startswith("/"):
+        raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+    if name.startswith("./"):
+        name = name[2:]
+    parts = PurePosixPath(name).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
+    return "/".join(parts)
+
+
+def _link_target(name: str, linkname: str) -> str:
+    cleaned = _clean_member_name(name)
+    if not linkname or "\x00" in linkname or "\\" in linkname:
+        raise SsiosError("macos_vz_not_prepared", f"link rejected: {cleaned[:80]}", 500)
+    if linkname.startswith("/"):
+        if ".." in PurePosixPath(linkname).parts:
+            raise SsiosError("macos_vz_not_prepared", f"link rejected: {cleaned[:80]}", 500)
+        parent = PurePosixPath(cleaned).parent.as_posix()
+        base = "/" if parent == "." else "/" + parent
+        relative = posixpath.relpath(linkname, base)
+    else:
+        relative = linkname
+    parent = PurePosixPath(cleaned).parent.as_posix()
+    base = "/" if parent == "." else "/" + parent
+    landed = posixpath.normpath(posixpath.join(base, relative))
+    if not landed.startswith("/") or ".." in PurePosixPath(landed).parts:
+        raise SsiosError("macos_vz_not_prepared", f"link rejected: {cleaned[:80]}", 500)
+    return relative
+
+
+def _open_archive(path: Path):
+    if path.name.endswith(".apk"):
+        payload = gzip.decompress(path.read_bytes())
+        tar = tarfile.open(fileobj=io.BytesIO(payload))
+    else:
+        tar = tarfile.open(path)
+    try:
+        for member in tar.getmembers():
+            data = b""
+            if member.isreg():
+                source = tar.extractfile(member)
+                data = b"" if source is None else source.read()
+            yield member, data
+    finally:
+        tar.close()
 
 
 def pack_newc(root: Path, destination: Path) -> None:
@@ -229,70 +501,6 @@ def _download(url: str, destination: Path, timeout: float) -> None:
         temporary.unlink(missing_ok=True)
         raise SsiosError("macos_vz_not_prepared", "could not download a pinned macos-vz file", 503) from exc
     os.replace(temporary, destination)
-
-
-def _extract_tar(archive: Path, destination: Path, strip_python_prefix: bool = False) -> None:
-    with tarfile.open(archive) as tar:
-        for member in tar.getmembers():
-            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                continue
-            name = member.name[2:] if member.name.startswith("./") else member.name
-            if name.startswith("/") or not name or ".." in Path(name).parts:
-                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
-            if strip_python_prefix and (name == "python" or name.startswith("python/")):
-                name = name[len("python/") :]
-                if name in ("", "."):
-                    continue
-            member.name = name
-            if member.issym() and (member.linkname or "").startswith("/"):
-                _place_guest_symlink(name, member.linkname, destination)
-                continue
-            target = (destination / name).resolve()
-            if destination.resolve() not in target.parents and target != destination.resolve():
-                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
-            try:
-                tar.extract(member, destination, filter="data")
-            except tarfile.FilterError as exc:
-                raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500) from exc
-
-
-def _place_guest_symlink(name: str, linkname: str, destination: Path) -> None:
-    """Alpine busybox applets point at /bin/busybox. Keep that path inside the guest root."""
-    if "\x00" in linkname or ".." in Path(linkname).parts:
-        raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
-    parent = Path(name).parent
-    guest_parent = "/" if str(parent) in ("", ".") else "/" + parent.as_posix()
-    relative = os.path.relpath(linkname, guest_parent)
-    if relative.startswith("../"):
-        host_target = (destination / parent / relative).resolve()
-        if destination.resolve() not in host_target.parents and host_target != destination.resolve():
-            raise SsiosError("macos_vz_not_prepared", f"archive member rejected: {name[:80]}", 500)
-    dest = destination / name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.is_symlink() or dest.exists():
-        dest.unlink()
-    dest.symlink_to(relative)
-
-
-def _extract_apk(archive: Path, destination: Path) -> None:
-    payload = gzip.decompress(archive.read_bytes())
-    with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
-        for member in tar.getmembers():
-            if not member.name.startswith("usr/") and not member.name.startswith("./usr/") and not member.name.startswith("lib/"):
-                continue
-            name = member.name[2:] if member.name.startswith("./") else member.name
-            if ".." in Path(name).parts:
-                raise SsiosError("macos_vz_not_prepared", f"apk member rejected: {name[:80]}", 500)
-            member.name = name
-            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                continue
-            if member.issym() and (member.linkname or "").startswith("/"):
-                _place_guest_symlink(name, member.linkname, destination)
-                continue
-            try:
-                tar.extract(member, destination, filter="data")
-            except tarfile.FilterError as exc:
-                raise SsiosError("macos_vz_not_prepared", f"apk member rejected: {name[:80]}", 500) from exc
 
 
 def _newc_header(name: str, mode: int, size: int, inode: int) -> bytes:
