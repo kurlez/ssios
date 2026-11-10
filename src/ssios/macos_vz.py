@@ -702,32 +702,30 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
         net = _read_json(session.root / "scratch" / "netcheck.json")
         (session.root / "patch.diff").write_text(workspace_diff(before, session.root / "workspace"), encoding="utf-8")
         text_out = output.get("text", "") if isinstance(output, dict) else ""
-        net_ok = isinstance(net, dict) and net.get("interfaces") == ["lo"] and net.get("outbound") is False
-        ran = (
-            completed.returncode == 0
-            and isinstance(output, dict)
-            and output.get("exit_code") == 0
-            and isinstance(text_out, str)
-            and bool(text_out.strip())
-            and net_ok
-            and proxy.served >= 1
-            and not proxy.rejected
-        )
-        from ssios.codex_guest import selfcheck_failure
+        boundary = _read_json(session.root / "scratch" / "boundary.json")
+        from ssios.codex_guest import classify_guest_result, selfcheck_failure
 
+        ran, detail = classify_guest_result(
+            output,
+            net,
+            proxy.served,
+            proxy.rejected,
+            boundary,
+            completed.returncode,
+        )
         check = _read_json(session.root / "scratch" / "guest_selfcheck.json")
         parsed = selfcheck_failure(check)
         error_code = None
+        lead = ""
         if parsed is not None:
             error_code, lead = parsed
-        elif connect_timeout or getattr(proxy, "connected", 0) < 1:
+        elif not ran and (connect_timeout or getattr(proxy, "connected", 0) < 1):
             error_code = "guest_vsock_unavailable"
             lead = "no vsock connection within 60s"
-        else:
-            lead = ""
-        detail = "guest wrote output.json" if ran else _failure_detail(session, completed, net, proxy)
-        if lead and lead not in detail:
-            detail = (lead + " " + detail)[:500]
+        if not ran:
+            detail = _failure_detail(session, completed, net, proxy, detail)
+            if lead and lead not in detail:
+                detail = (lead + " " + detail)[:500]
         return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records, error_code)
     finally:
         proxy.close()

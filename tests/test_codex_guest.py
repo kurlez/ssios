@@ -22,6 +22,7 @@ from ssios.codex_guest import (
     codex_config_text,
     codex_items_from_ollama,
     exec_commands_from_text,
+    classify_guest_result,
     final_exception_line,
     guest_entry_source,
     open_vsock,
@@ -410,6 +411,27 @@ class VsockRelayTest(unittest.TestCase):
             "AttributeError: module 'socket' has no attribute 'AF_VSOCK'\n"
         )
         self.assertEqual(final_exception_line(text), "AttributeError: module 'socket' has no attribute 'AF_VSOCK'")
+        source = guest_entry_source(19090)
+        self.assertIn('"result": "guest_exit"', source)
+        good = {
+            "text": "The workspace copy kept the marker. Outside write and network were refused.",
+            "exit_code": 1,
+        }
+        net = {"interfaces": ["lo"], "outbound": False}
+        boundary = {"marker": True, "outside": False, "denied": True}
+        ran, detail = classify_guest_result(good, net, 1, False, boundary, vmm_exit=0)
+        self.assertTrue(ran, detail)
+        ran, detail = classify_guest_result(good, net, 1, False, boundary, vmm_exit=1)
+        self.assertTrue(ran, detail)
+        empty = {"text": "", "exit_code": 1}
+        ran, detail = classify_guest_result(empty, net, 1, False, boundary, 0)
+        self.assertFalse(ran)
+        self.assertIn("last_message_empty", detail)
+        self.assertIn("codex_exit=1", detail)
+        ran, detail = classify_guest_result(good, net, 1, False, {"outside": True}, 0)
+        self.assertFalse(ran)
+        self.assertIn("outside_write", detail)
+        self.assertTrue(detail.startswith("codex guest failed:"))
 
 
 class PrepareSkip(unittest.TestCase):

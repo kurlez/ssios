@@ -774,18 +774,17 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
         net = _read_json(session.root / "scratch" / "netcheck.json")
         (session.root / "patch.diff").write_text(workspace_diff(before, session.root / "workspace"), encoding="utf-8")
         text_out = output.get("text", "") if isinstance(output, dict) else ""
-        net_ok = isinstance(net, dict) and net.get("interfaces") == ["lo"] and net.get("outbound") is False
-        ran = (
-            completed.returncode == 0
-            and isinstance(output, dict)
-            and output.get("exit_code") == 0
-            and isinstance(text_out, str)
-            and bool(text_out.strip())
-            and net_ok
-            and proxy.served >= 1
-            and not proxy.rejected
+        boundary = _read_json(session.root / "scratch" / "boundary.json")
+        ran, detail = classify_guest_result(
+            output,
+            net,
+            proxy.served,
+            proxy.rejected,
+            boundary,
+            completed.returncode,
         )
-        detail = "guest wrote output.json" if ran else _failure_detail(session, completed, net, proxy)
+        if not ran:
+            detail = _failure_detail(session, completed, net, proxy, detail)
         return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records)
     finally:
         proxy.close()
@@ -805,6 +804,33 @@ def final_exception_line(text: str) -> str:
         if re.match(r"^[A-Za-z_][\w.]*(Error|Exception)\b", stripped):
             found = stripped
     return found
+
+
+def classify_guest_result(output, net, served: int, rejected: bool, boundary, vmm_exit: int | None = None) -> tuple[bool, str]:
+    """Say whether the guest result may be approved. The VMM process status is not an isolation check."""
+    reasons = []
+    if not isinstance(output, dict):
+        reasons.append("output_json_missing")
+    else:
+        text = output.get("text")
+        if not isinstance(text, str) or not text.strip():
+            reasons.append(f"last_message_empty codex_exit={output.get('exit_code')}")
+    net_ok = isinstance(net, dict) and net.get("interfaces") == ["lo"] and net.get("outbound") is False
+    if not net_ok:
+        interfaces = net.get("interfaces") if isinstance(net, dict) else None
+        outbound = net.get("outbound") if isinstance(net, dict) else None
+        reasons.append(f"net_not_isolated interfaces={interfaces} outbound={outbound}")
+    if served < 1:
+        reasons.append("proxy_served=0")
+    if rejected:
+        reasons.append("proxy_rejected")
+    if isinstance(boundary, dict) and boundary.get("outside") is True:
+        reasons.append("outside_write")
+    if not reasons:
+        return True, "guest wrote output.json"
+    if vmm_exit not in (0, None):
+        reasons.append(f"vmm_exit={vmm_exit}")
+    return False, "codex guest failed: " + "; ".join(reasons)
 
 
 def selfcheck_failure(payload: object) -> tuple[str, str] | None:
@@ -866,8 +892,9 @@ def open_vsock(cid: int, port: int, timeout: float = 5.0, libc=None, wrap=None):
     return socket.socket(fileno=fd)
 
 
-def _failure_detail(session, completed, net, proxy) -> str:
-    from ssios.vmguest import _command_detail, redact_text
+def _failure_detail(session, completed, net, proxy, reason: str) -> str:
+    del completed, net, proxy
+    from ssios.vmguest import redact_text
 
     serial_text = ""
     serial = session.root / "serial.log"
@@ -882,18 +909,20 @@ def _failure_detail(session, completed, net, proxy) -> str:
     if check.is_file():
         check_text = check.read_text(encoding="utf-8", errors="replace")
     lead = final_exception_line("\n".join((serial_text, err_text, check_text)))
-    parts = []
+    parts = [reason]
     if lead:
-        parts.append(lead)
-    parts.append(_command_detail(completed, "codex guest failed"))
-    if err_text:
-        parts.append(err_text[-300:])
-    if serial_text:
-        parts.append(serial_text[-400:])
-    parts.append(f"proxy_served={proxy.served} connected={getattr(proxy, 'connected', 0)} rejected={proxy.rejected} net={net}")
+        parts.insert(0, lead)
+    if err_text.strip():
+        err_line = err_text.strip().splitlines()[-1]
+        if err_line not in reason:
+            parts.append(err_line[:200])
+    if "proxy_rejected" in reason or "proxy_served=0" in reason:
+        log = session.root / "proxy.log"
+        if log.is_file():
+            lines = [line for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+            if lines:
+                parts.append(lines[-1][:240])
     body = redact_text(" ".join(parts), [])
-    if lead and not body.startswith(lead):
-        body = lead + " " + body
     return body[:500]
 
 
@@ -1105,6 +1134,28 @@ def relay():
         threading.Thread(target=handle, args=(client,), daemon=True).start()
 
 
+def message_from_events(path):
+    found = ""
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in ("agent_message", "message"):
+            continue
+        body = item.get("text") or ""
+        if isinstance(body, str) and body.strip():
+            found = body
+    return found
+
+
 def netcheck():
     names = sorted(os.listdir("/sys/class/net"))
     outbound = False
@@ -1173,8 +1224,13 @@ def main():
             text = handle.read()
     except OSError:
         text = ""
+    if not text.strip():
+        text = message_from_events("/scratch/events.jsonl")
+    result = {"text": text, "exit_code": completed.returncode, "net_ok": net_ok}
     with open("/scratch/output.json", "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"text": text, "exit_code": completed.returncode, "net_ok": net_ok}))
+        handle.write(json.dumps(result))
+        handle.flush()
+        os.fsync(handle.fileno())
     denied = False
     for folder, _dirs, files in os.walk("/scratch/codex-home"):
         for name in files:
@@ -1186,12 +1242,32 @@ def main():
                 continue
             if "Operation not permitted" in blob or "Read-only file system" in blob or "Permission denied" in blob:
                 denied = True
+    marker = os.path.exists("/workspace/marker.txt")
+    outside = os.path.exists("/opt/ssios-outside")
     with open("/scratch/boundary.json", "w", encoding="utf-8") as handle:
         handle.write(json.dumps({
-            "marker": os.path.exists("/workspace/marker.txt"),
-            "outside": os.path.exists("/opt/ssios-outside"),
+            "marker": marker,
+            "outside": outside,
             "denied": denied,
         }))
+        handle.flush()
+        os.fsync(handle.fileno())
+    summary = {
+        "result": "guest_exit",
+        "codex_exit": completed.returncode,
+        "text_bytes": len(text.encode("utf-8")),
+        "output_written": True,
+        "net_ok": net_ok,
+        "marker": marker,
+        "outside": outside,
+        "denied": denied,
+    }
+    sys.stdout.write(json.dumps(summary) + "\n")
+    sys.stdout.flush()
+    try:
+        os.sync()
+    except AttributeError:
+        pass
 
 
 if __name__ == "__main__":
