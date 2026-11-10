@@ -23,6 +23,11 @@ ALLOWED_FIELDS = {
     "revision",
     "error_code",
     "replaces",
+    "tool",
+    "byte_count",
+    "item_count",
+    "truncated",
+    "upstream_status",
 }
 
 

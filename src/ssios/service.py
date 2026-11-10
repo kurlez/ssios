@@ -85,6 +85,15 @@ class ControlPlane:
         self._cancels: dict[str, threading.Event] = {}
         self._user_cancel: dict[str, bool] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._google = None
+
+    @property
+    def google(self):
+        if self._google is None:
+            from ssios.google_connector import GoogleConnector
+
+            self._google = GoogleConnector(self)
+        return self._google
 
     def now(self) -> float:
         return time.time() + self._offset
@@ -1040,6 +1049,8 @@ class ControlPlane:
             if task is not None:
                 task["published_revision"] = revision
             return revision
+        if action == "connector.fetch":
+            return self.google.execute_approved(record)
         if action in ("memory.commit", "memory.forget"):
             if self._uses_upstream():
                 revision = self.upstream.apply(
@@ -1063,6 +1074,8 @@ class ControlPlane:
         raise SsiosError("approval_invalid", "action rejected", 400)
 
     def _preview_text(self, record: dict) -> str:
+        if record["action"] == "connector.fetch":
+            return self.google.preview(record)
         if record["action"] == "storage.publish":
             data = self.storage.staged_bytes(record["task_id"])
             if sha256_bytes(data) != record["payload_sha256"]:

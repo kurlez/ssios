@@ -52,6 +52,19 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
+    for name in ("oauth-install-client", "oauth-connect", "oauth-status", "oauth-disconnect", "oauth-revoke-account", "connector-fetch"):
+        command = sub.add_parser(name, parents=[common])
+        command.add_argument("--account", required=True)
+        if name in ("oauth-connect", "oauth-disconnect"):
+            command.add_argument("--connector", required=True, choices=("drive", "gmail"))
+        if name == "oauth-connect":
+            command.add_argument("--scope", default="")
+            command.add_argument("--no-browser", action="store_true")
+        if name == "connector-fetch":
+            command.add_argument("--project", required=True)
+            command.add_argument("--tool", required=True)
+            command.add_argument("--arguments", default="{}")
+            command.add_argument("--limits", default="{}")
     return parser
 
 
@@ -67,6 +80,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "memfs-upstream-smoke":
         return run_upstream_smoke(Path(args.state), args.config, args.letta_bin)
+    if args.command in ("oauth-install-client", "oauth-connect", "oauth-status", "oauth-disconnect", "oauth-revoke-account", "connector-fetch"):
+        try:
+            settings = load_settings(Path(args.config), state_dir=Path(args.state), port=0)
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+            return 1
+        return run_google_command(settings, args)
     try:
         settings = load_settings(
             Path(args.config),
@@ -410,6 +430,73 @@ def run_demo(settings) -> int:
         return 0
     finally:
         server.stop()
+
+
+def run_google_command(settings, args) -> int:
+    from getpass import getpass
+
+    from ssios.google_connector import member_session
+
+    plane = ControlPlane(settings)
+    plane.open()
+    session = member_session(args.account)
+    google = plane.google
+    try:
+        if args.command == "oauth-install-client":
+            client_id = input("OAuth client id: ").strip()
+            client_secret = getpass("OAuth client secret: ")
+            print(json.dumps(google.install_client(session, client_id, client_secret), ensure_ascii=False))
+            return 0
+        if args.command == "oauth-connect":
+            started = google.connect(
+                session,
+                args.connector,
+                scope=args.scope or None,
+                open_browser=not args.no_browser,
+            )
+            print("Open this URL in your browser and approve it yourself. SSIOS will not approve it for you.")
+            print(started["authorization_url"])
+            print(json.dumps(google.finish_connect(session, args.connector), ensure_ascii=False))
+            return 0
+        if args.command == "oauth-status":
+            print(json.dumps(google.status(session), ensure_ascii=False))
+            return 0
+        if args.command == "oauth-disconnect":
+            print(json.dumps(google.disconnect(session, args.connector), ensure_ascii=False))
+            return 0
+        if args.command == "oauth-revoke-account":
+            print(json.dumps(google.revoke_and_delete(args.account), ensure_ascii=False))
+            return 0
+        proposed = google.propose_fetch(
+            session,
+            project_id=args.project,
+            tool=args.tool,
+            arguments=json.loads(args.arguments),
+            limits=json.loads(args.limits),
+        )
+        approval = proposed["approval"]
+        print(json.dumps(approval, ensure_ascii=False))
+        print("Type yes to approve this read, or anything else to leave it pending.")
+        if input("").strip() != "yes":
+            print(json.dumps({"result": "pending", "approval_id": approval["id"]}, ensure_ascii=False))
+            return 2
+        decided = plane.decide(
+            plane.auth.read_secret("human"),
+            approval["id"],
+            {
+                "decision": "approve",
+                "action": approval["action"],
+                "payload_sha256": approval["payload_sha256"],
+                "expected_revision": approval["expected_revision"],
+                "bound_hash": approval["bound_hash"],
+            },
+        )
+        result = google.take_result(session, approval["id"])
+        print(json.dumps({"approval_status": decided.get("status"), "text": result["text"]}, ensure_ascii=False))
+        return 0
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        return 1
 
 
 def _existing_demo_task(plane) -> dict | None:

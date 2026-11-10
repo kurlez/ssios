@@ -135,6 +135,7 @@ A Linux guest cannot reach `127.0.0.1` on the macOS host. Do not bind Ollama to 
 - [macOS guest preflight](docs/macos-vm.md)
 - [Ubuntu and Cloud Hypervisor](docs/deployment-ubuntu.md)
 - [Licenses](docs/licenses.md)
+- [Gmail and Drive read-only connector](docs/google-connector.md)
 - Sample config: [config/ssios.example.toml](config/ssios.example.toml)
 
 ## License

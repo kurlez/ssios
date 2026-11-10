@@ -50,6 +50,9 @@ class Settings:
     core_token_budget: int
     memory_mode: str
     letta_bin: str
+    connectors_enabled: tuple[str, ...]
+    connector_max_calls: int
+    connector_max_bytes: int
     state_dir: Path
     config_path: Path | None
 
@@ -160,6 +163,19 @@ def load_settings(
     codex_num_ctx = int(codex.get("num_ctx", 16384))
     if not 8192 <= codex_num_ctx <= 32768:
         raise SsiosError("config_invalid", "agent.codex num_ctx must be from 8192 to 32768", 500)
+    connectors = _section(data, "connectors")
+    raw_enabled = connectors.get("enabled", [])
+    if raw_enabled is None:
+        raw_enabled = []
+    if isinstance(raw_enabled, str):
+        raw_enabled = [raw_enabled]
+    if not isinstance(raw_enabled, list) or any(item not in ("drive", "gmail") for item in raw_enabled):
+        raise SsiosError("config_invalid", "connectors.enabled must list drive and/or gmail", 500)
+    connectors_enabled = tuple(str(item) for item in raw_enabled)
+    connector_max_calls = int(connectors.get("max_calls", 20))
+    connector_max_bytes = int(connectors.get("max_bytes", 200000))
+    if not 1 <= connector_max_calls <= 100 or not 1 <= connector_max_bytes <= 2000000:
+        raise SsiosError("config_invalid", "connector budget is out of range", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -209,6 +225,9 @@ def load_settings(
         core_token_budget=budget,
         memory_mode=memory_mode,
         letta_bin=str(memory.get("letta_bin", "")),
+        connectors_enabled=connectors_enabled,
+        connector_max_calls=connector_max_calls,
+        connector_max_bytes=connector_max_bytes,
         state_dir=state_path,
         config_path=config_path,
     )
