@@ -10,6 +10,10 @@ from pathlib import Path
 
 from support import PlaneTest, wait_task
 
+import ctypes
+import socket
+import struct
+
 from ssios.codex_guest import (
     RequestBudget,
     ResponsesProxy,
@@ -18,10 +22,14 @@ from ssios.codex_guest import (
     codex_config_text,
     codex_items_from_ollama,
     exec_commands_from_text,
+    final_exception_line,
     guest_entry_source,
+    open_vsock,
     prepare_codex_binary,
     prepared_binary,
     render_codex_sse,
+    selfcheck_failure,
+    sockaddr_vm,
     sse_response,
     verify_sha256,
     workspace_diff,
@@ -359,6 +367,49 @@ class FailClosedTest(PlaneTest):
         self.assertIn("serial.log", text)
         self.assertIn("AF_UNIX path too long", text)
         self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
+
+
+class VsockRelayTest(unittest.TestCase):
+    def test_relay_uses_family_40_when_af_vsock_is_absent(self) -> None:
+        source = guest_entry_source(19090)
+        self.assertNotIn("socket.AF_VSOCK", source)
+        self.assertIn("family = 40", source)
+        self.assertEqual(len(sockaddr_vm(19090, 2)), 16)
+        self.assertEqual(sockaddr_vm(19090, 2)[:12], struct.pack("<HHII", 40, 0, 19090, 2))
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+
+        class Libc:
+            def socket(self, family, typ, proto):
+                self.family = family
+                return right.detach()
+
+            def connect(self, fd, addr, length):
+                self.packed = addr.raw[:length]
+                return 0
+
+            def setsockopt(self, *args):
+                return 0
+
+        libc = Libc()
+        remote = open_vsock(2, 19090, timeout=1, libc=libc)
+        self.addCleanup(remote.close)
+        self.assertEqual(libc.family, 40)
+        self.assertEqual(libc.packed, sockaddr_vm(19090, 2))
+        remote.sendall(b"ok")
+        self.assertEqual(left.recv(2), b"ok")
+
+    def test_selfcheck_and_exception_line(self) -> None:
+        code, detail = selfcheck_failure({"ok": False, "error_code": "guest_virtiofs_unavailable", "detail": "virtio-fs not mounted: /input"})
+        self.assertEqual(code, "guest_virtiofs_unavailable")
+        self.assertIn("/input", detail)
+        self.assertIsNone(selfcheck_failure({"ok": True, "detail": "vsock connected"}))
+        text = (
+            'File "/scratch/entry.py", line 28, in handle\n'
+            "    remote = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)\n"
+            "AttributeError: module 'socket' has no attribute 'AF_VSOCK'\n"
+        )
+        self.assertEqual(final_exception_line(text), "AttributeError: module 'socket' has no attribute 'AF_VSOCK'")
 
 
 class PrepareSkip(unittest.TestCase):

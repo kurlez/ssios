@@ -46,7 +46,7 @@ exec /bin/busybox sh "$@"
 EOF
 /bin/busybox chmod 755 /bin/bash
 /bin/busybox ip link set lo up
-/bin/busybox ip addr add 127.0.0.1/8 dev lo
+/bin/busybox ip addr add 127.0.0.1/8 dev lo >/dev/null 2>&1 || true
 export PATH=/opt/python/bin:/usr/bin:/bin:/tools
 export LD_LIBRARY_PATH=/opt/python/lib:/usr/lib:/lib
 /opt/python/bin/python3 /scratch/entry.py
@@ -581,12 +581,74 @@ def release_proxy_socket(directory: Path) -> None:
         return
 
 
+def supervise_process(command: list[str], proxy, deadline: float, connect_grace: float = 60):
+    """Run vfkit, and stop it if the guest never connects over vsock."""
+    import subprocess
+    import threading
+    import time
+
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout = bytearray()
+    stderr = bytearray()
+
+    def drain(stream, sink) -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                sink.extend(chunk)
+        except Exception:
+            return
+
+    threads = [
+        threading.Thread(target=drain, args=(proc.stdout, stdout), daemon=True),
+        threading.Thread(target=drain, args=(proc.stderr, stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    started = time.monotonic()
+    connect_timeout = False
+    try:
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now >= deadline:
+                proc.kill()
+                stderr.extend(b"\ntimeout")
+                break
+            if getattr(proxy, "connected", 0) < 1 and now - started >= connect_grace:
+                connect_timeout = True
+                proc.kill()
+                stderr.extend(b"\nno vsock connection")
+                break
+            time.sleep(0.05)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    finally:
+        for thread in threads:
+            thread.join(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+    code = proc.returncode if proc.returncode is not None else -9
+    completed = subprocess.CompletedProcess(command, code, bytes(stdout), bytes(stderr))
+    return completed, connect_timeout
+
+
 def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None):
     del cancel
     import time
 
     from ssios.codex_guest import RequestBudget, ResponsesProxy, _failure_detail, _snapshot, workspace_diff
-    from ssios.vmguest import GuestOutcome, _command_record, _ms, _read_json, _run
+    from ssios.vmguest import GuestOutcome, _command_record, _ms, _read_json
 
     started = time.monotonic()
     budget = RequestBudget(runtime.settings.codex_max_requests, runtime.settings.codex_max_request_bytes)
@@ -629,7 +691,12 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
             memory_mb=runtime.settings.memory_mb,
         )
         (session.root / "hypervisor.argv").write_text("\n".join(command) + "\n", encoding="utf-8")
-        completed = _run(command, max(1.0, deadline - time.monotonic()))
+        completed, connect_timeout = supervise_process(
+            command,
+            proxy,
+            deadline,
+            connect_grace=60,
+        )
         records.append(_command_record(completed))
         output = _read_json(session.root / "scratch" / "output.json")
         net = _read_json(session.root / "scratch" / "netcheck.json")
@@ -646,8 +713,22 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
             and proxy.served >= 1
             and not proxy.rejected
         )
+        from ssios.codex_guest import selfcheck_failure
+
+        check = _read_json(session.root / "scratch" / "guest_selfcheck.json")
+        parsed = selfcheck_failure(check)
+        error_code = None
+        if parsed is not None:
+            error_code, lead = parsed
+        elif connect_timeout or getattr(proxy, "connected", 0) < 1:
+            error_code = "guest_vsock_unavailable"
+            lead = "no vsock connection within 60s"
+        else:
+            lead = ""
         detail = "guest wrote output.json" if ran else _failure_detail(session, completed, net, proxy)
-        return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records)
+        if lead and lead not in detail:
+            detail = (lead + " " + detail)[:500]
+        return GuestOutcome(text_out if ran else "", ran, runtime.name, _ms(started), detail, records, error_code)
     finally:
         proxy.close()
         release_proxy_socket(socket_dir)

@@ -7,13 +7,23 @@ import io
 import os
 import stat
 import tarfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from ssios.codex_guest import UNIX_SOCKET_MAX, RequestBudget, ResponsesProxy, assert_unix_socket_path
 from ssios.errors import SsiosError
-from ssios.macos_vz import allocate_proxy_socket, assert_no_nic, cpio_entries, pack_newc, pack_tar_bytes, release_proxy_socket, vfkit_command
+from ssios.macos_vz import (
+    allocate_proxy_socket,
+    assert_no_nic,
+    cpio_entries,
+    pack_newc,
+    pack_tar_bytes,
+    release_proxy_socket,
+    supervise_process,
+    vfkit_command,
+)
 
 
 class ArgvTest(unittest.TestCase):
@@ -88,6 +98,18 @@ class SocketPathTest(unittest.TestCase):
         with self.assertRaises(SsiosError) as caught:
             assert_unix_socket_path(Path("/tmp") / ("n" * 120) / "vsock")
         self.assertEqual(caught.exception.code, "socket_path_too_long")
+
+
+class ConnectGraceTest(unittest.TestCase):
+    def test_no_connection_stops_the_process(self) -> None:
+        class Proxy:
+            connected = 0
+
+        started = time.monotonic()
+        completed, timed_out = supervise_process(["sleep", "30"], Proxy(), started + 5, connect_grace=0.3)
+        self.assertTrue(timed_out)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertNotEqual(completed.returncode, 0)
 
 
 class PackTest(unittest.TestCase):

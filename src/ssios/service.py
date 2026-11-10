@@ -840,8 +840,16 @@ class ControlPlane:
 
     def _save_diagnostic(self, task_id: str, exc: SsiosError) -> None:
         payload = getattr(exc, "diagnostic", None)
-        if exc.code == "socket_path_too_long":
-            self._write_runtime_diagnostic(task_id, "socket_path_too_long", exc.detail, [])
+        if exc.code in {
+            "socket_path_too_long",
+            "guest_vsock_unavailable",
+            "guest_virtiofs_unavailable",
+            "guest_nic_present",
+        }:
+            commands = []
+            if isinstance(payload, dict):
+                commands = payload.get("commands") or []
+            self._write_runtime_diagnostic(task_id, exc.code, exc.detail, commands if isinstance(commands, list) else [])
             return
         if not isinstance(payload, dict):
             self._set_error_detail(task_id, exc.detail)

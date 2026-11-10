@@ -29,6 +29,8 @@ bash scripts/macos-vz-codex-smoke.sh
 
 客户机根不会解到宿主机磁盘上。CPython 的 terminfo 里有 25 对只差大小写的路径，例如 `N/NCR260VT300WPP` 指向 `../n/ncr260vt300wpp`。在默认不区分大小写的 APFS 上这会变成指向自己的符号链接，Python 3.14 的 `tarfile` 过滤再调用 `realpath` 就会报 `Too many levels of symbolic links`。initramfs 在内存里从 tar 成员直接打成 cpio。`share/terminfo` 不放进客户机。每次冒烟都用新的临时目录，不必删上一次失败留下的目录。
 
-vsock 的宿主机套接字不放在状态目录里。macOS 的 `sun_path` 只有 104 字节，`/var/folders/...` 太长。代理在 `/tmp/ssios-<随机>`（0700）上监听，套接字是 0600。vfkit 0.6.4 的 `listen` 表示宿主机听、客户机连。没有打开 vfkit 的 REST 套接字。串口日志仍写在任务目录的 `guest/serial.log`，失败时路径和末尾会进 `diagnostics/<task>.json`。Homebrew 的 vfkit 自带 `com.apple.security.virtualization` 签名，这里不再签名。
+vsock 的宿主机套接字不放在状态目录里。macOS 的 `sun_path` 只有 104 字节，`/var/folders/...` 太长。代理在 `/tmp/ssios-<随机>`（0700）上监听，套接字是 0600。vfkit 0.6.4 的 `listen` 表示宿主机听、客户机连到 CID 2 端口 19090。没有打开 vfkit 的 REST 套接字。串口日志仍写在任务目录的 `guest/serial.log`，失败时路径和末尾会进 `diagnostics/<task>.json`。Homebrew 的 vfkit 自带 `com.apple.security.virtualization` 签名，这里不再签名。
+
+钉住的 `Image-arm64`（Linux 7.2.8）已经包含 virtio-vsock 和 virtio-fs。M4 上的串口日志有 `NET: Registered PF_VSOCK protocol family`。失败点是 python-build-standalone 的 CPython 3.12.16 musl 没有编译 `socket.AF_VSOCK`。中继用协议族 40，并通过 musl 的 `connect` 发送 16 字节的 `sockaddr_vm`。客户机在启动后几秒内自检；60 秒内没有 vsock 连接就停掉 vfkit。
 
 把打印出来的 `status`、`isolated`、`boot_ms`、`nic`、`outbound`、`marker`、`outside_write` 和 `sandbox_denied` 发回来。`nic` 应该只有 `lo`，`outbound` 为 false，`outside_write` 为 false，`argv_has_virtio_net` 为 false。在收到这台 Mac 的输出之前，仓库不把这次路径记成已经成功。

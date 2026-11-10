@@ -43,6 +43,7 @@ class GuestOutcome:
     boot_ms: int | None
     detail: str
     commands: list | None = None
+    error_code: str | None = None
 
 
 @dataclass

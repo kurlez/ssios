@@ -18,13 +18,17 @@ This proxy implements that subset only. It does not call Ollama or any other hos
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
+import inspect
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import stat
+import struct
 import tarfile
 import threading
 import time
@@ -169,7 +173,7 @@ def codex_config_text(port: int, model: str) -> str:
 def guest_entry_source(port: int) -> str:
     if port != VSOCK_PORT:
         raise SsiosError("config_invalid", "codex guest port is fixed for this prototype", 500)
-    return _ENTRY
+    return inspect.getsource(open_vsock) + "\n" + _ENTRY
 
 
 class RequestBudget:
@@ -433,6 +437,7 @@ class ResponsesProxy:
         self.log_path = log_path
         self.stop = threading.Event()
         self.served = 0
+        self.connected = 0
         self.rejected = False
         self._thread: threading.Thread | None = None
         self._server: socket.socket | None = None
@@ -484,6 +489,7 @@ class ResponsesProxy:
                 conn, _addr = self._server.accept()
             except (socket.timeout, OSError):
                 continue
+            self.connected += 1
             try:
                 self._handle(conn)
             finally:
@@ -495,6 +501,8 @@ class ResponsesProxy:
         try:
             request_line, headers, body = _read_http(conn, self.budget.max_bytes)
         except ValueError as exc:
+            if str(exc) == "empty":
+                return
             self.rejected = True
             self._log(redact_text(str(exc), []), "rejected")
             conn.sendall(error_response(400, "bad_request"))
@@ -673,8 +681,9 @@ def execute_codex(plane, task: dict, token: str, cancel, deadline: float) -> dic
         outcome = _boot_codex(runtime, session, answer, cancel, deadline, initramfs, upstream)
     _stamp(plane, task["id"], outcome.backend, outcome.isolated, outcome.boot_ms)
     if not outcome.isolated:
-        failed = SsiosError("microvm_fail_closed", outcome.detail or "the codex guest did not run", 503)
-        failed.diagnostic = {"classification": "microvm", "detail": outcome.detail, "commands": outcome.commands or []}
+        code = outcome.error_code or "microvm_fail_closed"
+        failed = SsiosError(code, outcome.detail or "the codex guest did not run", 503)
+        failed.diagnostic = {"classification": code, "detail": outcome.detail, "commands": outcome.commands or []}
         raise failed
     from ssios.llm import validate_summary_quality
 
@@ -789,18 +798,103 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
                 proc.kill()
 
 
+def final_exception_line(text: str) -> str:
+    found = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^[A-Za-z_][\w.]*(Error|Exception)\b", stripped):
+            found = stripped
+    return found
+
+
+def selfcheck_failure(payload: object) -> tuple[str, str] | None:
+    if not isinstance(payload, dict) or payload.get("ok") is True:
+        return None
+    code = str(payload.get("error_code") or "guest_vsock_unavailable")
+    if code not in {"guest_vsock_unavailable", "guest_virtiofs_unavailable", "guest_nic_present"}:
+        code = "guest_vsock_unavailable"
+    detail = str(payload.get("detail") or code)
+    return code, detail
+
+
+def sockaddr_vm(port: int, cid: int) -> bytes:
+    """Linux sockaddr_vm: family, reserved, port, cid, flags, pad to 16 bytes."""
+    return struct.pack("<HHIIB3x", 40, 0, port & 0xFFFFFFFF, cid & 0xFFFFFFFF, 0)
+
+
+def open_vsock(cid: int, port: int, timeout: float = 5.0, libc=None, wrap=None):
+    """Connect to the host vsock port. This musl CPython has no AF_VSOCK attribute.
+
+    Family 40 is the Linux value. Address encoding for that family is compiled out
+    too, so connect is called with a packed sockaddr_vm.
+    """
+    import ctypes
+    import os
+    import socket
+    import struct
+
+    family = 40
+    stream = socket.SOCK_STREAM
+    own = libc is None
+    if own:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.socket.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        libc.socket.restype = ctypes.c_int
+        libc.connect.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+        libc.connect.restype = ctypes.c_int
+        libc.setsockopt.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+        libc.setsockopt.restype = ctypes.c_int
+    fd = libc.socket(family, stream, 0)
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err) if err else "socket")
+    if timeout and timeout > 0 and hasattr(libc, "setsockopt"):
+        seconds = int(timeout)
+        micros = int((timeout - seconds) * 1_000_000)
+        clock = struct.pack("@qq", seconds, micros)
+        clock_buf = ctypes.create_string_buffer(clock)
+        for option in (20, 21):
+            libc.setsockopt(fd, 1, option, clock_buf, len(clock))
+    address = struct.pack("<HHIIB3x", family, 0, port & 0xFFFFFFFF, cid & 0xFFFFFFFF, 0)
+    buf = ctypes.create_string_buffer(address)
+    if libc.connect(fd, buf, len(address)) < 0:
+        err = ctypes.get_errno()
+        os.close(fd)
+        raise OSError(err, os.strerror(err) if err else "connect")
+    if wrap is not None:
+        return wrap(fd)
+    return socket.socket(fileno=fd)
+
+
 def _failure_detail(session, completed, net, proxy) -> str:
     from ssios.vmguest import _command_detail, redact_text
 
-    parts = [_command_detail(completed, "codex guest failed")]
-    err = session.root / "scratch" / "codex.err"
-    if err.is_file():
-        parts.append(err.read_text(encoding="utf-8", errors="replace")[-300:])
+    serial_text = ""
     serial = session.root / "serial.log"
     if serial.is_file():
-        parts.append(serial.read_text(encoding="utf-8", errors="replace")[-200:])
-    parts.append(f"proxy_served={proxy.served} rejected={proxy.rejected} net={net}")
-    return redact_text(" ".join(parts), [])[:500]
+        serial_text = serial.read_text(encoding="utf-8", errors="replace")
+    err_text = ""
+    err = session.root / "scratch" / "codex.err"
+    if err.is_file():
+        err_text = err.read_text(encoding="utf-8", errors="replace")
+    check_text = ""
+    check = session.root / "scratch" / "guest_selfcheck.json"
+    if check.is_file():
+        check_text = check.read_text(encoding="utf-8", errors="replace")
+    lead = final_exception_line("\n".join((serial_text, err_text, check_text)))
+    parts = []
+    if lead:
+        parts.append(lead)
+    parts.append(_command_detail(completed, "codex guest failed"))
+    if err_text:
+        parts.append(err_text[-300:])
+    if serial_text:
+        parts.append(serial_text[-400:])
+    parts.append(f"proxy_served={proxy.served} connected={getattr(proxy, 'connected', 0)} rejected={proxy.rejected} net={net}")
+    body = redact_text(" ".join(parts), [])
+    if lead and not body.startswith(lead):
+        body = lead + " " + body
+    return body[:500]
 
 
 def _snapshot(root: Path) -> dict[str, bytes]:
@@ -858,6 +952,8 @@ def _read_http(conn: socket.socket, max_bytes: int) -> tuple[str, dict, bytes]:
         buffer += chunk
         if len(buffer) > limit:
             raise ValueError("request_too_large")
+    if not buffer:
+        raise ValueError("empty")
     head, _, rest = buffer.partition(b"\r\n\r\n")
     lines = head.decode("iso-8859-1", "replace").split("\r\n")
     if not lines or " " not in lines[0]:
@@ -887,6 +983,7 @@ _ENTRY = r"""import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -909,11 +1006,82 @@ def pipe(src, dst):
         pass
 
 
+def write_selfcheck(report):
+    line = json.dumps(report)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    try:
+        handle = open("/scratch/guest_selfcheck.json", "w", encoding="utf-8")
+        handle.write(line + "\n")
+        handle.close()
+    except OSError:
+        pass
+
+
+def virtiofs_mounts():
+    found = []
+    try:
+        text = open("/proc/mounts", encoding="utf-8", errors="replace").read()
+    except OSError:
+        return found
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == "virtiofs":
+            found.append(parts[1])
+    return found
+
+
+def self_check():
+    report = {"ok": False, "error_code": "guest_vsock_unavailable", "detail": "", "interfaces": [], "mounts": []}
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        names = []
+    report["interfaces"] = names
+    mounts = virtiofs_mounts()
+    report["mounts"] = mounts
+    needed = ["/input", "/scratch", "/workspace", "/tools"]
+    missing = [path for path in needed if path not in mounts]
+    if missing:
+        report["error_code"] = "guest_virtiofs_unavailable"
+        report["detail"] = "virtio-fs not mounted: " + ",".join(missing)
+        write_selfcheck(report)
+        return False
+    if names != ["lo"]:
+        report["error_code"] = "guest_nic_present"
+        report["detail"] = "interfaces " + ",".join(names)
+        write_selfcheck(report)
+        return False
+    try:
+        remote = open_vsock(CID, PORT, timeout=5)
+        try:
+            remote.close()
+        except Exception:
+            pass
+    except Exception as exc:
+        report["error_code"] = "guest_vsock_unavailable"
+        report["detail"] = type(exc).__name__ + ": " + str(exc)
+        report["errno"] = getattr(exc, "errno", None)
+        write_selfcheck(report)
+        return False
+    report["ok"] = True
+    report["error_code"] = ""
+    report["detail"] = "vsock connected"
+    write_selfcheck(report)
+    return True
+
+
 def handle(client):
-    remote = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    remote.settimeout(10)
-    remote.connect((CID, PORT))
-    remote.settimeout(None)
+    try:
+        remote = open_vsock(CID, PORT, timeout=10)
+    except Exception as exc:
+        sys.stderr.write(type(exc).__name__ + ": " + str(exc) + "\n")
+        sys.stderr.flush()
+        try:
+            client.close()
+        except Exception:
+            pass
+        return
     left = threading.Thread(target=pipe, args=(client, remote), daemon=True)
     right = threading.Thread(target=pipe, args=(remote, client), daemon=True)
     left.start()
@@ -956,6 +1124,8 @@ def netcheck():
 
 
 def main():
+    if not self_check():
+        return
     try:
         threading.Thread(target=relay, daemon=True).start()
     except Exception as exc:

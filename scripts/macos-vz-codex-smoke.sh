@@ -124,6 +124,7 @@ if boundary_path.is_file():
     boundary = json.loads(boundary_path.read_text(encoding="utf-8"))
 if argv_path.is_file():
     argv = argv_path.read_text(encoding="utf-8")
+serial_log = guest / "serial.log"
 report = {
     "status": task.get("status"),
     "isolated": task.get("isolated"),
@@ -136,9 +137,14 @@ report = {
     "outside_write": boundary.get("outside"),
     "sandbox_denied": boundary.get("denied"),
     "argv_has_virtio_net": "virtio-net" in argv,
+    "serial_log": str(serial_log),
+    "diagnostic_path": task.get("diagnostic_path") or "",
 }
 print(json.dumps(report, ensure_ascii=False, indent=2))
 if task.get("status") != "awaiting_approval" or not task.get("isolated"):
+    sys.stderr.write("serial_log " + str(serial_log) + "\n")
+    if task.get("diagnostic_path"):
+        sys.stderr.write("diagnostic " + str(task.get("diagnostic_path")) + "\n")
     raise SystemExit("codex guest did not reach an isolated approval")
 if net.get("interfaces") != ["lo"] or net.get("outbound") is not False:
     raise SystemExit("guest network check failed")
