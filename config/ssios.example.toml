@@ -7,6 +7,10 @@ profile = "dev"
 host = "127.0.0.1"
 port = 8765
 
+[ui]
+# 127.0.0.1 is the default. Set bind to "0.0.0.0" or start `ssios ui --lan` to serve the home network over HTTPS.
+bind = "127.0.0.1"
+
 [llm]
 # mock: deterministic, no network. ollama: local Ollama, no cloud fallback.
 provider = "mock"

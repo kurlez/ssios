@@ -1,0 +1,95 @@
+# Chat, household accounts, and the home network
+
+This page is the run guide for the local chat UI. It was not executed on the Apple M4 as part of the automated tests. Those tests use a fake Ollama client and a fake guest. A real microVM boot is still the `macos-vz` smoke on the Mac, and this page does not claim that smoke was run again.
+
+## What the chat does
+
+Sign in with a household account. Each account has its own conversation files, MemFS repository, tasks, approvals, workspace, and Gmail/Drive connection. The files live under the state directory you pass to `--state`. They are not part of the git repository.
+
+The router prints its choice and the reason on the turn:
+
+- A plain question goes to local Ollama. No guest is started.
+- A request to run code, edit or create files, or touch a workspace starts the no-NIC Codex guest. On macOS that is `macos-vz` (vfkit). On Linux it is Cloud Hypervisor. If the guest cannot start, the turn fails closed. Codex is not run on the host.
+- If the router is not sure the message is only a question, it uses the guest.
+- Gmail or Drive is not fetched until you approve the read. The text then goes to local Ollama. It is placed in the guest only when the same turn also needs the guest and you approved the read.
+- Force direct and Force virtual machine override the router. Force direct still does not run tools on the host. A cloud read still waits for approval.
+
+Nothing from a guest is applied until the owning account approves the card. An admin cannot approve another account's card, and cannot read that account's chat, memory, or mail.
+
+## Start on the Mac
+
+Ollama stays on `127.0.0.1:11434`. Copy the sample config and set `provider` to `ollama` and `ollama_model` to the local name, usually `qwen2.5-coder:7b`. Do not point it at a cloud model. There is no cloud fallback.
+
+```bash
+cp config/ssios.example.toml .ssios/ollama.toml
+# edit provider and ollama_model in the copy
+PYTHONPATH=src python3 -m ssios user add --admin --username owner \
+  --state .ssios --config .ssios/ollama.toml
+```
+
+Type the password twice. It is hashed with scrypt and is not printed. The first admin owns the existing memory tree in place. The command does not move or delete `.ssios`, `.ssios-demo`, or `.ssios-memfs`.
+
+```bash
+PYTHONPATH=src python3 -m ssios ui --state .ssios --config .ssios/ollama.toml
+```
+
+Open the printed `http://127.0.0.1:<port>/ui/login` URL. Sign in with the username and password. Chat is at `/ui/chat`.
+
+- Direct answer: send `What is a microVM?` and leave the route on Auto. The badge says `direct`.
+- Guest task: send `edit readme.md`. The turn shows booting, running, and the isolation checks, then an approval card. Approving records the result. It does not run the change on the host outside the account workspace.
+
+`ssios up` still serves the same UI on loopback. `ssios ui` is the same server with the `--lan` switch below.
+
+## Home network (opt-in)
+
+The default bind is `127.0.0.1`. To serve other computers on the home LAN:
+
+```bash
+PYTHONPATH=src python3 -m ssios ui --lan --state .ssios --config .ssios/ollama.toml
+```
+
+The same choice can be saved as `[ui] bind = "0.0.0.0"` in the config copy. Any other bind address is rejected.
+
+When LAN mode is on, the server speaks HTTPS. The first start writes a self-signed certificate under `<state>/ui/tls/` (mode `0600`) and prints the SHA-256 fingerprint. Compare that fingerprint with the browser warning before you continue. To use mkcert instead, put `cert.pem` and `key.pem` in that directory before starting. They are used as-is and are not overwritten.
+
+Startup prints `https://<hostname>.local:<port>` and the private IP URLs it can see. Only loopback, RFC1918, IPv4 link-local, IPv6 unique-local, and IPv6 link-local clients are accepted. Other source addresses are rejected. The Host and Origin must match this server, and browser origins are not given CORS headers.
+
+macOS may show a firewall prompt the first time the process listens on all interfaces. Allow incoming connections if a browser on another computer on the home network should connect. If you deny the prompt, a browser on the Mac itself can still use the loopback URL.
+
+Every page, including the chat event stream, requires a signed-in account. Login attempts are rate-limited. The session cookie is HttpOnly and SameSite=Strict, and it is marked Secure while HTTPS is on. State-changing requests, including approvals and Gmail/Drive connect or disconnect, require the CSRF token from the signed-in page.
+
+## Accounts and the admin console
+
+```bash
+PYTHONPATH=src python3 -m ssios user add --username ada --state .ssios --config .ssios/ollama.toml
+```
+
+That host command creates an active member. A person can also request an account at `/ui/signup`, or open a one-time invite created in the admin console. Those accounts stay pending until an admin approves them. Sign-up is rate-limited. A request cannot choose the admin role.
+
+The admin console is `/ui/admin`. An admin can approve or reject a request, enable or disable an account, assign admin or member, reset a password, or delete an account. Delete asks you to type `delete <username>`. It does not delete silently.
+
+Password reset revokes that account's sessions and its Google connections. The member must choose a new password and connect Gmail or Drive again. Resetting a password and signing in as that member does not reveal old mail, because the tokens are revoked first.
+
+Delete revokes the Google tokens, deletes the keychain items for `ssios.google.<account id>`, then moves that account's local directory to `<state>/accounts/archive/<account id>-<time>/` (mode `0700`). The archive is not served by the UI. The original single-user memory tree, which belongs to the first admin, is not moved.
+
+An admin sees whether Gmail or Drive is connected, and the connected-at time. The console does not show tokens, message bodies, Drive file contents, conversations, or memory. There is no impersonation.
+
+`/ui/audit` is the signed-in account's own activity. `/ui/admin/audit` is the full log, with filters and an export. `ssios audit-verify` checks the hash chain. The log records logins, sign-ups, account decisions, connection and fetch metadata (service, item ids, counts), guest start and finish, and routing decisions. It does not record message text, memory text, mail, file contents, tokens, or passwords.
+
+## Gmail and Drive
+
+The chat UI talks to a small adapter. The live Google module, when it is installed, is `ssios.google_connector.build_connector(secret_store)` or `ssios.google.GoogleConnector`. Until that module is present, Connect explains that consent still has to finish on the host and does not store a token.
+
+Every call carries the signed-in account id. The methods are `connect`, `status` (service, connected, connected_at only), `disconnect`, `fetch` (only after approval), and `revoke_and_delete`. None of them return a token. Scopes are `gmail.readonly` and `drive.readonly`.
+
+Tokens and the OAuth client secret belong in the operating system secret store, under the service name `ssios.google.<account id>`. macOS uses Keychain. Linux uses Secret Service (`secret-tool`, with the secret on stdin). They are not written to a file in the state directory or the git repository.
+
+If you click Connect from another computer, the page shows a consent URL and tells you to open it in a browser on the Mac that runs SSIOS. Google redirects to `127.0.0.1` on that Mac. A browser on another computer cannot finish that redirect. You can also sit at the Mac and click Connect there. The OAuth callback is never bound to the LAN address.
+
+## Tests
+
+```bash
+make test
+```
+
+The chat tests use an in-memory secret store and a fake guest. They do not call Google and they do not boot a virtual machine.

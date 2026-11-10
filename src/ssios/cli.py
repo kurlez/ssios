@@ -31,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
-        if name in ("up", "demo", "preflight", "summary"):
+        if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
             command.add_argument("--port", type=int)
         if name == "summary":
@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("task_id")
         if name == "gc":
             command.add_argument("--dry-run", action="store_true")
+        if name == "ui":
+            command.add_argument("--lan", action="store_true")
+        if name == "user":
+            command.add_argument("user_action", choices=("add",))
+            command.add_argument("--admin", action="store_true")
+            command.add_argument("--username", required=True)
         if name == "ui-login":
             pass
         if name == "memfs-info":
@@ -107,6 +113,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "up":
         return _up(settings)
+    if args.command == "ui":
+        if getattr(args, "lan", False):
+            settings = replace(settings, ui_bind="0.0.0.0")
+        return _up(settings)
+    if args.command == "user":
+        return run_user_add(settings, args.username, admin=bool(args.admin))
+    if args.command == "audit-verify":
+        plane = ControlPlane(settings)
+        plane.open()
+        report = plane.security_audit.verify()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("ok") else 1
     if args.command in ("health", "status"):
         return _get(settings, "/v1/health" if args.command == "health" else "/v1/status")
     if args.command == "demo":
@@ -160,6 +178,36 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "internal", "detail": exc.__class__.__name__}, ensure_ascii=False), flush=True)
             return 1
     return 2
+
+
+def run_user_add(settings, username: str, *, admin: bool) -> int:
+    from ssios.accounts import public_account
+
+    plane = ControlPlane(settings)
+    plane.open()
+    password = _read_password()
+    if not password:
+        print(json.dumps({"error": "password_rejected", "detail": "password was empty or the two entries did not match"}, ensure_ascii=False))
+        return 1
+    try:
+        account = plane.accounts.add_admin(username, password) if admin else plane.accounts.add_member(username, password)
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        return 1
+    print(json.dumps(public_account(account), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _read_password() -> str:
+    if sys.stdin.isatty():
+        import getpass
+
+        first = getpass.getpass("Password: ")
+        second = getpass.getpass("Repeat password: ")
+        if first != second:
+            return ""
+        return first
+    return sys.stdin.readline().rstrip("\n")
 
 
 def run_vm_prepare(settings) -> int:
@@ -277,9 +325,24 @@ def _up(settings) -> int:
         print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
         return 1
     server.start()
-    listen_url = f"http://127.0.0.1:{plane.bound_port}"
-    (settings.state_dir / "listen.url").write_text(listen_url + "\n", encoding="utf-8")
+    from ssios.config import lan_enabled
+    from ssios.netguard import local_urls
+
+    urls = local_urls(plane.bound_port, tls=lan_enabled(settings))
+    listen_url = urls[0]
+    (settings.state_dir / "listen.url").write_text("\n".join(urls) + "\n", encoding="utf-8")
     print(f"SSIOS dev profile is listening at {listen_url}", flush=True)
+    for extra in urls[1:]:
+        print(f"LAN URL: {extra}", flush=True)
+    if getattr(server, "fingerprint", ""):
+        print(f"Certificate SHA-256 fingerprint: {server.fingerprint}", flush=True)
+        print(
+            "Compare that fingerprint with the browser warning. "
+            "macOS may prompt to allow incoming connections the first time this program listens. "
+            "Allow it for browsers on the home network. "
+            "If you deny it, a browser on this Mac can still use the loopback address.",
+            flush=True,
+        )
     print(f"Profile: {settings.profile}, model: {settings.llm_provider}, memory mode: {settings.memory_mode}", flush=True)
     try:
         while True:

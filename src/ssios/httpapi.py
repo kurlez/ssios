@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import ssl
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from ssios.config import lan_enabled
 from ssios.errors import SsiosError
+from ssios.netguard import is_loopback, require_host, require_peer
 from ssios.ui import Page, handle as handle_ui
 
 
@@ -45,11 +48,18 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             if self.command not in ("GET", "POST"):
                 raise SsiosError("method_not_allowed", "method rejected", 405)
-            self._check_host()
+            lan = lan_enabled(self.server.plane.settings)
+            peer = self.client_address[0]
+            require_peer(peer, lan=lan)
+            require_host(self.headers.get("Host", ""), lan=lan)
             parts = urlsplit(self.path)
+            if (self.headers.get("Upgrade") or "").lower() == "websocket" and not (parts.path == "/ui" or parts.path.startswith("/ui/")):
+                raise SsiosError("unauthorized", "authentication required", 401)
             if parts.path == "/ui" or parts.path.startswith("/ui/"):
                 self._ui()
                 return
+            if lan and not is_loopback(peer):
+                raise SsiosError("unauthorized", "authentication required", 401)
             if self.headers.get("Origin"):
                 raise SsiosError("cors_denied", "browser origins are rejected", 403)
             token = self._bearer()
@@ -105,21 +115,44 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _ui(self) -> None:
         body = self._form() if self.command == "POST" else {}
-        page = handle_ui(self.server.plane, self.command, self.path, self.headers, body)
+        page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
         if not isinstance(page, Page):
             raise SsiosError("internal", "internal error", 500)
+        if page.stream is not None:
+            self._stream(page)
+            return
         data = page.body.encode("utf-8")
         self.send_response(page.status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", page.content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
         if page.cookie:
             self.send_header("Set-Cookie", page.cookie)
         self.end_headers()
         self.wfile.write(data)
+
+    def _stream(self, page: Page) -> None:
+        self.send_response(page.status)
+        self.send_header("Content-Type", page.content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+        self.send_header("Referrer-Policy", "same-origin")
+        if page.cookie:
+            self.send_header("Set-Cookie", page.cookie)
+        self.end_headers()
+        try:
+            for chunk in page.stream:
+                data = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+                self.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        self.wfile.write(b"0\r\n\r\n")
 
     def _form(self) -> dict:
         try:
@@ -188,7 +221,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 class ControlServer:
     def __init__(self, plane) -> None:
-        host = plane.settings.host
+        host = plane.settings.ui_bind or plane.settings.host
         if host == "localhost":
             host = "127.0.0.1"
         try:
@@ -199,6 +232,16 @@ class ControlServer:
                 f"cannot bind {host}:{plane.settings.port} ({exc.errno})",
                 500,
             ) from exc
+        self.fingerprint = ""
+        if lan_enabled(plane.settings):
+            from ssios.tlsutil import ensure_certificate
+
+            cert, key, digest = ensure_certificate(plane.settings.state_dir)
+            self.fingerprint = digest
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+            self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
         plane.bound_port = self.httpd.server_address[1]
         self._thread = None
         self._stopped = False

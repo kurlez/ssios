@@ -53,6 +53,7 @@ class Settings:
     connectors_enabled: tuple[str, ...]
     connector_max_calls: int
     connector_max_bytes: int
+    ui_bind: str
     state_dir: Path
     config_path: Path | None
 
@@ -176,6 +177,12 @@ def load_settings(
     connector_max_bytes = int(connectors.get("max_bytes", 200000))
     if not 1 <= connector_max_calls <= 100 or not 1 <= connector_max_bytes <= 2000000:
         raise SsiosError("config_invalid", "connector budget is out of range", 500)
+    ui = _section(data, "ui")
+    ui_bind = str(ui.get("bind", "127.0.0.1"))
+    if ui_bind == "localhost":
+        ui_bind = "127.0.0.1"
+    if ui_bind not in ("127.0.0.1", "0.0.0.0"):
+        raise SsiosError("config_invalid", "ui bind must be 127.0.0.1 or 0.0.0.0", 500)
     state_path = Path(state_dir).expanduser()
     if not state_path.is_absolute():
         state_path = Path.cwd() / state_path
@@ -228,6 +235,11 @@ def load_settings(
         connectors_enabled=connectors_enabled,
         connector_max_calls=connector_max_calls,
         connector_max_bytes=connector_max_bytes,
+        ui_bind=ui_bind,
         state_dir=state_path,
         config_path=config_path,
     )
+
+
+def lan_enabled(settings) -> bool:
+    return settings.ui_bind == "0.0.0.0"

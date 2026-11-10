@@ -121,12 +121,13 @@ The local page listens only on `127.0.0.1`. The API still uses a Bearer token. S
 PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
 ```
 
-The printed address includes a one-time code that is valid for about two minutes. You can also open `http://127.0.0.1:8765/ui/login` and paste the human token. The token does not appear in the session file.
+The printed address includes a one-time code that is valid for about two minutes, and only on this Mac. It signs in the admin created with `ssios user add --admin`. There is no default password. The human token is not a web password. Chat, household accounts, and the optional home-network UI are described in [docs/chat-ui.md](docs/chat-ui.md).
 
 A Linux guest cannot reach `127.0.0.1` on the macOS host. Do not bind Ollama to `0.0.0.0` by default. If the guest must call the host model, forward only that guest address and restrict the source in the firewall. See [docs/macos-m4.md](docs/macos-m4.md).
 
 ## Docs
 
+- [Chat, accounts, and the home-network UI](docs/chat-ui.md)
 - [Architecture and trust boundary](docs/architecture.md)
 - [MemFS integration boundary](docs/memfs.md)
 - [Implementation status](docs/status.md)

@@ -21,26 +21,39 @@ SESSION_TTL = 12 * 3600
 
 
 class Page:
-    def __init__(self, status: int, body: str, *, cookie: str | None = None) -> None:
+    def __init__(self, status: int, body: str, *, cookie: str | None = None, stream=None, content_type: str = "text/html; charset=utf-8") -> None:
         self.status = status
         self.body = body
         self.cookie = cookie
+        self.stream = stream
+        self.content_type = content_type
 
 
-def handle(plane, method: str, target: str, headers, body: dict) -> Page:
+def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
     parts = urlsplit(target)
     path = parts.path.rstrip("/") or "/ui"
     query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
-    rejected = _check_origin(plane, headers)
+    rejected = _check_origin(plane, headers, method)
     if rejected is not None:
         return rejected
     if method == "GET" and path == "/ui/login":
         return Page(200, _login_page(query.get("code", "")))
     if method == "POST" and path == "/ui/login":
-        return _login(plane, body)
+        return _login(plane, body, peer_ip)
+    if path in {"/ui/signup", "/ui/join"}:
+        from ssios.ui_household import handle_household
+
+        return handle_household(plane, method, path, None, body, query, peer_ip, headers)
+    if (headers.get("Upgrade") or "").lower() == "websocket":
+        return Page(401, _login_page(""))
     session = _session(plane, headers)
     if session is None:
         return Page(401, _login_page(""))
+    from ssios.ui_household import handle_household
+
+    extra = handle_household(plane, method, path, session, body, query, peer_ip, headers)
+    if extra is not None:
+        return extra
     if method == "GET" and path == "/ui":
         return Page(200, _dashboard(plane, session))
     if method == "GET" and path == "/ui/tasks":
@@ -51,7 +64,7 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
         return Page(200, _approvals(plane, session))
     if method == "POST" and path.startswith("/ui/approvals/"):
         _csrf(session, body)
-        return _decide(plane, session, path.rsplit("/", 1)[-1], body)
+        return _decide(plane, session, path.rsplit("/", 1)[-1], body, peer_ip)
     if method == "GET" and path == "/ui/ingest":
         return Page(200, _ingest_form(plane, session, ""))
     if method == "POST" and path == "/ui/ingest":
@@ -61,17 +74,7 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
         return Page(200, _summary_form(plane, session))
     if method == "POST" and path == "/ui/summary":
         _csrf(session, body)
-        created = plane.create_task(
-            plane.auth.read_secret("human"),
-            {
-                "project_id": body.get("project_id", "local-summary"),
-                "topic": body.get("topic") or body.get("project_id", "local-summary"),
-                "kind": "project-summary",
-                "input_revision": "exp-1",
-                "input_path": "notes.md",
-            },
-        )
-        return Page(200, _page(session, "Task created", f"<p>Task {html.escape(created['id'])} is queued. Approval still happens in the inbox.</p>"))
+        return _summary_post(plane, session, body)
     if method == "GET" and path == "/ui/memory":
         return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", "")))
     if method == "GET" and path == "/ui/settings":
@@ -96,29 +99,63 @@ def issue_login_code(plane) -> str:
     return raw
 
 
-def _login(plane, body: dict) -> Page:
-    token = str(body.get("token") or "")
+def _login(plane, body: dict, peer_ip: str) -> Page:
+    from ssios.netguard import is_loopback
+
+    username = str(body.get("username") or "")
+    password = str(body.get("password") or "")
     code = str(body.get("code") or "")
-    if code and _take_code(plane, code):
-        return _start_session(plane)
-    expected = plane.auth.read_secret("human")
-    if token and hmac.compare_digest(token, expected):
-        return _start_session(plane)
+    try:
+        plane.login_limiter.check(peer_ip)
+    except SsiosError as exc:
+        _security(plane, "anonymous", peer_ip, "login", "rate", "denied")
+        return Page(exc.status, _login_page(""))
+    if code and is_loopback(peer_ip) and _take_code(plane, code):
+        admin = plane.accounts.legacy_admin()
+        if admin is None:
+            plane.login_limiter.fail(peer_ip)
+            _security(plane, "anonymous", peer_ip, "login", "code", "denied")
+            return Page(401, _login_page(""))
+        plane.login_limiter.succeed(peer_ip)
+        _security(plane, admin["id"], peer_ip, "login", admin["id"], "ok")
+        return _start_account_session(plane, admin)
+    if username and password:
+        try:
+            account = plane.accounts.authenticate(username, password)
+        except SsiosError as exc:
+            plane.login_limiter.fail(peer_ip)
+            _security(plane, "anonymous", peer_ip, "login", "password", "denied")
+            if exc.code == "account_inactive":
+                return Page(403, _login_page(""))
+            return Page(401, _login_page(""))
+        plane.login_limiter.succeed(peer_ip)
+        _security(plane, account["id"], peer_ip, "login", account["id"], "ok")
+        return _start_account_session(plane, account)
+    plane.login_limiter.fail(peer_ip)
+    _security(plane, "anonymous", peer_ip, "login", "password", "denied")
     return Page(401, _login_page(""))
 
 
-def _start_session(plane) -> Page:
-    session_id = secrets.token_urlsafe(24)
-    csrf = secrets.token_urlsafe(18)
-    path = _ui_dir(plane) / "sessions.json"
-    current = read_json(path, {"sessions": {}})
-    if not isinstance(current, dict):
-        current = {"sessions": {}}
-    sessions = current.get("sessions") if isinstance(current.get("sessions"), dict) else {}
-    sessions[session_id] = {"csrf": csrf, "expires": time.time() + SESSION_TTL}
-    write_json(path, {"sessions": sessions}, 0o600)
+def _start_account_session(plane, account: dict) -> Page:
+    from ssios.config import lan_enabled
+
+    session_id, csrf = plane.accounts.create_session(account["id"])
+    fresh = plane.accounts.read_session(session_id) or {"id": session_id, "csrf": csrf, "account": account}
     cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/ui"
-    return Page(200, _page({"csrf": csrf}, "Signed in", "<p>Signed in. The token was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"), cookie=cookie)
+    if lan_enabled(plane.settings):
+        cookie += "; Secure"
+    return Page(
+        200,
+        _page(fresh, "Signed in", "<p>Signed in. The password was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"),
+        cookie=cookie,
+    )
+
+
+def _security(plane, actor: str, peer_ip: str, action: str, target: str, result: str) -> None:
+    try:
+        plane.security_audit.write(actor=actor, ip=peer_ip or "127.0.0.1", action=action, target=target, result=result)
+    except SsiosError:
+        return
 
 
 def _session(plane, headers) -> dict | None:
@@ -126,12 +163,10 @@ def _session(plane, headers) -> dict | None:
     morsel = jar.get(SESSION_COOKIE)
     if morsel is None or not morsel.value:
         return None
-    current = read_json(_ui_dir(plane) / "sessions.json", {"sessions": {}})
-    sessions = current.get("sessions") if isinstance(current, dict) else {}
-    record = sessions.get(morsel.value) if isinstance(sessions, dict) else None
-    if not isinstance(record, dict) or record.get("expires", 0) < time.time():
-        return None
-    return {"id": morsel.value, "csrf": record.get("csrf", "")}
+    account_session = plane.accounts.read_session(morsel.value)
+    if account_session is not None:
+        return account_session
+    return None
 
 
 def _csrf(session: dict, body: dict) -> None:
@@ -158,10 +193,11 @@ def _take_code(plane, raw: str) -> bool:
 
 
 def _drop_session(plane, session_id: str) -> None:
+    plane.accounts.drop_session(session_id)
     path = _ui_dir(plane) / "sessions.json"
     current = read_json(path, {"sessions": {}})
     sessions = current.get("sessions") if isinstance(current, dict) else {}
-    if isinstance(sessions, dict):
+    if isinstance(sessions, dict) and session_id in sessions:
         sessions.pop(session_id, None)
         write_json(path, {"sessions": sessions}, 0o600)
 
@@ -200,8 +236,21 @@ def _origin_value(value: str) -> str:
     return f"http://{host}:{parts.port}"
 
 
-def _check_origin(plane, headers) -> Page | None:
+def _check_origin(plane, headers, method: str = "GET") -> Page | None:
     """Reject cross-site UI posts. A literal Origin of null falls back to Referer."""
+    from ssios.config import lan_enabled
+    from ssios.netguard import origin_allowed
+
+    if lan_enabled(plane.settings):
+        port = _bound_port(plane)
+        origin = str(headers.get("Origin") or "").strip()
+        site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site == "cross-site":
+            return _origin_rejection(origin or "(no Origin)", {f"https://127.0.0.1:{port}"})
+        if method == "POST" or origin:
+            if not origin_allowed(origin, lan=True, port=port):
+                return _origin_rejection(origin or "(no Origin)", {f"https://<lan-host>:{port}"})
+        return None
     port = _bound_port(plane)
     allowed = loopback_origins(port)
     origin = str(headers.get("Origin") or "").strip()
@@ -250,16 +299,41 @@ def _dashboard(plane, session: dict) -> str:
     return _page(session, "Console", body)
 
 
+def _account(session: dict) -> dict:
+    account = session.get("account")
+    if not isinstance(account, dict):
+        raise SsiosError("unauthorized", "authentication required", 401)
+    return account
+
+
 def _tasks(plane, session: dict) -> str:
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
     rows = []
-    for task in plane.tasks.values():
+    if account.get("legacy_owner"):
+        for task in plane.tasks.values():
+            rows.append(
+                f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
+            )
+    for task in scope.tasks().values():
         rows.append(
-            f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
+            f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
         )
     return _page(session, "Tasks", "<ul>" + "".join(rows) + "</ul>")
 
 
 def _task(plane, session: dict, task_id: str) -> str:
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    owned = scope.tasks().get(task_id)
+    if isinstance(owned, dict):
+        return _page(session, task_id, f"<pre>{html.escape(json.dumps(owned, ensure_ascii=False, indent=2))}</pre>")
+    if not account.get("legacy_owner"):
+        return _page(session, "Task", "<p>Task not found.</p>")
     try:
         task = plane.get_task(_human(plane), task_id)
     except SsiosError as exc:
@@ -278,14 +352,25 @@ def _task(plane, session: dict, task_id: str) -> str:
 
 
 def _approvals(plane, session: dict) -> str:
+    from ssios.scope import AccountScope
+
     rows = []
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    records = []
+    if account.get("legacy_owner"):
+        records.extend(record for record in plane.approvals.records() if record.get("status") == "pending")
+    records.extend(scope.list_pending())
     token = _human(plane)
-    for record in plane.approvals.records():
+    for record in records:
         if record.get("status") != "pending":
             continue
-        preview = plane.get_approval(token, record["approval_id"])
-        files = preview.get("files") or []
-        diff = html.escape("\n\n".join(str(item.get("content") or "") for item in files))
+        if record.get("approval_id") in {item.get("approval_id") for item in scope.list_pending()}:
+            diff = html.escape(scope.preview(record))
+        else:
+            preview = plane.get_approval(token, record["approval_id"])
+            files = preview.get("files") or []
+            diff = html.escape("\n\n".join(str(item.get("content") or "") for item in files))
         rows.append(
             "<article><h2>"
             + html.escape(str(record.get("action")))
@@ -312,9 +397,24 @@ def _decision_form(session: dict, record: dict) -> str:
     )
 
 
-def _decide(plane, session: dict, approval_id: str, body: dict) -> Page:
-    result = plane.decide(_human(plane), approval_id, body)
-    return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+def _decide(plane, session: dict, approval_id: str, body: dict, peer_ip: str = "127.0.0.1") -> Page:
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    if scope.has_approval(approval_id):
+        result = scope.decide(approval_id, body, peer_ip)
+        if result.get("status") == "consumed" and result.get("action") == "connector.fetch":
+            from ssios.chat import continue_after_fetch
+            from ssios.ui_household import _events_html
+
+            events = list(continue_after_fetch(plane, account, result, peer_ip))
+            return Page(200, _page(session, "Decided", _events_html(session, events)))
+        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    if account.get("legacy_owner"):
+        result = plane.decide(_human(plane), approval_id, body)
+        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    raise SsiosError("not_found", "approval not found", 404)
 
 
 def _ingest_form(plane, session: dict, notice: str) -> str:
@@ -333,6 +433,9 @@ def _ingest_form(plane, session: dict, notice: str) -> str:
 
 
 def _ingest(plane, session: dict, body: dict) -> Page:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        raise SsiosError("forbidden", "ingest for another account is rejected", 403)
     project_id = str(body.get("project_id") or "")
     filename = str(body.get("filename") or "")
     content = str(body.get("content") or "")
@@ -362,6 +465,23 @@ def _ingest(plane, session: dict, body: dict) -> Page:
     )
 
 
+def _summary_post(plane, session: dict, body: dict) -> Page:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        raise SsiosError("forbidden", "summary tasks stay on the original account", 403)
+    created = plane.create_task(
+        plane.auth.read_secret("human"),
+        {
+            "project_id": body.get("project_id", "local-summary"),
+            "topic": body.get("topic") or body.get("project_id", "local-summary"),
+            "kind": "project-summary",
+            "input_revision": "exp-1",
+            "input_path": "notes.md",
+        },
+    )
+    return Page(200, _page(session, "Task created", f"<p>Task {html.escape(created['id'])} is queued. Approval still happens in the inbox.</p>"))
+
+
 def _summary_form(plane, session: dict) -> str:
     del plane
     csrf = html.escape(str(session["csrf"]))
@@ -376,6 +496,22 @@ def _summary_form(plane, session: dict) -> str:
 
 
 def _memory(plane, session: dict, project_id: str, path: str) -> str:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        from ssios.scope import AccountScope
+
+        scope = AccountScope(plane, account)
+        project_id = scope.project_id()
+        paths = scope.memory().list_markdown(project_id)
+        links = "".join(
+            f"<li><a href=\"/ui/memory?path={html.escape(item)}\">{html.escape(item)}</a></li>"
+            for item in paths
+        )
+        content = ""
+        if path:
+            doc = scope.memory().read_file(project_id, path, include_untrusted=False)
+            content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>"
+        return _page(session, "Memory", f"<ul>{links}</ul>{content}")
     paths = plane.memory.list_markdown(project_id) if not plane._uses_upstream() else plane.upstream.list_markdown(project_id)
     links = "".join(
         f"<li><a href=\"/ui/memory?project_id={html.escape(project_id)}&path={html.escape(item)}\">{html.escape(item)}</a></li>"
@@ -420,10 +556,17 @@ nav { display: flex; gap: 1rem; padding: 1rem 0; }
 a { color: #6b3a1f; }
 h1 { font-weight: 500; }
 form { display: grid; gap: 0.75rem; }
-input, textarea, button { font: inherit; padding: 0.45rem 0.6rem; }
+label { display: grid; gap: 0.25rem; }
+input, textarea, select, button { font: inherit; padding: 0.45rem 0.6rem; }
 button { background: #1c1915; color: #f6f1e7; border: 0; width: max-content; }
+form.row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 pre { white-space: pre-wrap; background: #fff; padding: 1rem; }
 article { border-top: 1px solid #d9d0c1; padding-top: 1rem; }
+.route { color: #6b3a1f; }
+.approval { background: #fff; padding: 1rem; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; vertical-align: top; padding: 0.4rem; border-bottom: 1px solid #d9d0c1; }
+nav { flex-wrap: wrap; }
 </style>
 """
 
@@ -434,22 +577,31 @@ def _login_page(code: str) -> str:
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sign in</title>"
         + _STYLE
         + "<body><main><h1>Sign in</h1><form method=\"post\" action=\"/ui/login\">"
+        "<label>Username <input name=\"username\" autocomplete=\"username\"></label>"
+        "<label>Password <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>"
         f"<label>One-time code <input name=\"code\" value=\"{value}\"></label>"
-        "<label>Human token <input name=\"token\" type=\"password\"></label>"
-        "<button type=\"submit\">Sign in</button></form></main></body></html>"
+        "<button type=\"submit\">Sign in</button></form>"
+        "<p><a href=\"/ui/signup\">Request an account</a></p>"
+        "<p>The first admin is created on the host with <code>ssios user add --admin</code>. There is no default password.</p>"
+        "</main></body></html>"
     )
 
 
 def _page(session: dict, title: str, body: str) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    admin = "<a href=\"/ui/admin\">Admin</a> " if account.get("role") == "admin" else ""
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>"
         + html.escape(title)
         + "</title>"
         + _STYLE
-        + "<body><nav><a href=\"/ui\">Console</a> <a href=\"/ui/tasks\">Tasks</a> "
-        "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
-        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a></nav>"
+        + "<body><nav><a href=\"/ui\">Console</a> <a href=\"/ui/chat\">Chat</a> <a href=\"/ui/tasks\">Tasks</a> "
+        "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/connections\">Connections</a> "
+        "<a href=\"/ui/audit\">Activity</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a> "
+        + admin
+        + "</nav>"
         f"<main><h1>{html.escape(title)}</h1>{body}"
         f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button type=\"submit\">Sign out</button></form></main></body></html>"

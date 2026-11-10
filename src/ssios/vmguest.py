@@ -546,7 +546,14 @@ def redact_text(text: str, secrets: list[str]) -> str:
 
 
 def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> GuestSession:
-    root = plane.settings.state_dir / "storage" / "tasks" / task["id"] / "guest"
+    raw_root = task.get("guest_root")
+    if raw_root:
+        root = Path(str(raw_root)).resolve()
+        allowed = (plane.settings.state_dir / "accounts").resolve()
+        if allowed not in root.parents:
+            raise SsiosError("path_rejected", "guest root is outside the account workspace", 403)
+    else:
+        root = plane.settings.state_dir / "storage" / "tasks" / task["id"] / "guest"
     if root.exists():
         shutil.rmtree(root)
     input_dir = root / "input"

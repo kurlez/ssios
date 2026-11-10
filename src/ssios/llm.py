@@ -534,6 +534,24 @@ class MockLLM:
         text = "Synthetic project summary\n" + "\n".join(f"- {marker}" for marker in MARKERS)
         return ModelResponse(kind="final", text=text, raw_approve_flag=True)
 
+    def complete_chat(self, messages: list[dict], *, cancel_event, deadline: float) -> str:
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        blob = json.dumps(messages, ensure_ascii=False)
+        if "MEMORY-CONTEXT" in blob and "HARBOR-LOCK" in blob:
+            return "Synthetic local answer. The memory excerpt stayed on this machine. No tools were used."
+        if "Untrusted approved cloud text" in blob:
+            return "Synthetic local answer using the approved cloud text. No tools were used."
+        return "Synthetic local answer. No tools were used."
+
+    def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
+        text = self.complete_chat(messages, cancel_event=cancel_event, deadline=deadline)
+        parts = text.split(" ")
+        for index, part in enumerate(parts):
+            if cancel_event.is_set() or time.monotonic() >= deadline:
+                raise FlowInterrupt("timeout")
+            yield part if index == len(parts) - 1 else part + " "
+
 
 class OllamaLLM:
     provider = "ollama"
@@ -659,6 +677,79 @@ class OllamaLLM:
             else:
                 raise
         return body
+
+    def complete_chat(self, messages: list[dict], *, cancel_event, deadline: float) -> str:
+        return "".join(self.stream_chat(messages, cancel_event=cancel_event, deadline=deadline)).strip()
+
+    def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
+        """Stream native /api/chat. There is no cloud fallback."""
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        think = False if self._supports_think_false(deadline) else None
+        payload = _chat_payload(
+            self.model,
+            messages,
+            None,
+            num_predict=self.max_output_tokens,
+            think=think,
+            num_ctx=self.num_ctx,
+            schema_hint=False,
+        )
+        payload["stream"] = True
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        yield from _iter_chat_stream(self.base_url + "/api/chat", payload, timeout, deadline)
+
+    def judge_route(self, text: str, deadline: float | None = None) -> str:
+        """One local judgment. Anything other than the word direct stays on the guest."""
+        limit = deadline if isinstance(deadline, float) else time.monotonic() + 10
+        messages = [
+            {"role": "system", "content": "Reply with one word: direct or vm."},
+            {"role": "user", "content": text[:1000]},
+        ]
+        try:
+            answer = self.complete_chat(messages, cancel_event=threading_event(), deadline=limit)
+        except (SsiosError, FlowInterrupt):
+            return "vm"
+        return "direct" if answer.strip().lower() == "direct" else "vm"
+
+
+def threading_event():
+    import threading
+
+    return threading.Event()
+
+
+def _iter_chat_stream(url: str, payload: dict, timeout: float, deadline: float):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        raise SsiosError("llm_unavailable", f"ollama http {exc.code}", 503) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise SsiosError("llm_unavailable", "ollama timed out", 503) from exc
+    except urllib.error.URLError as exc:
+        raise SsiosError("llm_unavailable", "ollama is unreachable", 503) from exc
+    try:
+        while time.monotonic() < deadline:
+            line = response.readline()
+            if not line:
+                break
+            try:
+                body = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(body, dict):
+                continue
+            message = body.get("message") if isinstance(body.get("message"), dict) else {}
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                yield content
+            if body.get("done") is True:
+                break
+    finally:
+        response.close()
 
 
 def _to_ollama(messages: list[dict]) -> list[dict]:

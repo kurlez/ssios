@@ -37,14 +37,17 @@ def _get(base: str, path: str, cookie: str) -> tuple[int, str]:
 
 class UiTest(PlaneTest):
     def test_login_csrf_approval_and_escaping(self) -> None:
-        anonymous, _body, _cookie = _form(self.base, "/ui/login", {"token": "nope"})
+        self.plane.accounts.add_admin("owner", "correct-horse-battery")
+        anonymous, _body, _cookie = _form(self.base, "/ui/login", {"username": "owner", "password": "wrong-password-1"})
         self.assertEqual(anonymous, 401)
-        status, page, cookie = _form(self.base, "/ui/login", {"token": self.human})
+        status, page, cookie = _form(self.base, "/ui/login", {"username": "owner", "password": "correct-horse-battery"})
         self.assertEqual(status, 200, page)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)
         session = cookie.split(";", 1)[0]
-        self.assertNotIn(self.human, (self.state / "ui" / "sessions.json").read_text(encoding="utf-8"))
+        session_text = (self.state / "accounts" / "sessions.json").read_text(encoding="utf-8")
+        self.assertNotIn(self.human, session_text)
+        self.assertNotIn("correct-horse-battery", session_text)
         denied, body, _cookie = _form(self.base, "/ui/summary", {"csrf": "wrong", "project_id": "local-summary"}, cookie=session)
         self.assertEqual(denied, 403, body)
         code, proposed, _headers = self.call(
@@ -86,6 +89,10 @@ class UiTest(PlaneTest):
 
 
 class OriginTest(PlaneTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.plane.accounts.add_admin("owner", "correct-horse-battery")
+
     def test_loopback_origins_referer_and_evil_origin(self) -> None:
         port = self.base.rsplit(":", 1)[-1]
         for origin in (
@@ -93,13 +100,18 @@ class OriginTest(PlaneTest):
             f"http://localhost:{port}",
             f"http://[::1]:{port}",
         ):
-            status, page, cookie = _form(self.base, "/ui/login", {"token": self.human}, origin=origin)
+            status, page, cookie = _form(
+                self.base,
+                "/ui/login",
+                {"username": "owner", "password": "correct-horse-battery"},
+                origin=origin,
+            )
             self.assertEqual(status, 200, (origin, page))
             self.assertIn("HttpOnly", cookie)
         status, page, cookie = _form(
             self.base,
             "/ui/login",
-            {"token": self.human},
+            {"username": "owner", "password": "correct-horse-battery"},
             extra={"Referer": f"{self.base}/ui/login"},
         )
         self.assertEqual(status, 200, page)
@@ -107,13 +119,18 @@ class OriginTest(PlaneTest):
         status, page, cookie = _form(
             self.base,
             "/ui/login",
-            {"token": self.human},
+            {"username": "owner", "password": "correct-horse-battery"},
             origin="null",
             extra={"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate"},
         )
         self.assertEqual(status, 200, page)
         self.assertIn("HttpOnly", cookie)
-        status, page, _cookie = _form(self.base, "/ui/login", {"token": self.human}, origin="https://evil.example")
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/login",
+            {"username": "owner", "password": "correct-horse-battery"},
+            origin="https://evil.example",
+        )
         self.assertEqual(status, 403, page)
         self.assertIn("Origin rejected", page)
         self.assertIn("https://evil.example", page)
@@ -122,7 +139,7 @@ class OriginTest(PlaneTest):
         status, page, _cookie = _form(
             self.base,
             "/ui/login",
-            {"token": self.human},
+            {"username": "owner", "password": "correct-horse-battery"},
             extra={"Referer": "https://evil.example/login"},
         )
         self.assertEqual(status, 403, page)
@@ -193,14 +210,38 @@ class RealUpOriginTest(unittest.TestCase):
             else:
                 self.fail("ssios up did not serve /ui/login")
             token = (Path(tmp) / "secrets" / "human.token").read_text(encoding="utf-8").strip()
+            added = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "ssios",
+                    "user",
+                    "add",
+                    "--admin",
+                    "--username",
+                    "owner",
+                    "--state",
+                    tmp,
+                    "--config",
+                    str(ROOT / "config" / "ssios.example.toml"),
+                ],
+                cwd=ROOT,
+                env=env,
+                input="correct-horse-battery\n",
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            self.assertNotIn("correct-horse-battery", added.stdout)
             status, page, cookie = _form(
                 "http://127.0.0.1:8765",
                 "/ui/login",
-                {"token": token},
+                {"username": "owner", "password": "correct-horse-battery"},
                 origin="http://127.0.0.1:8765",
                 extra={"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Referer": "http://127.0.0.1:8765/ui/login"},
             )
             self.assertEqual(status, 200, page)
             self.assertIn("HttpOnly", cookie)
             self.assertNotIn(token, page)
+            self.assertNotIn("correct-horse-battery", page)
             proc.terminate()

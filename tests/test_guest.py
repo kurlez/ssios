@@ -151,7 +151,8 @@ class ScriptedPlaneTest(PlaneTest):
         self.assertNotIn(self.human.encode(), blob)
         from test_ui import _form
 
-        _status, page, cookie = _form(self.base, "/ui/login", {"token": self.human})
+        self.plane.accounts.add_admin("owner", "correct-horse-battery")
+        _status, page, cookie = _form(self.base, "/ui/login", {"username": "owner", "password": "correct-horse-battery"})
         session = cookie.split(";", 1)[0]
         import urllib.request
 
