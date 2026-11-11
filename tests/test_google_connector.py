@@ -49,6 +49,7 @@ class _Google(BaseHTTPRequestHandler):
     events: dict[str, dict] = {}
     token_reply: dict | None = None
     identity_reply: dict | None = None
+    identity_by_path: dict | None = None
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
@@ -131,6 +132,10 @@ class _Google(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path, query = self._record("GET")
         auth = self.headers.get("Authorization", "")
+        if path.startswith("/identity/") and isinstance(self.identity_by_path, dict) and path in self.identity_by_path:
+            reply = self.identity_by_path[path]
+            self._json(reply["body"], int(reply["status"]))
+            return
         if path.startswith("/identity/") and self.identity_reply is not None:
             self._json(self.identity_reply["body"], int(self.identity_reply["status"]))
             return
@@ -212,6 +217,7 @@ class ConnectorTest(PlaneTest):
         _Google.seen = []
         _Google.token_reply = None
         _Google.identity_reply = None
+        _Google.identity_by_path = None
         _Google.events = {"cal-1/evt1demo": copy.deepcopy(FIXTURE_EVENT)}
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
@@ -993,17 +999,19 @@ class ConnectorTest(PlaneTest):
             with self.assertRaises(SsiosError) as caught:
                 self.connector.submit_redirect(self.ada, "calendar", pasted)
         self.assertEqual(caught.exception.code, "connector_scope_missing")
-        self.assertIn(list_scope, caught.exception.detail)
+        self.assertIn(events_scope, caught.exception.detail)
+        self.assertNotIn(list_scope, caught.exception.detail)
         self.assertIn("tick all boxes", caught.exception.detail)
         self.assertIsNone(self.store.get("ada", "calendar-refresh"))
         self.assertNotIn(self.secret, caught.exception.detail)
         log = stderr.getvalue()
         self.assertIn("endpoint=calendar.list", log)
+        self.assertIn("endpoint=calendar.events", log)
         self.assertIn("status=403", log)
         self.assertIn("error=PERMISSION_DENIED", log)
         self.assertNotIn("ya29.", log)
         self.assertNotIn(self.secret, log)
-        self.assertEqual(log.count("ssios.ui connector"), 1)
+        self.assertEqual(log.count("ssios.ui connector"), 2)
 
         for connector, missing, endpoint in (
             ("gmail", "https://www.googleapis.com/auth/gmail.readonly", "gmail.profile"),
@@ -1066,6 +1074,59 @@ class ConnectorTest(PlaneTest):
         self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
         _Google.token_reply = None
         _Google.identity_reply = None
+        _Google.identity_by_path = None
+
+    def test_calendar_list_403_falls_back_to_primary_events(self) -> None:
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        denied = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                }
+            },
+        }
+        allowed = {"status": 200, "body": {"summary": "ada@example.com", "items": []}}
+        self.connector.install_client(self.ada, "calendar-client", self.secret)
+        for granted in (f"{events_scope} {list_scope}", events_scope):
+            self.connector.disconnect(self.ada, "calendar")
+            _Google.seen = []
+            _Google.token_reply = {
+                "status": 200,
+                "body": {
+                    "access_token": "ya29.access-account-a",
+                    "refresh_token": "refresh-account-a",
+                    "token_type": "Bearer",
+                    "scope": granted,
+                },
+            }
+            _Google.identity_by_path = {
+                "/identity/calendar-list": denied,
+                "/identity/calendar-events": allowed,
+            }
+            started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+            auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+            pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+            self.connector.submit_redirect(self.ada, "calendar", pasted)
+            self.assertIsNotNone(self.store.get("ada", "calendar-refresh"), granted)
+            self.assertNotIn(list_scope, self.store.get("ada", "calendar-scope") or "")
+            self.assertIn(events_scope, self.store.get("ada", "calendar-scope") or "")
+            events = [item for item in _Google.seen if item["path"] == "/identity/calendar-events"]
+            self.assertTrue(events, granted)
+            self.assertEqual(events[0]["query"].get("maxResults"), ["1"])
+            if list_scope in granted.split():
+                self.assertTrue(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+            else:
+                self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+            self.assertEqual(
+                self.connector.service_note(self.ada, "calendar"),
+                "Calendar list access was not granted; only the primary calendar is available.",
+            )
+        _Google.token_reply = None
+        _Google.identity_by_path = None
 
     def test_keychain_errors_use_stable_codes_and_the_probe_deletes_its_item(self) -> None:
         from contextlib import redirect_stderr

@@ -37,6 +37,8 @@ from ssios.google_calendar import (
     TOOLS as CALENDAR_TOOLS,
     WRITE_TOOLS as CALENDAR_WRITE_TOOLS,
     assert_tool_scope,
+    CALENDAR_EVENTS_SCOPE,
+    CALENDAR_LIST_SCOPE,
     check_scope as check_calendar_scope,
     default_scope as calendar_default_scope,
     event_resource,
@@ -61,6 +63,7 @@ GMAIL_SCOPES = (
     "https://www.googleapis.com/auth/gmail.metadata",
 )
 CONNECTORS = ("drive", "gmail", "calendar")
+_OPTIONAL_SCOPES = {CALENDAR_LIST_SCOPE}
 DEFAULT_SCOPE = {
     "drive": DRIVE_SCOPES[0],
     "gmail": GMAIL_SCOPES[0],
@@ -598,11 +601,10 @@ class GoogleConnector:
                 extra = [part for part in granted.split() if part not in requested.split()]
                 if extra:
                     raise SsiosError("oauth_scope_widened", "token includes a scope that was not requested", 409)
-                optional = {"https://www.googleapis.com/auth/calendar.calendarlist.readonly"}
                 missing = [
                     part
                     for part in requested.split()
-                    if part and part not in granted.split() and part not in optional
+                    if part and part not in granted.split() and part not in _OPTIONAL_SCOPES
                 ]
                 if missing:
                     from ssios.logsafe import log_upstream
@@ -619,7 +621,7 @@ class GoogleConnector:
                     )
                 scope = " ".join(part for part in granted.split() if part)
                 _check_scope(connector, scope)
-            sub = self._identity(account_id, connector, access, scope)
+            sub, scope = self._identity(account_id, connector, access, scope)
             existing = self.store.get(account_id, "google-sub")
             if existing and existing != sub:
                 raise SsiosError("google_identity_mismatch", "this account is already linked to a different Google identity", 409)
@@ -678,24 +680,36 @@ class GoogleConnector:
             self.store.put(account_id, f"{connector}-refresh", rotated)
         return access
 
-    def _identity(self, account_id: str, connector: str, access: str, scope: str) -> str:
-        """Who this token belongs to, using only an API the granted scopes allow.
+    def _identity(self, account_id: str, connector: str, access: str, scope: str) -> tuple[str, str]:
+        """Who this token belongs to, and the scope string that was actually usable.
 
         Gmail users.getProfile is allowed by gmail.readonly and gmail.metadata.
         Drive about.get is allowed by drive.readonly and drive.metadata.readonly.
-        Calendar calendars.get needs calendar or calendar.readonly, which SSIOS does
-        not request. calendarList.list is allowed by calendar.calendarlist.readonly.
-        events.list on primary is allowed by calendar.events.
+        calendarList.list is optional. A 403 for insufficient scope falls back to
+        events.list on primary. calendar.events is required.
         """
-        url, params, endpoint, needed = self._identity_target(connector, scope)
-        try:
-            payload = self._google_get(account_id, connector, endpoint, url, access, params, scopes=needed)
-        except SsiosError:
-            raise
+        effective = scope
+        if connector == "calendar" and CALENDAR_LIST_SCOPE in set(scope.split()):
+            url, params, endpoint, needed = self._identity_target(connector, scope)
+            try:
+                payload = self._google_get(
+                    account_id, connector, endpoint, url, access, params, scopes=needed, optional=True
+                )
+            except SsiosError as exc:
+                if exc.code != "connector_optional_denied":
+                    raise
+                effective = " ".join(part for part in scope.split() if part != CALENDAR_LIST_SCOPE)
+            else:
+                identity = _identity_from_payload(payload)
+                if not identity:
+                    raise SsiosError("oauth_incomplete", "google identity missing", 502)
+                return identity, effective
+        url, params, endpoint, needed = self._identity_target(connector, effective)
+        payload = self._google_get(account_id, connector, endpoint, url, access, params, scopes=needed, optional=False)
         identity = _identity_from_payload(payload)
         if not identity:
             raise SsiosError("oauth_incomplete", "google identity missing", 502)
-        return identity
+        return identity, effective
 
     def _identity_target(self, connector: str, scope: str) -> tuple[str, dict | None, str, str]:
         base = self.endpoints.api_base.rstrip("/")
@@ -711,19 +725,17 @@ class GoogleConnector:
             if local:
                 return f"{base}/identity/drive", None, "drive.about", needed
             return base + "/drive/v3/about", {"fields": "user"}, "drive.about", needed
-        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
-        events_scope = "https://www.googleapis.com/auth/calendar.events"
-        if list_scope in parts:
+        if CALENDAR_LIST_SCOPE in parts:
             if local:
-                return f"{base}/identity/calendar-list", None, "calendar.list", list_scope
-            return base + "/calendar/v3/users/me/calendarList", {"maxResults": "100"}, "calendar.list", list_scope
+                return f"{base}/identity/calendar-list", None, "calendar.list", CALENDAR_LIST_SCOPE
+            return base + "/calendar/v3/users/me/calendarList", {"maxResults": "100"}, "calendar.list", CALENDAR_LIST_SCOPE
         if local:
-            return f"{base}/identity/calendar-events", {"maxResults": "1"}, "calendar.events", events_scope
+            return f"{base}/identity/calendar-events", {"maxResults": "1"}, "calendar.events", CALENDAR_EVENTS_SCOPE
         return (
             base + "/calendar/v3/calendars/primary/events",
             {"maxResults": "1"},
             "calendar.events",
-            events_scope,
+            CALENDAR_EVENTS_SCOPE,
         )
 
     def service_note(self, session: AccountSession, connector: str) -> str:
@@ -777,13 +789,25 @@ class GoogleConnector:
             raise SsiosError("connector_upstream", "google token response rejected", 502)
         return payload
 
-    def _raise_oauth(self, account_id: str, service: str, endpoint: str, status: int, raw: bytes, scopes: str) -> None:
+    def _raise_oauth(
+        self,
+        account_id: str,
+        service: str,
+        endpoint: str,
+        status: int,
+        raw: bytes,
+        scopes: str,
+        *,
+        optional: bool = False,
+    ) -> None:
         from ssios.logsafe import log_upstream
 
         error, description = _oauth_fields(raw)
         log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=error)
         safe = _safe_oauth_description(description)
         if _insufficient_scope(error, description):
+            if optional or scopes in _OPTIONAL_SCOPES:
+                raise SsiosError("connector_optional_denied", "optional scope was not granted", 403)
             shown = scopes or "the scopes this service needs"
             raise SsiosError(
                 "connector_scope_missing",
@@ -820,10 +844,11 @@ class GoogleConnector:
         access: str,
         params: dict | None,
         scopes: str = "",
+        optional: bool = False,
     ) -> dict:
         status, raw = self._exchange("GET", url, access, params, None)
         if status >= 400:
-            self._raise_oauth(account_id, service, endpoint, status, raw, scopes)
+            self._raise_oauth(account_id, service, endpoint, status, raw, scopes, optional=optional)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
