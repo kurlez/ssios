@@ -11,7 +11,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Summaries that name a sender, subject, or date outside the results are dropped | Done | `_mentions_are_in_results`; the same test drops Jane Doe / 2023 | 90 |
 | Host clock in every prompt and deterministic date answers | Done earlier | `test_pure_date_questions_use_the_host_clock` | 94 |
 | Relative times stored as absolute timestamps | Done for one-off and weekly reminders, and for dated memory notes | `test_reminder_uses_an_absolute_time_across_midnight`; `tests/test_reminders.py` stores `2026-11-11T09:00:00-08:00` and `weekly:mon` | 90 |
-| The model cannot claim a save that did not happen | Reminders skip the model. Notes stay staged until approval | Reminder test asserts the model sentence is absent | 84 |
+| The model cannot claim a save that did not happen | A reminder and an auto memory save both reply from the store write. The mock sentence is absent | `test_reminder_uses_an_absolute_time_across_midnight`; `tests/test_memory_panel.py` | 90 |
 
 ## P0 Connectors
 
@@ -23,7 +23,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Drive root, folder name, and keyword | Done earlier | `test_mail_and_drive_plans_do_not_copy_the_sentence_into_the_query` | 90 |
 | `connector_api_disabled` names the API and console link | Done | `test_refresh_invalid_grant_asks_for_reconnect_and_disabled_api_names_the_reason` | 90 |
 | Other permission denials stay `connector_scope_missing` | Done earlier | `test_calendar_identity_stays_inside_the_granted_scopes` | 88 |
-| `invalid_grant` on refresh clears the token and shows Needs reconnect | Done | Same refresh test. Connections page renders Reconnect | 86 |
+| `invalid_grant` on refresh clears the token and shows Needs reconnect | Done | Same refresh test. Connections page renders Needs reconnect. Screenshot `needs-reconnect-1280.png` | 90 |
 | Stale consent hint, scope log, setup checklist, API docs | Done | `docs/google-connector.md`, existing scope log tests | 88 |
 
 ## P0 Memory
@@ -31,11 +31,11 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
 | One MemFS repo per account, shared by conversations and routes | Done | `test_saved_name_is_recalled_in_a_new_conversation` checks a new conversation, git log, and the other account | 88 |
-| Core blocks including human.md, plus topic keyword retrieval | Done in `memory_context` | The recall test sees `Used memory: human.md` and `MEMORY-CONTEXT` | 84 |
-| Explicit facts become one approval | Done for name, preference, and home. Not a model JSON extractor | `explicit_facts` and the recall test | 74 |
-| Auto-commit with undo | Not wired. The preference file helper exists | `account_memory.write_mode` | 40 |
+| Core blocks including human.md, plus topic keyword retrieval | Done in `memory_context` | The recall test sees `Used memory: human.md`. `test_a_saved_topic_is_loaded_by_keyword` loads a topic note | 90 |
+| Explicit facts become one approval | Regex facts plus a JSON extract. A value is kept only when the user stated it | `tests/test_memory_panel.py` drops Jane Doe and a page phrase that was not in the message | 90 |
+| Auto-commit with undo | Default remains approve-each. Auto writes and undo restores the previous file | `test_auto_saves_and_undo_restores_without_logging_the_fact` | 90 |
 | Chinese remember and forget cues, distinct note files | Done | `test_memory_is_not_written_until_the_owner_approves` rejects `topics/chat/note.md` | 88 |
-| Memory panel lists, searches, renders, and shows history and trust | Partial. Edit and forget forms are not on the page | Memory page in `ui.py`; history assertion in the note test | 70 |
+| Memory panel lists, searches, renders, and shows history and trust | Edit and forget are on the page. Approve-each stays the default | `test_panel_edit_and_forget` | 90 |
 | `letta-memfs-compat` explained | Done | `docs/memfs.md` and the README | 92 |
 
 ## P1 UX and docs
@@ -43,8 +43,8 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
 | Result cards, per-query time range, technical details | Done earlier | Calendar card tests | 88 |
-| Sanitized Markdown and KaTeX, local files only | Renderer and KaTeX are vendored and the chat page loads them | `tests/test_render.py` | 80 |
-| Approval page shows status, time, outcome, and a conversation link. Approve disables after click. Expired memory approvals can be retried | Status page and disable script are in. Retry is implemented for memory and not covered by a test | `test_memory_is_not_written_until_the_owner_approves` second approve | 82 |
+| Sanitized Markdown and KaTeX, local files only | Vendored renderer. The chat screenshot shows a heading, a list, `$12.50`, the formula, and escaped script text | `tests/test_render.py`; screenshot `chat-render-1280.png` | 90 |
+| Approval page shows status, time, outcome, and a conversation link. Approve disables after click. Expired memory approvals can be retried | Retry stages a new approval. The expired one does not write | `test_expired_memory_approval_can_be_retried` | 90 |
 | README matches `./scripts/ssios` and a test checks the commands | Done | `tests/test_readme_commands.py` | 90 |
 
 ## P2 Skills, vault, tasks
@@ -52,9 +52,15 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
 | Weather and web fetch on the host, SSRF checks, untrusted pages | Done earlier | `tests/test_skills.py` | 86 |
-| Obsidian vault clips, assets, and Notes view | Routes exist from an earlier commit. Image and injection tests are still thin | `src/ssios/vault.py` | 58 |
-| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | Evidence, undo, and the injection case are in `tests/test_goals.py`. Chat commands, weekly reminders, cancel-on-complete, and a missed reminder after the clock moves are in `tests/test_reminders.py`. The Tasks page shows the notice. There is no live badge while another page stays open | `tests/test_goals.py`, `tests/test_reminders.py` | 76 |
+| Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes lists the clip | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
+| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | A tool result completes the matching goal and undo reopens it. A page read does not. Pages poll notices that remain after restart | `tests/test_goals.py` `GoalChatLoopTest`; `tests/test_reminders.py` `NoticeBadgeTest`; screenshot `tasks-badge-1280.png` | 90 |
 
 ## Total
 
-Mean of the 28 rows above: **84 / 100** (2355 / 28). The earlier 82 treated this table as 24 rows. After `5c34c5e` and `3169505` the task row is 76 and absolute times are 90. The remaining gaps are auto-commit with undo, memory edit and forget, a validated fact extractor, an expired-approval retry test, a live reminder badge, vault image clips, and screenshots for KaTeX and Needs reconnect.
+Mean of the 28 rows above: **90 / 100** (2521 / 28).
+
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 227 ran, 220 passed, 7 skipped.
+
+Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
+
+Still for a Mac: Keychain unlock, a real Google reconnect click, a real macOS notification, and KaTeX font files in the browser on that machine. This VM checked the Linux UI, the poll banner, and the vendored renderer.
