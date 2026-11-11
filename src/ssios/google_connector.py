@@ -121,6 +121,45 @@ def _oauth_fields(raw: bytes) -> tuple[str, str]:
     return error.strip(), description.strip()
 
 
+def _identity_from_payload(payload: dict) -> str:
+    email = payload.get("emailAddress")
+    if isinstance(email, str) and email.strip():
+        return email.strip()
+    user = payload.get("user")
+    if isinstance(user, dict):
+        address = user.get("emailAddress")
+        if isinstance(address, str) and address.strip():
+            return address.strip()
+    items = payload.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("primary") and isinstance(item.get("id"), str) and item["id"].strip():
+                return item["id"].strip()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            organizer = item.get("organizer")
+            if isinstance(organizer, dict) and isinstance(organizer.get("email"), str) and organizer["email"].strip():
+                return organizer["email"].strip()
+    summary = payload.get("summary")
+    if isinstance(summary, str) and "@" in summary:
+        return summary.strip()
+    sub = payload.get("sub")
+    if isinstance(sub, str) and sub.strip():
+        return sub.strip()
+    ident = payload.get("id")
+    if isinstance(ident, str) and "@" in ident:
+        return ident.strip()
+    return ""
+
+
+def _insufficient_scope(error: str, description: str) -> bool:
+    if error in {"PERMISSION_DENIED", "insufficient_scope"}:
+        return True
+    text = f"{error} {description}".lower()
+    return "insufficient" in text and "scope" in text
+
+
 def _safe_oauth_description(text: str) -> str:
     if not text or len(text) > 160 or "://" in text or "?" in text:
         return ""
@@ -553,15 +592,29 @@ class GoogleConnector:
             raise SsiosError("oauth_incomplete", "oauth token response rejected", 502)
         stored = False
         try:
+            requested = scope
             granted = token.get("scope")
             if isinstance(granted, str) and granted.strip():
-                requested = set(scope.split())
-                extra = [part for part in granted.split() if part not in requested]
+                extra = [part for part in granted.split() if part not in requested.split()]
                 if extra:
                     raise SsiosError("oauth_scope_widened", "token includes a scope that was not requested", 409)
+                missing = [part for part in requested.split() if part and part not in granted.split()]
+                if missing:
+                    from ssios.logsafe import log_upstream
+
+                    log_upstream(account_id=account_id, service=connector, endpoint="token", status=200, error="scope_missing")
+                    shown = ", ".join(missing)
+                    raise SsiosError(
+                        "connector_scope_missing",
+                        "Google did not grant "
+                        + shown
+                        + ". Click Connect again and tick all boxes on the consent screen. "
+                        "Error code: connector_scope_missing.",
+                        403,
+                    )
                 scope = " ".join(part for part in granted.split() if part)
                 _check_scope(connector, scope)
-            sub = self._identity(account_id, connector, access)
+            sub = self._identity(account_id, connector, access, scope)
             existing = self.store.get(account_id, "google-sub")
             if existing and existing != sub:
                 raise SsiosError("google_identity_mismatch", "this account is already linked to a different Google identity", 409)
@@ -620,40 +673,54 @@ class GoogleConnector:
             self.store.put(account_id, f"{connector}-refresh", rotated)
         return access
 
-    def _identity(self, account_id: str, connector: str, access: str) -> str:
-        """Who this token belongs to, using an API the granted scope can call.
+    def _identity(self, account_id: str, connector: str, access: str, scope: str) -> str:
+        """Who this token belongs to, using only an API the granted scopes allow.
 
-        The OpenID userinfo endpoint returns 401 for a Gmail, Drive, or Calendar
-        token, because those consents do not include the openid scope.
+        Gmail users.getProfile is allowed by gmail.readonly and gmail.metadata.
+        Drive about.get is allowed by drive.readonly and drive.metadata.readonly.
+        Calendar calendars.get needs calendar or calendar.readonly, which SSIOS does
+        not request. calendarList.list is allowed by calendar.calendarlist.readonly.
+        events.list on primary is allowed by calendar.events.
         """
-        url, params, endpoint = self._identity_target(connector)
-        payload = self._google_get(account_id, connector, endpoint, url, access, params)
-        identity = ""
-        email = payload.get("emailAddress")
-        user = payload.get("user")
-        if isinstance(email, str) and email:
-            identity = email
-        elif isinstance(user, dict) and isinstance(user.get("emailAddress"), str):
-            identity = user["emailAddress"]
-        elif isinstance(payload.get("id"), str):
-            identity = payload["id"]
-        elif isinstance(payload.get("sub"), str):
-            identity = payload["sub"]
+        url, params, endpoint, needed = self._identity_target(connector, scope)
+        try:
+            payload = self._google_get(account_id, connector, endpoint, url, access, params, scopes=needed)
+        except SsiosError:
+            raise
+        identity = _identity_from_payload(payload)
         if not identity:
             raise SsiosError("oauth_incomplete", "google identity missing", 502)
         return identity
 
-    def _identity_target(self, connector: str) -> tuple[str, dict | None, str]:
+    def _identity_target(self, connector: str, scope: str) -> tuple[str, dict | None, str, str]:
         base = self.endpoints.api_base.rstrip("/")
-        names = {"gmail": "gmail.profile", "drive": "drive.about", "calendar": "calendar.primary"}
-        endpoint = names[connector]
-        if base != "https://www.googleapis.com":
-            return f"{base}/identity/{connector}", None, endpoint
+        parts = set(scope.split())
+        local = base != "https://www.googleapis.com"
         if connector == "gmail":
-            return "https://gmail.googleapis.com/gmail/v1/users/me/profile", None, endpoint
+            needed = next((part for part in scope.split() if part in GMAIL_SCOPES), GMAIL_SCOPES[0])
+            if local:
+                return f"{base}/identity/gmail", None, "gmail.profile", needed
+            return "https://gmail.googleapis.com/gmail/v1/users/me/profile", None, "gmail.profile", needed
         if connector == "drive":
-            return base + "/drive/v3/about", {"fields": "user"}, endpoint
-        return base + "/calendar/v3/calendars/primary", None, endpoint
+            needed = next((part for part in scope.split() if part in DRIVE_SCOPES), DRIVE_SCOPES[0])
+            if local:
+                return f"{base}/identity/drive", None, "drive.about", needed
+            return base + "/drive/v3/about", {"fields": "user"}, "drive.about", needed
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        if list_scope in parts or events_scope not in parts:
+            needed = list_scope
+            if local:
+                return f"{base}/identity/calendar-list", None, "calendar.list", needed
+            return base + "/calendar/v3/users/me/calendarList", {"maxResults": "100"}, "calendar.list", needed
+        if local:
+            return f"{base}/identity/calendar-events", {"maxResults": "1"}, "calendar.events", events_scope
+        return (
+            base + "/calendar/v3/calendars/primary/events",
+            {"maxResults": "1"},
+            "calendar.events",
+            events_scope,
+        )
 
     def _revoke(self, account_id: str, refresh: str) -> bool:
         body = urllib.parse.urlencode(
@@ -684,7 +751,7 @@ class GoogleConnector:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raw = exc.read()
-            self._raise_oauth(account_id, service, "token", exc.code, raw)
+            self._raise_oauth(account_id, service, "token", exc.code, raw, "")
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             from ssios.logsafe import log_upstream
 
@@ -694,12 +761,22 @@ class GoogleConnector:
             raise SsiosError("connector_upstream", "google token response rejected", 502)
         return payload
 
-    def _raise_oauth(self, account_id: str, service: str, endpoint: str, status: int, raw: bytes) -> None:
+    def _raise_oauth(self, account_id: str, service: str, endpoint: str, status: int, raw: bytes, scopes: str) -> None:
         from ssios.logsafe import log_upstream
 
         error, description = _oauth_fields(raw)
         log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=error)
         safe = _safe_oauth_description(description)
+        if _insufficient_scope(error, description):
+            shown = scopes or "the scopes this service needs"
+            raise SsiosError(
+                "connector_scope_missing",
+                "Google did not grant "
+                + shown
+                + ". Click Connect again and tick all boxes on the consent screen. "
+                "Error code: connector_scope_missing.",
+                403,
+            )
         if error == "invalid_client":
             detail = "Google rejected this OAuth client. Re-upload the Desktop client JSON."
             if safe:
@@ -726,10 +803,11 @@ class GoogleConnector:
         url: str,
         access: str,
         params: dict | None,
+        scopes: str = "",
     ) -> dict:
         status, raw = self._exchange("GET", url, access, params, None)
         if status >= 400:
-            self._raise_oauth(account_id, service, endpoint, status, raw)
+            self._raise_oauth(account_id, service, endpoint, status, raw, scopes)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:

@@ -48,6 +48,7 @@ class _Google(BaseHTTPRequestHandler):
     seen: list[dict] = []
     events: dict[str, dict] = {}
     token_reply: dict | None = None
+    identity_reply: dict | None = None
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
@@ -130,7 +131,10 @@ class _Google(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path, query = self._record("GET")
         auth = self.headers.get("Authorization", "")
-        if path in ("/userinfo", "/identity/gmail", "/identity/drive", "/identity/calendar"):
+        if path.startswith("/identity/") and self.identity_reply is not None:
+            self._json(self.identity_reply["body"], int(self.identity_reply["status"]))
+            return
+        if path in ("/userinfo", "/identity/gmail", "/identity/drive", "/identity/calendar-list", "/identity/calendar-events", "/identity/calendar"):
             sub = "fixture-sub-a" if auth.endswith("-a") else "fixture-sub-b"
             payload = {"sub": sub, "emailAddress": sub, "id": sub, "user": {"emailAddress": sub}}
         elif path == "/drive/v3/files":
@@ -207,6 +211,7 @@ class ConnectorTest(PlaneTest):
         super().setUp()
         _Google.seen = []
         _Google.token_reply = None
+        _Google.identity_reply = None
         _Google.events = {"cal-1/evt1demo": copy.deepcopy(FIXTURE_EVENT)}
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
@@ -878,6 +883,170 @@ class ConnectorTest(PlaneTest):
         self.assertIn("Click Connect again", caught.exception.detail)
         self.assertIn("expired", caught.exception.detail)
         _Google.token_reply = None
+        _Google.identity_reply = None
+
+    def test_calendar_identity_stays_inside_the_granted_scopes(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        self.connector.install_client(self.ada, "calendar-client", self.secret)
+        both = f"{events_scope} {list_scope}"
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": both,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"items": [{"id": "ada@example.com", "primary": True, "summary": "Ada"}]},
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(self.store.get("ada", "google-sub"), "ada@example.com")
+        self.assertTrue(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        self.assertFalse(any("calendars/primary" in item["path"] and "/events" not in item["path"] for item in _Google.seen))
+        self.connector.disconnect(self.ada, "calendar")
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": events_scope,
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(caught.exception.code, "connector_scope_missing")
+        self.assertIn(list_scope, caught.exception.detail)
+        self.assertIn("tick all boxes", caught.exception.detail)
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        self.assertFalse(any(item["path"].startswith("/identity/") for item in _Google.seen))
+        self.assertTrue(any(item["path"] == "/revoke" for item in _Google.seen))
+        log = stderr.getvalue()
+        self.assertIn("endpoint=token", log)
+        self.assertIn("error=scope_missing", log)
+        self.assertNotIn(self.secret, log)
+        self.assertNotIn("ya29.", log)
+        self.assertNotIn("http://", log)
+        self.assertEqual(log.count("ssios.ui connector"), 1)
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-b",
+                "token_type": "Bearer",
+                "scope": both,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                }
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(caught.exception.code, "connector_scope_missing")
+        self.assertIn(list_scope, caught.exception.detail)
+        self.assertIn("tick all boxes", caught.exception.detail)
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        self.assertNotIn(self.secret, caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("endpoint=calendar.list", log)
+        self.assertIn("status=403", log)
+        self.assertIn("error=PERMISSION_DENIED", log)
+        self.assertNotIn("ya29.", log)
+        self.assertNotIn(self.secret, log)
+        self.assertEqual(log.count("ssios.ui connector"), 1)
+
+        for connector, missing, endpoint in (
+            ("gmail", "https://www.googleapis.com/auth/gmail.readonly", "gmail.profile"),
+            ("drive", "https://www.googleapis.com/auth/drive.readonly", "drive.about"),
+        ):
+            _Google.seen = []
+            _Google.token_reply = {
+                "status": 200,
+                "body": {
+                    "access_token": "ya29.access-account-a",
+                    "refresh_token": "refresh-account-a",
+                    "token_type": "Bearer",
+                    "scope": missing,
+                },
+            }
+            _Google.identity_reply = {
+                "status": 403,
+                "body": {
+                    "error": {
+                        "code": 403,
+                        "message": "Request had insufficient authentication scopes.",
+                        "status": "PERMISSION_DENIED",
+                    }
+                },
+            }
+            started = self.connector.connect(self.ada, connector, open_browser=False, timeout=5)
+            auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+            pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SsiosError) as caught:
+                    self.connector.submit_redirect(self.ada, connector, pasted)
+            self.assertEqual(caught.exception.code, "connector_scope_missing", connector)
+            self.assertIn(missing, caught.exception.detail)
+            self.assertIn("tick all boxes", caught.exception.detail)
+            self.assertIsNone(self.store.get("ada", f"{connector}-refresh"))
+            self.assertIn(f"endpoint={endpoint}", stderr.getvalue())
+            self.assertIn("error=PERMISSION_DENIED", stderr.getvalue())
+            self.assertNotIn("ya29.", stderr.getvalue())
+
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": events_scope,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"summary": "ada@example.com", "items": []},
+        }
+        started = self.connector.connect(self.ada, "calendar", scope=events_scope, open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(self.store.get("ada", "google-sub"), "ada@example.com")
+        self.assertTrue(any(item["path"] == "/identity/calendar-events" for item in _Google.seen))
+        self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        _Google.token_reply = None
+        _Google.identity_reply = None
 
     def test_keychain_errors_use_stable_codes_and_the_probe_deletes_its_item(self) -> None:
         from contextlib import redirect_stderr

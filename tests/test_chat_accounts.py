@@ -412,6 +412,7 @@ class HouseholdTest(PlaneTest):
         super().setUp()
         _CalendarApi.seen = []
         _CalendarApi.token_reply = None
+        _CalendarApi.identity_reply = None
         _CalendarApi.writes = []
         _CalendarApi.mismatch = False
         _CalendarApi.listed = None
