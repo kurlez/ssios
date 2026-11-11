@@ -106,12 +106,12 @@ In the config copy, set `[ui] time_zone = "America/Los_Angeles"` and `[llm] olla
 
 Then, still as `ada`:
 
-- Send `check my inbox`. Approve the card. The model answer stays on this Mac. The approval card appears before any Gmail call.
-- Send `list files in drive folder:YOUR_FOLDER_ID`, using a folder id from your own Drive. Approve the card before Drive is called.
-- Send `What's on my calendar next week?` or `这周我有什么安排`. The card shows an absolute window in America/Los_Angeles. Approve it before Calendar is called. A window longer than 31 days is refused in English and does not create an approval.
-- Send `下周三下午三点和张三开会一小时`. The card shows the resolved Wednesday, 15:00 to 16:00, the time zone, and 张三 in the title or description. It does not invent an email address, and it says attendees are not emailed. Approve once. The page says created and the event id. Approving again does not create a second event.
-- Send `把周五的牙医改到下午四点`. The first card is only a read for that Friday. Approve it. If several events match, reply with a number. The second card shows the absolute before and after times. Approving that card is what changes the event. If the event changed in Google after the card was created, the update is not sent.
-- Send `取消明天的站会`. Approve the read, then approve the destructive card if it is the right event. Deny it if you want to keep the event. An expired card does nothing.
+- Send `check my inbox` or `查一下我的Gmail邮箱里有哪些发件人发给我的邮件`. Gmail is read without an approval card. You see subjects or a sender count from the messages, and an empty inbox says `Inbox, latest 50 — no messages`.
+- Send `列一下我的Google Drive的根目录下的文件名` or `list files in My Drive`. Drive lists that folder without asking for a raw folder id. A folder name, recent files, and a file name work the same way.
+- Send `What's on my calendar next week?` or `这周我有什么安排`. The reply is a block headed by that week in America/Los_Angeles. An earlier empty day stays as its own line, for example `Nov 11, 2026 — no events`. A window longer than 31 days is refused in English and does not create an approval.
+- Send `下周三下午三点和张三开会一小时`. The card shows the resolved Wednesday, 15:00 to 16:00, the time zone, and 张三 in the title or description. It does not invent an email address, and it says attendees are not emailed. Approve once. The page says the event was created. The event id is under Technical details. Approving again does not create a second event.
+- Send `把周五的牙医改到下午四点`. The Friday is listed immediately. If several events match, reply with a number. The card shows the absolute before and after times. Approving that card is what changes the event. If the event changed in Google after the card was created, the update is not sent.
+- Send `取消明天的站会`. The matching event is listed immediately, then the destructive card asks before anything is deleted. Deny it if you want to keep the event. An expired card does nothing.
 
 Sign in as `owner`. Admin shows Gmail, Drive, and Calendar as yes or no, plus connected_at. It does not show message text, file text, event titles, or a token. A second household account cannot see `ada`'s cards either. Only `ada` can approve them.
 

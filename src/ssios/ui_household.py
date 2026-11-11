@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import re
 import time
 
 from ssios.chat import iter_turn
@@ -104,19 +105,23 @@ CHAT_JS = r"""
       var decoder = new TextDecoder();
       var buffer = "";
       var raw = "";
+      var sawResult = false;
       function pump() {
         return reader.read().then(function (chunk) {
           if (chunk.done) {
             typing.remove();
-            if (!turnFailed && !String(raw || "").trim()) {
+            if (!turnFailed && !String(raw || "").trim() && !sawResult) {
               showError(answer.querySelector(".content"), "The turn ended with no answer.\n\nError code: chat_empty\nHint: Reload the chat. If it is still empty, run ssios vm-diagnose.");
-            } else if (!turnFailed) renderMarkdown(answer.querySelector(".content"), raw);
+            } else if (!turnFailed && String(raw || "").trim()) renderMarkdown(answer.querySelector(".content"), raw);
             return;
           }
           buffer += decoder.decode(chunk.value, {stream: true});
           var parts = buffer.split("\n\n");
           buffer = parts.pop();
-          parts.forEach(function (part) { raw = applyEvent(answer, raw, part, stepsHolder) || raw; });
+          parts.forEach(function (part) {
+            var applied = applyEvent(answer, raw, part, stepsHolder, function () { sawResult = true; });
+            raw = applied == null ? raw : applied;
+          });
           return pump();
         });
       }
@@ -155,7 +160,8 @@ CHAT_JS = r"""
       body.className = "body";
       content = document.createElement("div");
       content.className = "content";
-      if (message.error_code || String(message.text || "").indexOf("Error code:") >= 0) showError(content, message.text || "");
+      if (message.results && message.results.length) renderResults(message.results, "", content);
+      else if (message.error_code || String(message.text || "").indexOf("Error code:") >= 0) showError(content, message.text || "");
       else renderMarkdown(content, message.text || "");
       body.appendChild(content);
       var tools = document.createElement("div");
@@ -186,6 +192,92 @@ CHAT_JS = r"""
     time.dateTime = new Date(at * 1000).toISOString();
     time.textContent = new Date(at * 1000).toLocaleString();
     return time;
+  }
+
+  function renderResults(blocks, summary, host) {
+    var target = host || column;
+    var list = blocks || [];
+    list.forEach(function (block) {
+      var section = document.createElement("section");
+      section.className = "result-block";
+      var head = document.createElement("h3");
+      head.textContent = block.summary || block.header || "";
+      section.appendChild(head);
+      if (block.note) {
+        var note = document.createElement("p");
+        note.className = "hint";
+        note.textContent = block.note;
+        section.appendChild(note);
+      }
+      (block.events || []).forEach(function (item) {
+        var card = document.createElement("article");
+        card.className = "event-card";
+        if (item.badge) {
+          var badge = document.createElement("p");
+          badge.className = "type-badge";
+          badge.textContent = item.badge;
+          card.appendChild(badge);
+        }
+        var title = document.createElement("h4");
+        title.textContent = item.title || "";
+        card.appendChild(title);
+        if (item.when) {
+          var when = document.createElement("p");
+          when.textContent = item.when;
+          card.appendChild(when);
+        }
+        if (item.location) {
+          var place = document.createElement("p");
+          place.textContent = item.location;
+          card.appendChild(place);
+        }
+        if (item.meta) {
+          var meta = document.createElement("p");
+          meta.textContent = item.meta;
+          card.appendChild(meta);
+        }
+        if (item.link && /^https?:\/\//.test(item.link)) {
+          var open = document.createElement("p");
+          var anchor = document.createElement("a");
+          anchor.href = item.link;
+          anchor.rel = "noopener noreferrer";
+          anchor.textContent = "Open";
+          open.appendChild(anchor);
+          card.appendChild(open);
+        }
+        if (item.description) {
+          var details = document.createElement("details");
+          var label = document.createElement("summary");
+          label.textContent = "Details";
+          details.appendChild(label);
+          var body = document.createElement("p");
+          linkifyInto(body, item.description);
+          details.appendChild(body);
+          card.appendChild(details);
+        }
+        section.appendChild(card);
+      });
+      target.appendChild(section);
+    });
+    if (summary && !list.length) {
+      var line = document.createElement("p");
+      line.textContent = summary;
+      target.appendChild(line);
+    }
+  }
+
+  function linkifyInto(node, text) {
+    String(text || "").split(/(https?:\/\/[^\s<>\"]+)/).forEach(function (part) {
+      if (part.indexOf("http://") === 0 || part.indexOf("https://") === 0) {
+        var link = document.createElement("a");
+        link.href = part;
+        link.rel = "noopener noreferrer";
+        link.textContent = part;
+        node.appendChild(link);
+      } else if (part) {
+        node.appendChild(document.createTextNode(part));
+      }
+    });
   }
 
   function pill(route, reason) {
@@ -320,7 +412,7 @@ CHAT_JS = r"""
     return "";
   }
 
-  function applyEvent(answer, raw, part, stepsHolder) {
+  function applyEvent(answer, raw, part, stepsHolder, onResult) {
     var name = "message";
     var data = "";
     part.split("\n").forEach(function (line) {
@@ -343,9 +435,15 @@ CHAT_JS = r"""
       var hidden = form.querySelector("input[name=conversation]");
       if (hidden) hidden.value = payload.id;
     }
-    if (name === "outcome" && payload.text) {
+    if (name === "results") {
+      if (onResult) onResult();
+      var typingNode = answer.querySelector(".typing");
+      if (typingNode) typingNode.remove();
+      renderResults(payload.blocks || [], "", answer.querySelector(".content"));
+    }
+    if (name === "outcome" && (payload.visible || payload.text)) {
       var note = document.createElement("p");
-      note.textContent = payload.text;
+      note.textContent = payload.visible || payload.text;
       column.appendChild(note);
     }
     return raw;
@@ -647,13 +745,14 @@ def _frame(event: dict) -> str:
 
 def _events_html(session, events: list[dict]) -> str:
     parts = []
+    technical = []
     conversation_id = ""
     for event in events:
         name = event["event"]
         data = event["data"]
         if name == "conversation":
             conversation_id = str(data.get("id") or "")
-            parts.append("<p class=\"conversation\">" + html.escape(conversation_id) + "</p>")
+            technical.append("<p class=\"conversation\">" + html.escape(conversation_id) + "</p>")
         elif name == "route":
             parts.append("<p class=\"route\">Route: " + html.escape(str(data.get("route"))) + " (" + html.escape(str(data.get("source"))) + "). " + html.escape(str(data.get("reason"))) + "</p>")
         elif name == "token":
@@ -661,15 +760,78 @@ def _events_html(session, events: list[dict]) -> str:
         elif name == "status":
             parts.append("<p>Guest: " + html.escape(str(data.get("phase") or "")) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
         elif name == "isolation":
-            parts.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
-        elif name == "outcome":
+            technical.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
+        elif name == "results":
             parts.append("<p class=\"outcome\">" + html.escape(str(data.get("text") or "")) + "</p>")
+            parts.append(_result_blocks_html(data.get("blocks") or []))
+        elif name == "outcome":
+            full = str(data.get("text") or "")
+            visible = str(data.get("visible") or full)
+            parts.append("<p class=\"outcome\">" + html.escape(visible) + "</p>")
+            if full and full != visible:
+                technical.append("<p>" + html.escape(full) + "</p>")
         elif name == "approval":
             parts.append(_approval_card(session, data))
         elif name == "error":
             parts.append("<p>" + html.escape(str(data.get("detail") or "")) + "</p>")
+    details = ""
+    if technical:
+        details = "<details class=\"technical\"><summary>Technical details</summary>" + "".join(technical) + "</details>"
     back = "/ui/chat?conversation=" + html.escape(conversation_id) if conversation_id else "/ui/chat"
-    return "<article class=\"turn\">" + "".join(parts) + "</article><p><a href=\"" + back + "\">Back to chat</a></p>"
+    return "<article class=\"turn\">" + "".join(parts) + details + "</article><p><a href=\"" + back + "\">Back to chat</a></p>"
+
+
+def _result_blocks_html(blocks) -> str:
+    chunks = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        header = html.escape(str(block.get("header") or ""))
+        start = html.escape(str(block.get("start") or ""), quote=True)
+        end = html.escape(str(block.get("end") or ""), quote=True)
+        summary = html.escape(str(block.get("summary") or ""))
+        cards = []
+        for item in block.get("events") or []:
+            if not isinstance(item, dict):
+                continue
+            title = html.escape(str(item.get("title") or ""))
+            when = html.escape(str(item.get("when") or ""))
+            location = html.escape(str(item.get("location") or ""))
+            description = _linkify(str(item.get("description") or ""))
+            meta = html.escape(str(item.get("meta") or ""))
+            badge = html.escape(str(item.get("badge") or ""))
+            extra = f"<p class=\"type-badge\">{badge}</p>" if badge else ""
+            if when:
+                extra += f"<p>{when}</p>"
+            if location:
+                extra += f"<p>{location}</p>"
+            if meta:
+                extra += f"<p>{meta}</p>"
+            link = str(item.get("link") or "")
+            if link.startswith("https://") or link.startswith("http://"):
+                href = html.escape(link, quote=True)
+                extra += f"<p><a href=\"{href}\" rel=\"noopener noreferrer\">Open</a></p>"
+            if description:
+                extra += f"<details><summary>Details</summary><p>{description}</p></details>"
+            cards.append(f"<article class=\"event-card\"><h3>{title}</h3>{extra}</article>")
+        note = html.escape(str(block.get("note") or ""))
+        note_html = f"<p class=\"hint\">{note}</p>" if note else ""
+        chunks.append(
+            f"<section class=\"result-block\"><h2><time datetime=\"{start}\"></time><time datetime=\"{end}\"></time>{summary or header}</h2>{note_html}{''.join(cards)}</section>"
+        )
+    return "".join(chunks)
+
+
+def _linkify(text: str) -> str:
+    pieces = re.split(r"(https?://[^\s<>\"]+)", text)
+    out = []
+    for piece in pieces:
+        if piece.startswith("http://") or piece.startswith("https://"):
+            href = html.escape(piece, quote=True)
+            out.append(f"<a href=\"{href}\" rel=\"noopener noreferrer\">{html.escape(piece)}</a>")
+        else:
+            out.append(html.escape(piece))
+    return "".join(out)
 
 
 def _approval_card(session, data: dict) -> str:
@@ -711,8 +873,38 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
             }
         if message.get("approval_id"):
             item["approval"] = _approval_view(plane, account, str(message["approval_id"]), item["text"])
+        results = message.get("results")
+        if isinstance(results, list):
+            item["results"] = [_public_block(block) for block in results if isinstance(block, dict)]
         messages.append(item)
     return messages
+
+
+def _public_block(block: dict) -> dict:
+    events = []
+    for item in block.get("events") or []:
+        if not isinstance(item, dict):
+            continue
+        events.append(
+            {
+                "title": str(item.get("title") or ""),
+                "when": str(item.get("when") or ""),
+                "location": str(item.get("location") or ""),
+                "description": str(item.get("description") or ""),
+                "meta": str(item.get("meta") or ""),
+                "badge": str(item.get("badge") or ""),
+                "link": str(item.get("link") or "") if str(item.get("link") or "").startswith(("http://", "https://")) else "",
+            }
+        )
+    return {
+        "kind": str(block.get("kind") or ""),
+        "header": str(block.get("header") or ""),
+        "summary": str(block.get("summary") or ""),
+        "note": str(block.get("note") or ""),
+        "start": str(block.get("start") or ""),
+        "end": str(block.get("end") or ""),
+        "events": events,
+    }
 
 
 def _approval_view(plane, account: dict, approval_id: str, preview: str) -> dict:
@@ -880,10 +1072,14 @@ def _google_help_page(session) -> str:
     body = (
         "<p>Create the client in Google Cloud, then paste it on the Connections page. "
         "The secret stays in the Keychain.</p>"
-        "<ol class=\"help\"><li>Create an OAuth client of type Desktop app. Leave the project in Testing and add only your test user.</li>"
-        "<li>Enable the Gmail API, the Drive API, and the Google Calendar API.</li>"
+        "<ol class=\"help\">"
+        "<li>Enable the <a href=\"https://console.cloud.google.com/apis/library/gmail.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Gmail API</a>, "
+        "the <a href=\"https://console.cloud.google.com/apis/library/drive.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Google Drive API</a>, and "
+        "the <a href=\"https://console.cloud.google.com/apis/library/calendar-json.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Google Calendar API</a>. "
+        "A disabled API is reported by Google as a permissions error.</li>"
         "<li>On Data Access, add gmail.readonly, drive.readonly, and calendar.events. "
         "calendar.calendarlist.readonly is optional. Do not add the broad calendar scope.</li>"
+        "<li>Leave the project in Testing and add only your test user. Create a Desktop OAuth client.</li>"
         "<li>Download the Desktop client JSON, or copy the client id and secret into the form. Do not put the secret in the config file.</li></ol>"
         "<p><a href=\"/ui/connections\">Back to Connections</a></p>"
     )
@@ -979,6 +1175,11 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
             + "</div></article>"
         )
     steps = (
+        "<p class=\"hint\">Enable the "
+        "<a href=\"https://console.cloud.google.com/apis/library/gmail.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Gmail API</a>, the "
+        "<a href=\"https://console.cloud.google.com/apis/library/drive.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Google Drive API</a>, and the "
+        "<a href=\"https://console.cloud.google.com/apis/library/calendar-json.googleapis.com\" target=\"_blank\" rel=\"noopener noreferrer\">Google Calendar API</a> "
+        "in the Cloud project before you connect. A disabled API is reported by Google as a permissions error.</p>"
         "<ol class=\"setup-steps\">"
         + ("<li class=\"done\">1 Set up the client</li>" if ready else "<li>1 Set up the client</li>")
         + ("<li class=\"done\">2 Enable services</li>" if any_on else "<li>2 Enable services</li>")

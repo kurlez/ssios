@@ -548,18 +548,31 @@ def run_google_command(settings, args) -> int:
         if args.command == "oauth-revoke-account":
             print(json.dumps(google.revoke_and_delete(args.account), ensure_ascii=False))
             return 0
+        from ssios.google_connector import requires_approval
+
+        arguments = json.loads(args.arguments)
+        limits = json.loads(args.limits)
+        if not requires_approval(args.tool):
+            result = google.read_now(
+                session,
+                project_id=args.project,
+                tool=args.tool,
+                arguments=arguments,
+                limits=limits,
+            )
+            print(result["text"])
+            return 0
         proposed = google.propose_fetch(
             session,
             project_id=args.project,
             tool=args.tool,
-            arguments=json.loads(args.arguments),
-            limits=json.loads(args.limits),
+            arguments=arguments,
+            limits=limits,
         )
         approval = proposed["approval"]
         print(google.preview(approval, session))
         print(json.dumps(approval, ensure_ascii=False))
-        verb = "change" if args.tool in ("calendar.create_event", "calendar.update_event", "calendar.delete_event") else "read"
-        print(f"Type yes to approve this {verb}, or anything else to leave it pending.")
+        print("Type yes to approve this change, or anything else to leave it pending.")
         if input("").strip() != "yes":
             print(json.dumps({"result": "pending", "approval_id": approval["id"]}, ensure_ascii=False))
             return 2

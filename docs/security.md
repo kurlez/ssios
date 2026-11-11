@@ -7,6 +7,7 @@ The v0 dev profile assumes the operator owns this machine, the control-plane pro
 - Every API requires a Bearer token, including the health check on loopback
 - The human token and the worker token are separate. A task token contains one project, one export revision, and an explicit file list
 - Approval binds the action, payload hash, expected revision, and a one-time nonce. Expiry, replay, and mismatched fields all fail. An expired approval is not renewed. Recovery only opens a new approval bound to the current revision
+- Connector reads (calendar list and search, Gmail search and read, Drive search and read) do not create an approval. Chat and `connector-fetch` run them on the host for the signed-in account. They stay off the guest, and the audit log stores the service name and a count, not the message or event text. Connector writes, including calendar create, update, and delete, still require that account's approval before Google is called
 - The model cannot approve itself with `approve: true` or with a task token. `ssios summary` approves only when standard input contains a single line `yes`. `no`, any other text, and EOF do not approve. Auto-approval in `ssios demo` exists only inside that demo command
 - A browser `Origin` is rejected, and the response does not send `Access-Control-Allow-Origin`
 - `Host` can only be `127.0.0.1` or `localhost`. The listen address in the config can only be loopback

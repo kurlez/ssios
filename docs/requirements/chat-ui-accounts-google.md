@@ -87,7 +87,7 @@ Gmail and Drive stay read-only. Calendar is read/write and is specified in secti
 6.3 OAuth: loopback redirect + PKCE in the user's own browser; the user completes consent. Mac setup guide for creating an OAuth client.
 6.4 Secure storage: tokens and the OAuth client secret in OS secure storage through the `keyring` package (macOS Keychain; Linux Secret Service), never plaintext files and never on a process command line. Namespaced per account (`ssios.google.<account_id>`). One Google identity per SSIOS account. If `keyring` is missing, refuse with `secure_store_unavailable`.
 6.5 API calls take the authenticated account from the session, never a target chosen by someone else. The signed-in account may be a member or an admin. Either may `connect`, `status` (`service`, `connected`, `connected_at`, plus per-connector `connectors`), `disconnect`, and request reads or calendar writes for that same account id only. `revoke_and_delete(account_id)` remains the deletion and password-reset call. It returns no token and no cloud content. A session whose role does not match the stored account, or whose account id is someone else's, is rejected with `connector_admin_denied` and receives none of that account's tokens or content.
-6.6 In chat: requests needing Gmail, Drive, or Calendar data route through the connector with an approval card before any fetch or write. Fetched content goes to local Ollama only; it never enters the VM unless needed for a VM task and approved.
+6.6 In chat: Gmail, Drive, and Calendar reads run on the host without an approval card. Each read is its own block, headed by that query's time range. Calendar writes still wait for an approval card. Fetched content goes to local Ollama only; it never enters the VM unless needed for a VM task and approved.
 6.7 Documented API so A's adapter can integrate. See `docs/google-connector.md`.
 
 ## 7. Tests (must exist and pass)
@@ -117,7 +117,7 @@ Do not request `https://www.googleapis.com/auth/calendar`. That scope also delet
 
 9.2 `admin_connection_status` includes `connectors.calendar.connected` and `connectors.calendar.connected_at`. Connecting Calendar does not mark Gmail or Drive connected, and the reverse is also true.
 
-9.3 Reads: `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`. `list_events` requires a time window of at most 31 days and a result cap. A missing or longer window raises `connector_window_denied`. Reads go through `propose_fetch` and `take_result` and do not call Google before approval.
+9.3 Reads: `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`. `list_events` requires a time window of at most 31 days and a result cap. A missing or longer window raises `connector_window_denied` and does not call Google. Reads use `read_now`. They do not create an approval.
 
 9.4 Writes: `calendar.create_event`, `calendar.update_event`, `calendar.delete_event`, one event per approval. The approval action is `connector.write`. The card shows the calendar, title, start, end, time zone, location, and attendees. Update shows before and after. Delete starts with `DESTRUCTIVE`. Nothing is written without that approval. Expired and denied approvals do not write. There is no batch auto-approve.
 

@@ -25,7 +25,8 @@ Build `member_session` only from the login session. Do not take an account id fr
 | `status(session)` | member | `service`, `connected`, `connected_at`, and `connectors`. |
 | `admin_connection_status(account_id)` | admin console | the same fields. No Google call and no content. |
 | `disconnect(session, connector)` | member | `status` after revoke and deletion of that connector's keychain items. |
-| `propose_fetch(session, project_id, tool, arguments, limits)` | member | `{"approval": ...}`. Google is not called. Reads use action `connector.fetch`. Calendar writes use `connector.write`. |
+| `read_now(session, project_id, tool, arguments, limits)` | member | the read result. Chat and `connector-fetch` use this for Gmail, Drive, and Calendar reads. It does not create an approval. |
+| `propose_fetch(session, project_id, tool, arguments, limits)` | member | `{"approval": ...}` for a calendar write. Google is not called until that approval is granted. The action is `connector.write`. |
 | `preview(approval, session)` | owning member | the approval card. Pass the member session. An admin session is `connector_admin_denied` and the error text has no event content. |
 | existing `plane.decide(...)` | owning account | approval record only. The mail, file, or event body is not in this response. |
 | `take_result(session, approval_id)` | same member | `{"text": ...}` once. Reads include the untrusted text. Writes return `created`, `updated`, or `deleted` plus the event id, not the title. Another account gets `not_found`. An admin session gets `connector_admin_denied`. |
@@ -44,7 +45,7 @@ If Google returns a scope that was not in that connector's request, SSIOS revoke
 
 `status` and `admin_connection_status` keep `service`, `connected`, and `connected_at` for the account. `connected` is true when any of the three connectors has a refresh token. `connectors` is a map of `drive`, `gmail`, and `calendar`, and each entry is only `connected` and `connected_at`. That is the per-service toggle. It has no titles, attendees, or tokens.
 
-Gmail and Drive tools are `drive.search`, `drive.read_file`, `gmail.search`, and `gmail.get_message`. Calendar tools are `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`, `calendar.create_event`, `calendar.update_event`, and `calendar.delete_event`. Any other name is rejected before a request is sent. Search and read stay inside the approved folder ids, file ids, labels, dates, or calendar window. Text is prefixed as untrusted external content. HTML is reduced to text. Binaries are not forwarded.
+Gmail and Drive tools are `drive.search`, `drive.read_file`, `gmail.search`, and `gmail.get_message`. Calendar tools are `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`, `calendar.create_event`, `calendar.update_event`, and `calendar.delete_event`. Any other name is rejected before a request is sent. A Gmail read uses `in:inbox` and at most 50 messages, then `format=metadata` for From, Subject, and Date. A question about senders is counted from those headers. The log line for each call keeps the operator shape, the status, and the count. It does not keep the sentence, a subject, or an address. Drive root, My Drive, and 根目录 use `'root' in parents`. A folder name is resolved with `mimeType` folder and `name`. Several matches are listed and not guessed. Recent files and a file name do not need a folder id. A missing folder is `drive_intent_invalid`. If a grant limits Drive to specific folders, the error is `drive_grant_limited` and it points at Connections. Text is prefixed as untrusted external content. HTML is reduced to text. Binaries are not forwarded.
 
 `[connectors] enabled` must list `drive`, `gmail`, and/or `calendar`. An empty list denies every fetch. Enabling Drive does not enable Calendar.
 
@@ -54,11 +55,11 @@ Gmail and Drive tools are `drive.search`, `drive.read_file`, `gmail.search`, and
 
 Each write is one event. A payload with `events` or `items` raises `connector_grant_denied`. The chat UI should call `preview(approval, session)` and show that string on the approval card.
 
-| Tool | Arguments | Card |
+| Tool | Arguments | What you see |
 | --- | --- | --- |
-| `calendar.list_calendars` | none | Says calendars will be listed only after approval. |
-| `calendar.list_events` | `calendar_id`, `time_min`, `time_max` | Calendar and the exact window. |
-| `calendar.get_event` | `calendar_id`, `event_id` | Calendar and event id. |
+| `calendar.list_calendars` | none | A calendar list. No approval. |
+| `calendar.list_events` | `calendar_id`, `time_min`, `time_max` | One block per query. The heading is that window, for example `Nov 11, 2026 — no events`. |
+| `calendar.get_event` | `calendar_id`, `event_id` | That event. No approval. |
 | `calendar.create_event` | `calendar_id`, `title`, `start`, `end`, `time_zone`, optional `description`, `location`, `attendees`, `event_id`, `send_updates` | Calendar, title, start, end, time zone, location, attendees, and whether attendees are emailed. |
 | `calendar.update_event` | `calendar_id`, `event_id`, `before`, `after`, optional `send_updates` | Before and after for those same fields. |
 | `calendar.delete_event` | `calendar_id`, `event_id`, `title`, `start`, `end`, `time_zone`, optional location and attendees | Starts with `DESTRUCTIVE:`. |
@@ -69,18 +70,23 @@ Create stores a client event id on the approval. If the caller omits `event_id`,
 
 Update reads the event only after approval. If it does not match `before`, SSIOS raises `connector_conflict` and does not send the update. Delete is not undone by SSIOS.
 
-The audit line for a calendar call stores the operation (`read`, `create`, `update`, or `delete`), the account, the approval id, the tool, a SHA-256 of the calendar id, the event id, the time window for a list, and the counts. It does not store titles, descriptions, locations, attendees, or tokens.
+A read is written to the security audit as the service name and a count. It has no approval id and no event text. A write still stores the operation (`create`, `update`, or `delete`), the account, the approval id, the tool, a SHA-256 of the calendar id, the event id, and the counts. Neither line stores titles, descriptions, locations, attendees, or tokens.
 
 ## Chat UI wiring
 
-Build `member_session` from the logged-in member. Show one toggle per entry in `status(session)["connectors"]`. Connect and disconnect with `"calendar"`. For a read or a write, call `propose_fetch`, show `preview(approval, session)`, and after that same member approves, call `take_result`. Do not call Google from the browser or from the guest. Do not auto-approve a second event because the first one was approved. An admin page should call only `admin_connection_status`.
+Build `member_session` from the logged-in member. Show one toggle per entry in `status(session)["connectors"]`. Connect and disconnect with `"calendar"`. A read calls `read_now` and is shown in the chat as its own block, with that query's time range as the heading. A write calls `propose_fetch`, shows `preview(approval, session)`, and calls `take_result` only after that same member approves. Do not call Google from the browser or from the guest. Do not auto-approve a second event because the first one was approved. An admin page should call only `admin_connection_status`.
 
 ## Mac setup
 
 Do this on the Mac that runs SSIOS. The browser consent has to be completed by you. Nothing in this repository can approve Google access for you.
 
-1. In Google Cloud Console, create an OAuth client of type Desktop app. Leave the project in Testing and add only the Google account you will use as a test user. Do not publish the app to skip verification.
-2. Enable the Gmail API, the Drive API, and the Google Calendar API for that project. Open Google Auth Platform, then Data Access, and add these scopes exactly. Do not add `https://www.googleapis.com/auth/calendar`. SSIOS rejects that full scope.
+1. Enable these APIs on the Cloud project. A disabled API comes back from Google as HTTP 403 `PERMISSION_DENIED`, and SSIOS reports `connector_api_disabled`.
+
+   - [Gmail API](https://console.cloud.google.com/apis/library/gmail.googleapis.com)
+   - [Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+   - [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)
+
+2. Open Google Auth Platform, then Data Access, and add these scopes exactly. Do not add `https://www.googleapis.com/auth/calendar`. SSIOS rejects that full scope.
 
    Required:
 
@@ -91,7 +97,9 @@ Do this on the Mac that runs SSIOS. The browser consent has to be completed by y
    Optional. Add it when you want the account to list calendars other than the primary one. If it is not on Data Access, Google will not offer it, and SSIOS still connects Calendar for the primary calendar:
 
    - `https://www.googleapis.com/auth/calendar.calendarlist.readonly`
-3. Install the keyring package. On the Connections page, signed in as that account, save the client id and secret or upload the Desktop `client_secret_*.json` file. The same `install_client` path stores them in the Keychain. The page shows only the last characters of the client id. The secret is not written into the repo, the state directory, the config, or the audit log, and it is not passed to a shell command. The command-line prompt does the same thing:
+
+3. Leave the project in Testing. Add only the Google account you will use as a test user. Create an OAuth client of type Desktop app. Do not publish the app to skip verification.
+4. Install the keyring package. On the Connections page, signed in as that account, save the client id and secret or upload the Desktop `client_secret_*.json` file. The same `install_client` path stores them in the Keychain. The page shows only the last characters of the client id. The secret is not written into the repo, the state directory, the config, or the audit log, and it is not passed to a shell command. The command-line prompt does the same thing:
 
 ```bash
 pip install keyring
@@ -106,8 +114,8 @@ PYTHONPATH=src python3 -m ssios oauth-install-client \
 
 The prompt reads the secret without echoing it. `YOUR_ACCOUNT_ID` is the household account id from login (letters, digits, `_`, `-`). Use your own id, not someone else's.
 
-4. In the shared config, under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]` for the services this Mac may use. A name left out stays denied for every account, and the Connections page shows that toggle as disabled. Each signed-in account then turns its own services on from the Connections page. That choice is stored under the account's state, not in the shared TOML. A service works only when both switches are on. Restart SSIOS if you change the shared config while it is running.
-5. On the Connections page, choose Connect for a service that is turned on, or start consent from the command line. A browser opens. Sign in and approve the requested scope yourself:
+5. In the shared config, under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]` for the services this Mac may use. A name left out stays denied for every account, and the Connections page shows that toggle as disabled. Each signed-in account then turns its own services on from the Connections page. That choice is stored under the account's state, not in the shared TOML. A service works only when both switches are on. Restart SSIOS if you change the shared config while it is running.
+6. On the Connections page, choose Connect for a service that is turned on, or start consent from the command line. A browser opens. Sign in and approve the requested scope yourself:
 
 ```bash
 PYTHONPATH=src python3 -m ssios oauth-connect \
@@ -121,7 +129,7 @@ Repeat with `--connector gmail` for mail and `--connector calendar` for Calendar
 
 If you click Connect in the chat UI from another computer on the LAN, the redirect still has to hit this Mac's `127.0.0.1`. Finish that consent on the Mac, or run `oauth-connect` here.
 
-6. Check the connection. The output is only the service name, whether it is connected, and when:
+7. Check the connection. The output is only the service name, whether it is connected, and when:
 
 ```bash
 PYTHONPATH=src python3 -m ssios oauth-status \
@@ -130,7 +138,7 @@ PYTHONPATH=src python3 -m ssios oauth-status \
   --config /path/to/your.toml
 ```
 
-7. Read something only after you approve the fetch. This example lists files in one folder. Replace the folder id with one from your own Drive. The command prints the approval and waits. Type `yes` to let the host call Google. The text is marked untrusted.
+8. Read something. This example lists files in one folder. Replace the folder id with one from your own Drive. A read does not ask for approval. The text is marked untrusted.
 
 ```bash
 PYTHONPATH=src python3 -m ssios connector-fetch \
@@ -143,7 +151,7 @@ PYTHONPATH=src python3 -m ssios connector-fetch \
   --config /path/to/your.toml
 ```
 
-A calendar list uses the same command with `--tool calendar.list_events`. Replace the window with a range of at most 31 days. The command prints the approval card and waits. Type `yes` to let the host call Google. A create, update, or delete uses the same command and the same `yes`. The card is the change you are approving. `send_updates` defaults to `none`.
+A calendar list uses the same command with `--tool calendar.list_events`. Replace the window with a range of at most 31 days. The command calls Google and prints the events. It does not wait for `yes`. A create, update, or delete uses the same command, prints the approval card, and waits. Type `yes` to let the host call Google. The card is the change you are approving. `send_updates` defaults to `none`.
 
 ```bash
 PYTHONPATH=src python3 -m ssios connector-fetch \
@@ -156,7 +164,7 @@ PYTHONPATH=src python3 -m ssios connector-fetch \
   --config /path/to/your.toml
 ```
 
-8. Disconnect one service, or wipe the account's Google secrets after a password reset or account deletion:
+9. Disconnect one service, or wipe the account's Google secrets after a password reset or account deletion:
 
 ```bash
 PYTHONPATH=src python3 -m ssios oauth-disconnect \

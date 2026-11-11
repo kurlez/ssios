@@ -103,17 +103,31 @@ def parse_desktop_client(raw: str) -> tuple[str, str]:
     return client_id, client_secret
 
 
-def _oauth_fields(raw: bytes) -> tuple[str, str]:
-    """Google's OAuth error and error_description. Empty when the body is not that shape."""
+def _reason_list(error: dict) -> tuple[str, ...]:
+    found: list[str] = []
+    for key in ("details", "errors"):
+        items = error.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("reason"), str) and item["reason"].strip():
+                found.append(item["reason"].strip())
+    return tuple(found)
+
+
+def _oauth_fields(raw: bytes) -> tuple[str, str, tuple[str, ...]]:
+    """Status, message, and reason names from a Google error body. No URLs."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
-        return "", ""
+        return "", "", ()
     if not isinstance(data, dict):
-        return "", ""
+        return "", "", ()
     error = data.get("error")
     description = data.get("error_description")
+    reasons: tuple[str, ...] = ()
     if isinstance(error, dict):
+        reasons = _reason_list(error)
         if not isinstance(description, str):
             description = error.get("message")
         error = error.get("status") or ""
@@ -121,7 +135,7 @@ def _oauth_fields(raw: bytes) -> tuple[str, str]:
         error = ""
     if not isinstance(description, str):
         description = ""
-    return error.strip(), description.strip()
+    return error.strip(), description.strip(), reasons
 
 
 def _identity_from_payload(payload: dict) -> str:
@@ -156,11 +170,34 @@ def _identity_from_payload(payload: dict) -> str:
     return ""
 
 
-def _insufficient_scope(error: str, description: str) -> bool:
-    if error in {"PERMISSION_DENIED", "insufficient_scope"}:
+def _insufficient_scope(error: str, description: str, reasons: tuple[str, ...]) -> bool:
+    if "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in reasons or error == "insufficient_scope":
         return True
     text = f"{error} {description}".lower()
     return "insufficient" in text and "scope" in text
+
+
+def _api_disabled(error: str, description: str, reasons: tuple[str, ...]) -> bool:
+    if any(reason in {"SERVICE_DISABLED", "accessNotConfigured"} for reason in reasons):
+        return True
+    text = f"{error} {description}".lower()
+    return (
+        "service_disabled" in text
+        or "accessnotconfigured" in text
+        or "access not configured" in text
+        or "has not been used in project" in text
+    )
+
+
+_API_ENABLE = {
+    "calendar": (
+        "Google Calendar API",
+        "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com",
+    ),
+    "gmail": ("Gmail API", "https://console.cloud.google.com/apis/library/gmail.googleapis.com"),
+    "drive": ("Google Drive API", "https://console.cloud.google.com/apis/library/drive.googleapis.com"),
+}
+_STALE_CONSENT = "This address is from an older consent. Click Connect again and paste the new address."
 
 
 def _safe_oauth_description(text: str) -> str:
@@ -434,6 +471,36 @@ class GoogleConnector:
         self._errors = {key: value for key, value in self._errors.items() if key[0] != account_id}
         return {"account_id": account_id, "deleted": True, "revoke_ok": revoke_ok}
 
+    def read_now(self, session: AccountSession, *, project_id: str, tool: str, arguments: dict, limits: dict, peer_ip: str = "127.0.0.1") -> dict:
+        """Run a read immediately. Writes still go through propose_fetch and approval."""
+        if requires_approval(tool):
+            raise SsiosError("connector_grant_denied", "this operation needs approval", 403)
+        account_id = self._bind(session)
+        tool = _tool_name(tool)
+        arguments = dict(arguments or {})
+        limits = _normalize_limits(limits or {}, self.plane.settings)
+        if tool.startswith("calendar."):
+            arguments = prepare_calendar(tool, arguments, limits)
+        self._enabled(account_id, tool)
+        self._connected_scope(account_id, tool, limits)
+        if self._calls.get(account_id, 0) >= int(limits["max_calls"]):
+            raise SsiosError("connector_budget", "connector call budget is exhausted", 429)
+        access = self._access_token(account_id, tool.split(".", 1)[0])
+        try:
+            text, meta = self._fetch(tool, arguments, limits, access, account_id)
+        finally:
+            del access
+        self._calls[account_id] = self._calls.get(account_id, 0) + 1
+        self.plane.security_audit.write(
+            actor=account_id,
+            ip=peer_ip or "127.0.0.1",
+            action="connector.read",
+            target=tool.split(".", 1)[0],
+            result="ok",
+            extra={"service": tool.split(".", 1)[0], "item_count": str(meta.get("item_count") or 0)},
+        )
+        return {"tool": tool, "text": text, "arguments": arguments, "item_count": int(meta.get("item_count") or 0), "project_id": str(project_id)}
+
     def propose_fetch(self, session: AccountSession, *, project_id: str, tool: str, arguments: dict, limits: dict) -> dict:
         """Create an approval. Google is not called until that approval is granted."""
         account_id = self._bind(session)
@@ -495,7 +562,7 @@ class GoogleConnector:
         self._connected_scope(account_id, tool, limits)
         access = self._access_token(account_id, tool.split(".", 1)[0])
         try:
-            text, meta = self._fetch(tool, material["arguments"], limits, access)
+            text, meta = self._fetch(tool, material["arguments"], limits, access, account_id)
         finally:
             del access
         text = redact_text(UNTRUSTED_PREFIX + text, [])
@@ -552,7 +619,7 @@ class GoogleConnector:
         with self._lock:
             pending = self._pending.get((account_id, connector))
             if not pending or query.get("state") != pending["state"] or not query.get("code"):
-                raise SsiosError("oauth_state_mismatch", "oauth state rejected", 400)
+                raise SsiosError("oauth_state_mismatch", _STALE_CONSENT, 400)
             self._pending.pop((account_id, connector), None)
             saved = dict(pending)
         self._complete(account_id, connector, saved["scope"], saved["verifier"], saved["state"], saved["redirect"], query)
@@ -576,7 +643,7 @@ class GoogleConnector:
 
     def _complete(self, account_id: str, connector: str, scope: str, verifier: str, state: str, redirect: str, query: dict) -> None:
         if query.get("state") != state or not query.get("code"):
-            raise SsiosError("oauth_state_mismatch", "oauth state rejected", 400)
+            raise SsiosError("oauth_state_mismatch", _STALE_CONSENT, 400)
         token = self._token_request(
             {
                 "code": query["code"],
@@ -597,6 +664,14 @@ class GoogleConnector:
         try:
             requested = scope
             granted = token.get("scope")
+            from ssios.logsafe import log_token_scopes
+
+            log_token_scopes(
+                account_id=account_id,
+                service=connector,
+                requested=requested,
+                granted=granted if isinstance(granted, str) else "",
+            )
             if isinstance(granted, str) and granted.strip():
                 extra = [part for part in granted.split() if part not in requested.split()]
                 if extra:
@@ -802,10 +877,22 @@ class GoogleConnector:
     ) -> None:
         from ssios.logsafe import log_upstream
 
-        error, description = _oauth_fields(raw)
-        log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=error)
+        error, description, reasons = _oauth_fields(raw)
+        logged = error
+        for reason in reasons:
+            if reason in {"SERVICE_DISABLED", "accessNotConfigured", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}:
+                logged = reason
+                break
+        log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=logged)
         safe = _safe_oauth_description(description)
-        if _insufficient_scope(error, description):
+        if _api_disabled(error, description, reasons):
+            api_name, link = _API_ENABLE.get(service, ("Google API", "https://console.cloud.google.com/apis/library"))
+            raise SsiosError(
+                "connector_api_disabled",
+                f"Enable the {api_name} in the Cloud project. {link} Error code: connector_api_disabled.",
+                403,
+            )
+        if _insufficient_scope(error, description, reasons):
             if optional or scopes in _OPTIONAL_SCOPES:
                 raise SsiosError("connector_optional_denied", "optional scope was not granted", 403)
             shown = scopes or "the scopes this service needs"
@@ -857,13 +944,13 @@ class GoogleConnector:
             raise SsiosError("connector_upstream", "google response rejected", 502)
         return payload
 
-    def _fetch(self, tool: str, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
+    def _fetch(self, tool: str, arguments: dict, limits: dict, access: str, account_id: str = "") -> tuple[str, dict]:
         if tool == "drive.search":
-            return self._drive_search(arguments, limits, access)
+            return self._drive_search(arguments, limits, access, account_id)
         if tool == "drive.read_file":
             return self._drive_read(arguments, limits, access)
         if tool == "gmail.search":
-            return self._gmail_search(arguments, limits, access)
+            return self._gmail_search(arguments, limits, access, account_id)
         if tool == "gmail.get_message":
             return self._gmail_get(arguments, limits, access)
         if tool in CALENDAR_TOOLS:
@@ -958,23 +1045,116 @@ class GoogleConnector:
     def _calendar_event_url(self, calendar_id: str, event_id: str) -> str:
         return self._calendar_collection(calendar_id) + "/" + urllib.parse.quote(event_id, safe="")
 
-    def _drive_search(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
-        folders = list(limits["folder_ids"])
-        if not folders:
-            raise SsiosError("connector_grant_denied", "drive search needs a folder id", 403)
-        parent = " or ".join(f"'{item}' in parents" for item in folders)
+    def _drive_search(self, arguments: dict, limits: dict, access: str, account_id: str = "") -> tuple[str, dict]:
+        from ssios.logsafe import log_read
+
+        mode = str(arguments.get("mode") or "")
+        allow = list(limits["folder_ids"])
+        if mode:
+            files = self._drive_natural(mode, arguments, limits, access, account_id, allow)
+        else:
+            if not allow:
+                raise SsiosError("drive_intent_invalid", "Say which Drive folder you mean. A raw folder id is not required.", 400)
+            files = self._drive_children(allow, arguments, limits, access, account_id)
+        lines = [_drive_line(item) for item in files[: limits["max_items"]]]
+        return _bounded("\n".join(lines), limits)
+
+    def _drive_natural(self, mode: str, arguments: dict, limits: dict, access: str, account_id: str, allow: list[str]) -> list[dict]:
+        if mode == "folder_name":
+            name = _drive_literal(arguments.get("folder_name"))
+            found = self._drive_query(
+                account_id,
+                access,
+                limits,
+                "folder",
+                f"mimeType = 'application/vnd.google-apps.folder' and name = '{name}' and trashed = false",
+                order_by="modifiedTime desc",
+            )
+            if allow:
+                found = [item for item in found if str(item.get("id") or "") in allow]
+            if not found:
+                raise SsiosError("drive_intent_invalid", "No folder with that name was found.", 400)
+            if len(found) > 1:
+                choices = found[: limits["max_items"]]
+                for item in choices:
+                    item["_choice"] = True
+                return choices
+            return self._drive_children([str(found[0].get("id") or "")], {}, limits, access, account_id)
+        if mode == "folder_id":
+            folder_id = str(arguments.get("folder_id") or "")
+            self._drive_allowed(folder_id, allow)
+            return self._drive_children([folder_id], {}, limits, access, account_id)
+        if mode == "root":
+            self._drive_allowed("root", allow)
+            return self._drive_children(["root"], {}, limits, access, account_id)
+        if mode == "recent":
+            if allow:
+                raise SsiosError(
+                    "drive_grant_limited",
+                    "Drive for this account is limited to specific folders. Open Connections and check Drive, then ask for an allowed folder by name.",
+                    403,
+                )
+            return self._drive_query(account_id, access, limits, "recent", "trashed = false", order_by="modifiedTime desc")
+        if mode == "name":
+            if allow:
+                raise SsiosError(
+                    "drive_grant_limited",
+                    "Drive for this account is limited to specific folders. Open Connections and check Drive, then ask for an allowed folder by name.",
+                    403,
+                )
+            keyword = _drive_literal(arguments.get("keyword"))
+            found = self._drive_query(
+                account_id,
+                access,
+                limits,
+                "name",
+                f"name contains '{keyword}' and trashed = false",
+                order_by="modifiedTime desc",
+            )
+            needle = str(arguments.get("keyword") or "").casefold()
+            return [item for item in found if needle in str(item.get("name") or "").casefold()]
+        raise SsiosError("drive_intent_invalid", "Say which Drive folder you mean. A raw folder id is not required.", 400)
+
+    def _drive_allowed(self, folder_id: str, allow: list[str]) -> None:
+        if allow and folder_id not in allow:
+            raise SsiosError(
+                "drive_grant_limited",
+                "Drive for this account is limited to specific folders. Open Connections and check Drive, then ask for an allowed folder by name.",
+                403,
+            )
+
+    def _drive_children(self, folders: list[str], arguments: dict, limits: dict, access: str, account_id: str) -> list[dict]:
+        parent = " or ".join(f"'{item}' in parents" for item in folders if item)
         query = f"({parent}) and trashed = false"
         extra = str(arguments.get("q") or "").strip()
-        if extra:
+        if extra and extra != "trashed = false":
             query = f"({query}) and ({extra})"
-        payload = self._get_json(
-            self.endpoints.api_base + "/drive/v3/files",
-            access,
-            {"q": query, "pageSize": str(limits["max_items"]), "fields": "files(id,name,mimeType,parents)"},
-        )
-        files = [item for item in payload.get("files") or [] if isinstance(item, dict) and _parents_ok(item, folders)]
-        lines = [f"{item.get('id')} {item.get('name')} {item.get('mimeType')}" for item in files[: limits["max_items"]]]
-        return _bounded("\n".join(lines), limits)
+        files = self._drive_query(account_id, access, limits, "parents:root" if folders == ["root"] else "parents", query, order_by="name")
+        return [item for item in files if _parents_ok(item, folders)]
+
+    def _drive_query(self, account_id: str, access: str, limits: dict, shape: str, query: str, *, order_by: str) -> list[dict]:
+        from ssios.logsafe import log_read
+
+        url = self.endpoints.api_base + "/drive/v3/files"
+        params = {
+            "q": query,
+            "pageSize": str(limits["max_items"]),
+            "fields": "files(id,name,mimeType,modifiedTime,webViewLink,parents)",
+            "orderBy": order_by,
+        }
+        status, raw = self._exchange("GET", url, access, params, None)
+        files: list[dict] = []
+        if status < 400:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                files = [item for item in payload.get("files") or [] if isinstance(item, dict)]
+        log_read(account_id=account_id, service="drive", endpoint="drive.list", status=status, query=shape, count=len(files))
+        if status >= 400:
+            raise SsiosError("connector_upstream", f"google status {status}", 502)
+        return files
 
     def _drive_read(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
         file_id = str(arguments.get("file_id") or "")
@@ -1005,7 +1185,9 @@ class GoogleConnector:
         )
         return _bounded(raw.decode("utf-8", "replace"), limits)
 
-    def _gmail_search(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
+    def _gmail_search(self, arguments: dict, limits: dict, access: str, account_id: str = "") -> tuple[str, dict]:
+        from ssios.logsafe import gmail_query_shape, log_read
+
         labels = list(limits["labels"])
         parts = [f"label:{item}" for item in labels if item and " " not in item]
         if limits["after"]:
@@ -1016,14 +1198,54 @@ class GoogleConnector:
         if extra:
             parts.append(extra)
         if not parts:
-            raise SsiosError("connector_grant_denied", "gmail search needs a label or date", 403)
-        payload = self._get_json(
-            self.endpoints.api_base + "/gmail/v1/users/me/messages",
-            access,
-            {"q": " ".join(parts), "maxResults": str(limits["max_items"])},
+            parts.append("in:inbox")
+        query = " ".join(parts)
+        url = self.endpoints.api_base + "/gmail/v1/users/me/messages"
+        status, raw = self._exchange("GET", url, access, {"q": query, "maxResults": str(limits["max_items"])}, None)
+        messages: list[dict] = []
+        if status < 400:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                messages = [item for item in payload.get("messages") or [] if isinstance(item, dict) and item.get("id")]
+        log_read(
+            account_id=account_id,
+            service="gmail",
+            endpoint="gmail.list",
+            status=status,
+            query=gmail_query_shape(query),
+            count=len(messages),
         )
-        rows = [item.get("id") for item in payload.get("messages") or [] if isinstance(item, dict)]
-        return _bounded("\n".join(str(item) for item in rows[: limits["max_items"]]), limits)
+        if status >= 400:
+            raise SsiosError("connector_upstream", f"google status {status}", 502)
+        lines = []
+        for item in messages[: limits["max_items"]]:
+            header = self._gmail_metadata(account_id, str(item.get("id")), access)
+            lines.append(_mail_line(header))
+        return _bounded("\n".join(lines), limits)
+
+    def _gmail_metadata(self, account_id: str, message_id: str, access: str) -> dict:
+        from ssios.logsafe import log_read
+
+        if not message_id or "/" in message_id:
+            raise SsiosError("connector_grant_denied", "message id rejected", 403)
+        url = self.endpoints.api_base + "/gmail/v1/users/me/messages/" + urllib.parse.quote(message_id, safe="")
+        params = {"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]}
+        status, raw = self._exchange("GET", url, access, params, None)
+        header = {"from": "", "subject": "", "date": ""}
+        if status < 400:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                header = _mail_header(payload)
+        log_read(account_id=account_id, service="gmail", endpoint="gmail.metadata", status=status, query="format:metadata", count=1 if status < 400 else 0)
+        if status >= 400:
+            raise SsiosError("connector_upstream", f"google status {status}", 502)
+        return header
 
     def _gmail_get(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
         message_id = str(arguments.get("message_id") or "")
@@ -1063,7 +1285,14 @@ class GoogleConnector:
 
     def _exchange(self, method: str, url: str, access: str, params: dict | None, payload: dict | None) -> tuple[int, bytes]:
         if params:
-            url = url + "?" + urllib.parse.urlencode(params)
+            pairs = []
+            items = params.items() if isinstance(params, dict) else params
+            for key, value in items:
+                if isinstance(value, (list, tuple)):
+                    pairs.extend((key, item) for item in value)
+                else:
+                    pairs.append((key, value))
+            url = url + "?" + urllib.parse.urlencode(pairs)
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, method=method)
         request.add_header("Authorization", "Bearer " + access)
@@ -1087,6 +1316,12 @@ def _connector_name(connector: str) -> str:
     if connector not in CONNECTORS:
         raise SsiosError("connector_denied", "connector rejected", 403)
     return connector
+
+
+def requires_approval(tool: str) -> bool:
+    """Reads run immediately. Writes wait for an approval."""
+    name = _tool_name(tool)
+    return name in CALENDAR_WRITE_TOOLS
 
 
 def _tool_name(tool: str) -> str:
@@ -1149,7 +1384,7 @@ def _normalize_limits(limits: dict, settings) -> dict:
         max_calls = int(limits.get("max_calls", settings.connector_max_calls))
     except (TypeError, ValueError) as exc:
         raise SsiosError("connector_grant_denied", "grant rejected", 400) from exc
-    if not 1 <= max_items <= 20 or not 1 <= max_bytes <= int(settings.connector_max_bytes):
+    if not 1 <= max_items <= 50 or not 1 <= max_bytes <= int(settings.connector_max_bytes):
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
     if not 1 <= max_calls <= int(settings.connector_max_calls):
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
@@ -1228,6 +1463,51 @@ def _clip(text: str, max_bytes: int) -> tuple[str, bool]:
     return raw[:max_bytes].decode("utf-8", "ignore"), True
 
 
+def _drive_literal(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    if not text or len(text) > 80 or any(char in text for char in "\\'\n\r"):
+        raise SsiosError("drive_intent_invalid", "That name cannot be used. Say it without quotes.", 400)
+    return text
+
+
+def _drive_line(item: dict) -> str:
+    payload = {
+        "name": str(item.get("name") or "File"),
+        "mime": str(item.get("mimeType") or ""),
+        "modified": str(item.get("modifiedTime") or ""),
+        "link": str(item.get("webViewLink") or ""),
+    }
+    if item.get("_choice"):
+        payload["choice"] = True
+    return payload["name"] + " || drive-file " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _mail_header(payload: dict) -> dict:
+    found = {"from": "", "subject": "", "date": ""}
+    body = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    for item in body.get("headers") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").casefold()
+        if name == "from":
+            found["from"] = str(item.get("value") or "")
+        elif name == "subject":
+            found["subject"] = str(item.get("value") or "")
+        elif name == "date":
+            found["date"] = str(item.get("value") or "")
+    return found
+
+
+def _mail_line(header: dict) -> str:
+    payload = {
+        "from": str(header.get("from") or ""),
+        "subject": str(header.get("subject") or ""),
+        "date": str(header.get("date") or ""),
+    }
+    title = payload["subject"] or "(no subject)"
+    return title + " || mail-header " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _bounded(text: str, limits: dict) -> tuple[str, dict]:
     bounded, truncated = _clip(text, int(limits["max_bytes"]))
     return bounded, {
@@ -1258,10 +1538,10 @@ class _Callback(BaseHTTPRequestHandler):
 def _callback_query(pasted: str, pending: dict | None) -> dict:
     parsed = urllib.parse.urlsplit(str(pasted or "").strip())
     if parsed.scheme != "http" or (parsed.hostname or "") != "127.0.0.1" or not pending:
-        raise SsiosError("oauth_state_mismatch", "paste the 127.0.0.1 redirect address from this consent", 400)
+        raise SsiosError("oauth_state_mismatch", _STALE_CONSENT, 400)
     expected = urllib.parse.urlsplit(str(pending.get("redirect") or ""))
     if parsed.port != expected.port or parsed.path != expected.path:
-        raise SsiosError("oauth_state_mismatch", "paste the 127.0.0.1 redirect address from this consent", 400)
+        raise SsiosError("oauth_state_mismatch", _STALE_CONSENT, 400)
     query = urllib.parse.parse_qs(parsed.query)
     return {key: values[-1] for key, values in query.items() if values}
 

@@ -800,6 +800,14 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .setup-steps { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: var(--muted); }
 .setup-steps .done { color: var(--ink); font-weight: 600; }
 .help { list-style: decimal; padding-left: 1.25rem; }
+.result-block { display: grid; gap: 8px; margin: 4px 0 12px; padding-top: 8px; }
+.result-block + .result-block { border-top: 1px solid var(--line); }
+.result-block h2, .result-block h3 { margin: 0; font-size: 0.95rem; }
+.event-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.event-card h3, .event-card h4 { margin: 0; font-size: 1rem; }
+.event-card p { margin: 4px 0 0; }
+.type-badge { display: inline-block; width: max-content; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
+.technical { margin-top: 12px; color: var(--muted); }
 .svc-grid { display: grid; gap: 16px; }
 .svc { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
 .svc .body { display: grid; gap: 8px; min-width: 0; }

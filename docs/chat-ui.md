@@ -11,8 +11,8 @@ The router prints its choice and the reason on the turn:
 - A plain question goes to local Ollama. No guest is started.
 - A plain question, in Chinese or English, goes to local Ollama. A request to run code, edit or create files, or touch a workspace starts the no-NIC Codex guest named by `[runtime] backend` and `agent`. On a Mac that pair is `macos-vz` and `codex`. On Linux it is `cloud-hypervisor` and `codex`. `dev-guard` and `summary` are refused before any boot line. If the guest cannot start, the assistant message shows the English reason, an error code, and a hint, and that message stays in the account's chat history. Codex is not run on the host. `ssios vm-diagnose` prints a redacted summary of the backend, vfkit, kernel, initramfs, Codex binary, Ollama, and the last guest error. It does not print tokens.
 - If the router is not sure the message is only a question, it uses the guest.
-- Gmail and Drive stay read-only. Calendar can list calendars and events, and can create, update, or delete one event. None of those calls happen until you approve the card. A calendar write is performed by the host connector. A calendar request stays on that connector path unless the same message also asks for a workspace change.
-- Force direct and Force virtual machine override the router. Force direct still does not run tools on the host. A cloud read still waits for approval.
+- Gmail and Drive stay read-only. Calendar can list calendars and events, and can create, update, or delete one event. A read runs immediately and stays on this machine. A Gmail question lists From, Subject, and Date, or a sender and a count. An empty inbox says so directly. Drive understands root, My Drive, 根目录, a folder name, recent files, and a file name. Each result is its own block. A calendar write still waits for one approval, and the host connector performs it. A calendar request stays on that connector path unless the same message also asks for a workspace change.
+- Force direct and Force virtual machine override the router. Force direct still does not run tools on the host. A cloud read still runs on this machine. A calendar change still waits for approval.
 
 Nothing from a guest is applied until the owning account approves the card. An admin cannot approve another account's card, and cannot read that account's chat, memory, or mail.
 
@@ -85,7 +85,7 @@ An admin sees whether Gmail or Drive is connected, and the connected-at time. Th
 
 ## Calendar in ordinary language
 
-Say what you want in Chinese or English. The local Ollama model only fills a small JSON intent. It does not choose the calendar date. The program resolves "this week", "tomorrow afternoon", "下周三", and "周五" from today's date and the account time zone, then the approval card shows the absolute date, time, and zone.
+Say what you want in Chinese or English. The local Ollama model only fills a small JSON intent. It does not choose the calendar date. The program resolves "this week", "tomorrow afternoon", "下周三", and "周五" from today's date and the account time zone. A read shows that window as its own heading. A write's approval card shows the absolute date, time, and zone.
 
 Examples:
 

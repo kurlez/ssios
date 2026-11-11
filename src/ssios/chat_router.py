@@ -87,11 +87,11 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
     forced = override if override in {"force_direct", "force_vm", "auto"} else "auto"
     if forced == "force_vm":
         if services:
-            return _decision("connector_vm", "override_vm", "You chose the guest. Cloud data is read only after you approve it.", services)
+            return _decision("connector_vm", "override_vm", "You chose the guest. Cloud data is read on this machine. A workspace change still waits for approval.", services)
         return _decision("vm", "override_vm", "You chose the guest for this message.", ())
     if forced == "force_direct":
         if services:
-            return _decision("connector", "override_direct", "You chose a direct answer. Cloud data is still read only after you approve it.", services)
+            return _decision("connector", "override_direct", "You chose a direct answer. Cloud data is read on this machine. A calendar change still waits for approval.", services)
         if _REMEMBER.search(message):
             return _decision("memory", "override_direct", "You chose not to use the guest. A memory write still waits for your approval.", ())
         return _decision("direct", "override_direct", "You chose a direct answer. No tools will run.", ())
@@ -99,7 +99,7 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
         return _decision(
             "connector_vm",
             "rule_connector_vm",
-            "The message needs cloud data and a workspace change. The read is approved first. The guest starts only after that.",
+            "The message needs cloud data and a workspace change. The read runs on this machine. The guest result still waits for approval.",
             services,
         )
     if services and not (_DEFINITION.search(message) and "my" not in message.casefold() and "inbox" not in message.casefold()):
@@ -144,9 +144,9 @@ def _services(message: str) -> tuple[str, ...]:
     if _DEFINITION.search(message) and "my" not in folded and "inbox" not in folded and "unread" not in folded:
         return ()
     found = []
-    if any(word in folded for word in ("gmail", "inbox", "e-mail", "email", "unread")):
+    if any(word in folded for word in ("gmail", "inbox", "e-mail", "email", "unread")) or any(word in message for word in ("邮箱", "发件人", "收件箱")):
         found.append("gmail")
-    if any(word in folded for word in ("google drive", "my drive", "drive file")) or re.search(r"\bdrive\b", folded):
+    if any(word in folded for word in ("google drive", "my drive", "drive file")) or any(word in message for word in ("云端硬盘", "网盘", "根目录")) or re.search(r"\bdrive\b", folded):
         found.append("drive")
     if mentions_calendar(message):
         found.append("calendar")
@@ -155,10 +155,10 @@ def _services(message: str) -> tuple[str, ...]:
 
 def _cloud_reason(services: tuple[str, ...]) -> str:
     if services == ("calendar",):
-        return "The message asks for Google Calendar. Nothing is read or changed until you approve it."
+        return "The message asks for Google Calendar. A read runs now. A change waits for approval."
     if "calendar" in services:
-        return "The message asks for Google Calendar and other cloud data. Nothing is read or changed until you approve it."
-    return "The message asks for Gmail or Drive. Nothing is fetched until you approve it."
+        return "The message asks for Google Calendar and other cloud data. Reads run now. A change waits for approval."
+    return "The message asks for Gmail or Drive. The read runs on this machine."
 
 
 def _unsure(message: str, llm, deadline: float | None) -> RouteDecision:

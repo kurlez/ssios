@@ -126,6 +126,57 @@ class RecordingGuest:
 
 
 class RouterTest(PlaneTest):
+    def test_mail_and_drive_plans_do_not_copy_the_sentence_into_the_query(self) -> None:
+        from ssios.drive_intent import plan_drive
+        from ssios.mail_intent import plan_mail
+
+        mail = plan_mail("查一下我的Gmail邮箱里有哪些发件人发给我的邮件")
+        self.assertEqual(mail["q"], "in:inbox")
+        self.assertEqual(mail["view"], "senders")
+        self.assertNotIn("发件人", mail["q"])
+        week = plan_mail("unread mail from the last 7 days")
+        self.assertEqual(week["q"], "in:inbox is:unread newer_than:7d")
+        root = plan_drive("列一下我的Google Drive的根目录下的文件名")
+        self.assertEqual(root, {"mode": "root"})
+        named = plan_drive("list files in the Harbor folder on Google Drive")
+        self.assertEqual(named, {"mode": "folder_name", "folder_name": "Harbor"})
+        self.assertEqual(plan_drive("recent files in Google Drive")["mode"], "recent")
+        self.assertEqual(plan_drive("search Google Drive for harbor"), {"mode": "name", "keyword": "harbor"})
+        with self.assertRaises(SsiosError) as caught:
+            plan_drive("list my Google Drive")
+        self.assertEqual(caught.exception.code, "drive_intent_invalid")
+
+    def test_each_calendar_query_keeps_its_own_range(self) -> None:
+        from ssios.chat import read_blocks
+
+        empty = read_blocks(
+            "calendar.list_events",
+            {"time_min": "2026-11-11T00:00:00-08:00", "time_max": "2026-11-12T00:00:00-08:00"},
+            "",
+            "America/Los_Angeles",
+        )
+        self.assertEqual(empty[0]["summary"], "Nov 11, 2026 — no events")
+        self.assertEqual(empty[0]["events"], [])
+        text = (
+            "ev0123456789abcd Harbor sync || event-snapshot "
+            '{"id":"ev0123456789abcd","title":"Harbor sync","description":"Notes https://example.com/harbor-sync",'
+            '"location":"Studio B","start":"2026-11-14T18:30:00-08:00","end":"2026-11-14T20:00:00-08:00",'
+            '"time_zone":"America/Los_Angeles","attendees":[]}'
+        )
+        filled = read_blocks(
+            "calendar.list_events",
+            {"time_min": "2026-11-14T00:00:00-08:00", "time_max": "2026-11-15T00:00:00-08:00"},
+            text,
+            "America/Los_Angeles",
+        )
+        card = filled[0]["events"][0]
+        self.assertEqual(filled[0]["summary"], "1 event. Nov 14, 2026")
+        self.assertEqual(card["title"], "Harbor sync")
+        self.assertEqual(card["location"], "Studio B")
+        self.assertEqual(card["when"], "Sat Nov 14, 6:30 – 8:00 PM PST")
+        self.assertNotIn("ev0123456789abcd", card["title"] + card["when"] + card["location"] + card["description"])
+        self.assertNotIn("id", card)
+
     def test_rules_override_and_default_vm(self) -> None:
         direct = classify("What is a microVM?")
         self.assertEqual(direct.route, "direct")
@@ -417,6 +468,10 @@ class HouseholdTest(PlaneTest):
         _CalendarApi.writes = []
         _CalendarApi.mismatch = False
         _CalendarApi.listed = None
+        _CalendarApi.drive_files = None
+        _CalendarApi.drive_folders = None
+        _CalendarApi.mail_messages = None
+        _CalendarApi.mail_by_id = None
         self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _CalendarApi)
         self.addCleanup(self.google_http.server_close)
         thread = threading.Thread(target=self.google_http.serve_forever, daemon=True)
@@ -581,11 +636,13 @@ class HouseholdTest(PlaneTest):
         self.assertEqual(service_name(self._ada_id()), f"ssios.google.{self._ada_id()}")
         seen_before = len(_CalendarApi.seen)
         pending = self._send(self.ada, "check my inbox")
-        self.assertIn("Read-only gmail.search", pending)
-        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _CalendarApi.seen[seen_before:]))
+        self.assertNotIn('value="connector.fetch"', pending)
+        self.assertNotIn("No access to send or modify", pending)
+        self.assertIn("Fixture subject", pending)
+        self.assertIn("Harbor Bot", pending)
+        self.assertIn("Inbox, latest 50", pending)
+        self.assertTrue(any(item["path"].startswith("/gmail/") for item in _CalendarApi.seen[seen_before:]))
         self.assertEqual(self.guest.prompts, [])
-        approved = self._approve(self.ada, pending)
-        self.assertIn("Synthetic local answer using the approved cloud text", approved)
         self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _CalendarApi.seen))
         self.assertEqual(self.guest.prompts, [])
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
@@ -788,11 +845,15 @@ class HouseholdTest(PlaneTest):
         self.assertTrue(raw.startswith(b"{"), raw)
         self.assertIn(b"admin role required", raw)
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
-        pending = self._send(self.ada, "check my inbox")
+        listed = self._send(self.ada, "check my inbox")
+        self.assertNotIn('value="connector.fetch"', listed)
+        self._install_and_connect(self._ada_id(), "calendar", "code-a")
+        self._los_angeles()
+        pending = self._send(self.ada, "下周三下午三点和张三开会一小时")
         status, _type, hidden = self._open("/ui/approvals", self.owner, "text/html")
         self.assertEqual(status, 200, hidden)
-        self.assertNotIn(b"Read-only gmail.search", hidden)
-        approval = pending.split("/ui/approvals/", 1)[1].split('"', 1)[0]
+        self.assertNotIn("张三", hidden.decode())
+        approval = pending.split('action="/ui/approvals/', 1)[1].split('"', 1)[0]
         status, page, _cookie = _form(
             self.base,
             "/ui/approvals/" + approval,
@@ -824,15 +885,14 @@ class HouseholdTest(PlaneTest):
         self._install_and_connect(self._ada_id(), "gmail", "code-a")
         pending = self._send(self.ada, "save my inbox into readme.md")
         self.assertIn("Route: connector_vm", pending)
-        self.assertFalse(any(item["path"].startswith("/gmail/") for item in _CalendarApi.seen))
-        self.assertEqual(self.guest.prompts, [])
-        approved = self._approve(self.ada, pending)
+        self.assertNotIn("connector.fetch", pending)
         self.assertTrue(any(item["path"] == "/gmail/v1/users/me/messages" for item in _CalendarApi.seen))
         self.assertEqual(len(self.guest.prompts), 1)
         self.assertIn("UNTRUSTED EXTERNAL CONTENT", self.guest.prompts[0])
-        self.assertIn("msg-1", self.guest.prompts[0])
-        self.assertIn("Synthetic guest result", approved)
-        self.assertIn("Nothing is applied until you approve", approved)
+        self.assertIn("Fixture subject", self.guest.prompts[0])
+        self.assertNotIn("msg-1", self.guest.prompts[0])
+        self.assertIn("Synthetic guest result", pending)
+        self.assertIn("Nothing was applied", pending)
 
     def test_ui_flows_do_not_put_secrets_on_subprocess_argv(self) -> None:
         argv = []
@@ -871,7 +931,8 @@ class HouseholdTest(PlaneTest):
             self.assertEqual(status, 200, connected)
             self.assertNotIn(self.secret, connected)
             pending = self._send(self.ada, "check my inbox")
-            self._approve(self.ada, pending)
+            self.assertIn("Fixture subject", pending)
+            self.assertNotIn('value="connector.fetch"', pending)
             status, reset, _cookie = _form(
                 self.base,
                 f"/ui/admin/users/{self._ada_id()}",
@@ -1057,6 +1118,9 @@ class HouseholdTest(PlaneTest):
         )
         self.assertIn('class="page"', page)
         self.assertIn('class="sheet"', page)
+        self.assertIn("https://console.cloud.google.com/apis/library/calendar-json.googleapis.com", page)
+        self.assertIn("https://console.cloud.google.com/apis/library/gmail.googleapis.com", page)
+        self.assertIn("https://console.cloud.google.com/apis/library/drive.googleapis.com", page)
         self.assertNotIn("<select", page)
         self.store.put(self._ada_id(), "client-id", "desktop-client-abcdef.apps.googleusercontent.com")
         self.store.put(self._ada_id(), "client-secret", "GOCSPX-test")
@@ -1369,6 +1433,78 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("Standup", admin)
         self.assertNotIn(self.secret, admin)
 
+    def test_chinese_mail_and_drive_reads_list_results_without_approval(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        self._install_and_connect(self._ada_id(), "gmail", "code-a")
+        self._install_and_connect(self._ada_id(), "drive", "code-a")
+        _CalendarApi.mail_messages = [{"id": "m-ada-1"}, {"id": "m-ada-2"}, {"id": "m-bea"}]
+        _CalendarApi.mail_by_id = {
+            "m-ada-1": [
+                {"name": "From", "value": "Ada Example <ada@example.com>"},
+                {"name": "Subject", "value": "Harbor notes"},
+                {"name": "Date", "value": "Tue, 10 Nov 2026 18:00:00 -0800"},
+            ],
+            "m-ada-2": [
+                {"name": "From", "value": "Ada Example <ada@example.com>"},
+                {"name": "Subject", "value": "Studio plan"},
+                {"name": "Date", "value": "Wed, 11 Nov 2026 09:00:00 -0800"},
+            ],
+            "m-bea": [
+                {"name": "From", "value": "Bea Example <bea@example.com>"},
+                {"name": "Subject", "value": "Schedule"},
+                {"name": "Date", "value": "Wed, 11 Nov 2026 10:00:00 -0800"},
+            ],
+        }
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            mail = self._send(self.ada, "查一下我的Gmail邮箱里有哪些发件人发给我的邮件")
+        self.assertIn("2 senders. Inbox, latest 50", mail)
+        self.assertIn("Ada Example", mail)
+        self.assertIn("2 messages", mail)
+        self.assertIn("Bea Example", mail)
+        self.assertNotIn("No access to send", mail)
+        self.assertNotIn("m-ada-1", mail)
+        self.assertNotIn('value="connector.fetch"', mail)
+        log = captured.getvalue()
+        self.assertIn("query=in:inbox", log)
+        self.assertNotIn("发件人", log)
+        self.assertNotIn("ada@example.com", log)
+        _CalendarApi.drive_files = [
+            {
+                "id": "file-harbor",
+                "name": "Harbor notes.txt",
+                "mimeType": "text/plain",
+                "parents": ["root"],
+                "modifiedTime": "2026-11-10T18:00:00Z",
+                "webViewLink": "https://example.com/harbor-notes",
+            },
+            {"id": "file-other", "name": "Other.txt", "mimeType": "text/plain", "parents": ["elsewhere"]},
+        ]
+        drive = self._send(self.ada, "列一下我的Google Drive的根目录下的文件名")
+        self.assertIn("1 file. My Drive", drive)
+        self.assertIn("Harbor notes.txt", drive)
+        self.assertIn("File", drive)
+        self.assertIn("https://example.com/harbor-notes", drive)
+        self.assertIn("Open", drive)
+        self.assertNotIn("Other.txt", drive)
+        self.assertNotIn("file-harbor", drive)
+        self.assertNotIn("folder:FOLDER_ID", drive)
+        self.assertNotIn("connector_grant_denied", drive)
+        self.assertNotIn("vm-diagnose", drive)
+        status, unclear, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "list my Google Drive"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 400, unclear)
+        self.assertIn("drive_intent_invalid", unclear)
+        self.assertIn("根目录", unclear)
+        self.assertNotIn("connector_grant_denied", unclear)
+        self.assertNotIn("vm-diagnose", unclear)
+
     def test_natural_language_calendar_examples_need_approval(self) -> None:
         from ssios.errors import SsiosError
 
@@ -1381,6 +1517,10 @@ class HouseholdTest(PlaneTest):
         self.assertIn("2026-11-09T00:00:00-08:00", week)
         self.assertIn("2026-11-16T00:00:00-08:00", week)
         self.assertIn("Monday 00:00", week)
+        self.assertIn("Nov 9", week)
+        self.assertNotIn("event-snapshot", week)
+        self.assertNotIn("ev0123456789abcd", week)
+        self.assertNotIn('value="connector.fetch"', week)
         afternoon = self._send(self.ada, "明天下午有空吗")
         self.assertIn("2026-11-11T13:00:00-08:00", afternoon)
         self.assertIn("2026-11-11T17:00:00-08:00", afternoon)
@@ -1397,7 +1537,7 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Attendees are not emailed", created)
         card = created.split("<pre>", 1)[1].split("</pre>", 1)[0]
         self.assertNotIn("@", card)
-        self.assertEqual(_CalendarApi.writes, [])
+        self.assertFalse(any(item["method"] in {"POST", "PUT", "DELETE"} for item in _CalendarApi.writes))
         self.plane.llm.intent_script = ["nope"]
         explicit = self._send(
             self.ada,
@@ -1406,6 +1546,7 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Create event", explicit)
         self.assertIn("Standup", explicit)
         self.assertEqual(self.plane.llm.intent_script, ["nope"])
+        _CalendarApi.writes.clear()
         self.plane.llm.intent_script = ["nope", "still-nope"]
         status, failed, _cookie = _form(
             self.base,
@@ -1438,9 +1579,10 @@ class HouseholdTest(PlaneTest):
         listed = self._send(self.ada, "把周五的牙医改到下午四点")
         self.assertIn("2026-11-13T00:00:00-08:00", listed)
         self.assertNotIn("Today is that weekday", listed)
-        self.assertEqual(_CalendarApi.writes, [])
-        found = self._approve(self.ada, listed)
-        self.assertIn("Several events match", found)
+        self.assertNotIn("name=\"action\" value=\"connector.fetch\"", listed)
+        self.assertFalse(any(item["method"] in {"POST", "PUT", "DELETE"} for item in _CalendarApi.writes))
+        self.assertIn("Several events match", listed)
+        found = listed
         self.assertIn("Reply with a number", found)
         self.assertNotIn("Update event", found)
         self.assertFalse(any(item["method"] == "PUT" for item in _CalendarApi.writes))
@@ -1463,14 +1605,12 @@ class HouseholdTest(PlaneTest):
         ]
         _CalendarApi.writes.clear()
         removal = self._send(self.ada, "取消明天的站会")
-        self.assertEqual(_CalendarApi.writes, [])
-        matched = self._approve(self.ada, removal)
-        self.assertIn("DESTRUCTIVE", matched)
-        self.assertIn("approval danger", matched)
-        self.assertIn("2026-11-11T09:00:00-08:00", matched)
-        self.assertIn("ev0123456789abcf", matched)
         self.assertFalse(any(item["method"] == "DELETE" for item in _CalendarApi.writes))
-        done = self._approve(self.ada, matched)
+        self.assertIn("DESTRUCTIVE", removal)
+        self.assertIn("approval danger", removal)
+        self.assertIn("2026-11-11T09:00:00-08:00", removal)
+        self.assertIn("ev0123456789abcf", removal)
+        done = self._approve(self.ada, removal)
         self.assertIn("Deleted event ev0123456789abcf", done)
         self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "DELETE"]), 1)
 
