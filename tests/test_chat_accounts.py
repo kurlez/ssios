@@ -1278,7 +1278,14 @@ class HouseholdTest(PlaneTest):
             "",
             "127.0.0.1",
         )
-        self.assertIn("line 74", gated)
+        from pathlib import Path
+
+        enabled_line = next(
+            index
+            for index, line in enumerate(Path(self.plane.settings.config_path).read_text(encoding="utf-8").splitlines(), start=1)
+            if line.strip() == "enabled = []"
+        )
+        self.assertIn(f"line {enabled_line}", gated)
         self.assertIn("ssios.example.toml", gated)
         self.assertIn("add &quot;calendar&quot; to enabled", gated)
         self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))

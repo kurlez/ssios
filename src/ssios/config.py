@@ -19,6 +19,9 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     llm_timeout_seconds: float
+    report_base_seconds: float
+    report_batch_seconds: float
+    report_per_100_seconds: float
     max_output_tokens: int
     num_ctx: int
     summary_repair_retries: int
@@ -218,6 +221,9 @@ def load_settings(
         ollama_base_url=ollama_base.rstrip("/"),
         ollama_model=str(llm.get("ollama_model", "llama3.1:8b")),
         llm_timeout_seconds=float(llm.get("request_timeout_seconds", 60)),
+        report_base_seconds=float(llm.get("report_base_seconds", 45)),
+        report_batch_seconds=float(llm.get("report_batch_seconds", 20)),
+        report_per_100_seconds=float(llm.get("report_per_100_seconds", 8)),
         max_output_tokens=max_output_tokens,
         num_ctx=num_ctx,
         summary_repair_retries=summary_repair_retries,

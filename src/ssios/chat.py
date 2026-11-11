@@ -785,11 +785,11 @@ def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: 
     reply = ""
     report = str(arguments.get("view") or "") == "report"
     if count and report and not followup and not follow_vm:
-        reply = _sourced_report(scope.plane, blocks, arguments)
+        reply, reason = _sourced_report(scope.plane, scope.account_id, blocks, arguments, peer_ip)
         if reply:
             blocks[0]["collapsed"] = True
         elif blocks:
-            blocks[0]["note"] = "The report was not accepted, so this is the list."
+            blocks[0]["note"] = "The report was not accepted: " + (reason or "the model returned nothing") + "."
     elif count and not followup and not follow_vm:
         reply = _grounded_reply(scope.plane, user_message, summary, blocks, scope.account)
     stored = {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}}
@@ -922,7 +922,7 @@ def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], accou
     return reply[:500]
 
 
-def _sourced_report(plane, blocks: list[dict], arguments: dict) -> str:
+def _sourced_report(plane, account_id: str, blocks: list[dict], arguments: dict, peer_ip: str) -> tuple[str, str]:
     from ssios.read_report import compose_report
 
     items = []
@@ -944,7 +944,47 @@ def _sourced_report(plane, blocks: list[dict], arguments: dict) -> str:
         "target": arguments.get("target") if isinstance(arguments.get("target"), dict) else {"unit": "chars", "n": 400},
         "language": arguments.get("language") or "en",
     }
-    return compose_report(plane.llm, items, intent) or ""
+    attempts: list[dict] = []
+    text = compose_report(plane.llm, items, intent, attempts=attempts, settings=getattr(plane, "settings", None))
+    _record_report(plane, account_id, peer_ip, attempts)
+    reason = ""
+    for item in reversed(attempts):
+        if item.get("detail"):
+            reason = str(item["detail"])
+            break
+    return text, reason
+
+
+def _record_report(plane, account_id: str, peer_ip: str, attempts: list[dict]) -> None:
+    import json
+    from pathlib import Path
+
+    if not attempts:
+        return
+    last = attempts[-1]
+    reason = str(last.get("reason") or "empty")
+    try:
+        plane.security_audit.write(
+            actor=account_id,
+            ip=peer_ip or "127.0.0.1",
+            action="report.compose",
+            target="gmail",
+            result=reason,
+            extra={"service": "gmail", "reason_code": reason, "item_count": len(attempts)},
+        )
+    except Exception:
+        pass
+    state = getattr(getattr(plane, "settings", None), "state_dir", None)
+    if state is None:
+        return
+    path = Path(state) / "diagnostics" / "reports.jsonl"
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"actor": account_id, "attempts": attempts}, ensure_ascii=False) + "\n")
+        path.chmod(0o600)
+    except OSError:
+        return
 
 
 def _reply_fits(reply: str, count: int) -> bool:
@@ -960,8 +1000,8 @@ def _reply_fits(reply: str, count: int) -> bool:
 def _mail_blocks(arguments: dict, text: str) -> list[dict]:
     messages = [_mail_card(item) for item in _marked_rows(text, "mail-header")]
     query = str(arguments.get("q") or "")
-    limit = int(arguments.get("limit") or 50)
-    header = "Inbox, last 7 days" if "newer_than:7d" in query else f"Inbox, latest {limit}"
+    requested = int(arguments.get("requested") or arguments.get("limit") or 50)
+    header = "Inbox, last 7 days" if "newer_than:7d" in query else f"Inbox, latest {requested}"
     if "is:unread" in query:
         header = "Unread, " + header
     if not messages:
@@ -973,6 +1013,11 @@ def _mail_blocks(arguments: dict, text: str) -> list[dict]:
         summary = _count_line(header, len(senders), "sender")
         return [{"kind": "mail", "header": header, "summary": summary, "note": note, "events": senders}]
     summary = _count_line(header, len(messages), "message")
+    shortfall = str(arguments.get("shortfall") or "")
+    if shortfall:
+        summary = f"{len(messages)} of {requested} messages. {shortfall} {header}"
+    elif arguments.get("requested") and len(messages) < requested:
+        summary = f"{len(messages)} of {requested} messages. Gmail returned {len(messages)}. {header}"
     return [{"kind": "mail", "header": header, "summary": summary, "note": note, "events": messages}]
 
 
@@ -1231,13 +1276,17 @@ def _sized(plane, limits: dict, arguments: dict) -> dict:
     explicit = arguments.get("limit")
     asked = int(explicit or limits.get("max_items") or 5)
     asked = max(1, min(asked, 100))
+    # One call lists the inbox. Each message needs its own call after that.
     room = max(1, int(plane.settings.connector_max_calls) - 1)
     used = min(asked, room)
-    if explicit is not None and used < int(explicit):
-        arguments["limit"] = used
+    if explicit is not None:
+        arguments["requested"] = int(explicit)
+        if used < int(explicit):
+            arguments["limit"] = used
+            arguments["shortfall"] = f"The call budget allowed {used} of {int(explicit)}."
     sized = {**limits, "max_items": used, "max_calls": min(int(plane.settings.connector_max_calls), used + 1)}
     if arguments.get("view") == "report":
-        sized["max_bytes"] = min(int(plane.settings.connector_max_bytes), max(int(limits.get("max_bytes") or 4096), used * 800))
+        sized["max_bytes"] = min(int(plane.settings.connector_max_bytes), max(int(limits.get("max_bytes") or 4096), used * 2000))
     return sized
 
 

@@ -6,9 +6,9 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
-| Personal-data answers come from tool results | Done for mail, calendar, and Drive reads. A report uses only the fetched items and is checked before it is shown | `tests/test_chat_accounts.py` `test_failed_or_empty_gmail_never_invents_mail`; `tests/test_read_report.py` | 92 |
+| Personal-data answers come from tool results | Done for mail, calendar, and Drive reads. A mail report is kept when the model returns text, a citation to a missing item is removed, and an empty or failed call falls back to the list | `tests/test_chat_accounts.py` `test_failed_or_empty_gmail_never_invents_mail`; `tests/test_read_report.py` | 92 |
 | Failed or empty connector reads do not call the model | Done | Same test: a 403 and an empty inbox leave `complete_chat` uncalled | 95 |
-| Summaries that name a sender, subject, or date outside the results are dropped | Done | `_mentions_are_in_results`; the same test drops Jane Doe / 2023 | 90 |
+| Summaries that name a sender, subject, or date outside the results are dropped | A grounded reply still drops names that are not in the tool result. A mail report is kept when the model returns text; a citation to a missing item is removed, and an empty or failed model call falls back to the list with the reason | `_mentions_are_in_results`; `tests/test_read_report.py` | 90 |
 | Host clock in every prompt and deterministic date answers | Done earlier | `test_pure_date_questions_use_the_host_clock` | 94 |
 | Relative times stored as absolute timestamps | Done for one-off and weekly reminders, and for dated memory notes | `test_reminder_uses_an_absolute_time_across_midnight`; `tests/test_reminders.py` stores `2026-11-11T09:00:00-08:00` and `weekly:mon` | 90 |
 | The model cannot claim a save that did not happen | A reminder and an auto memory save both reply from the store write. The mock sentence is absent | `test_reminder_uses_an_absolute_time_across_midnight`; `tests/test_memory_panel.py` | 90 |
@@ -59,7 +59,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 Mean of the 28 rows above: **90 / 100** (2523 / 28).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 247 ran, 240 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 250 ran, 243 passed, 7 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 
