@@ -101,6 +101,12 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "POST" and path == "/ui/settings":
         _csrf(session, body)
         return _settings_post(plane, session, body)
+    if method == "GET" and path == "/ui/vault":
+        return Page(200, _vault_page(plane, session, ""))
+    if method == "GET" and path == "/ui/vault/note":
+        return Page(200, _vault_note(plane, session, str(query.get("path") or "")))
+    if method == "GET" and path == "/ui/vault/asset":
+        return _vault_asset(plane, session, str(query.get("path") or ""))
     if method == "POST" and path == "/ui/logout":
         _csrf(session, body)
         _drop_session(plane, session["id"])
@@ -676,6 +682,50 @@ def _history(plane, project_id: str, path: str) -> str:
     return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
+def _vault_page(plane, session: dict, notice: str) -> str:
+    from ssios.vault import list_notes
+
+    notes = list_notes(plane.settings, session["account"]["id"])
+    items = []
+    for item in notes:
+        path = html.escape(item["path"], quote=True)
+        title = html.escape(item["title"])
+        source = html.escape(item.get("source") or "")
+        items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
+    body = notice + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
+    return _page(session, "Notes", body)
+
+
+def _vault_note(plane, session: dict, rel: str) -> str:
+    from urllib.parse import quote
+
+    from ssios.vault import read_note, render_markdown
+
+    text = read_note(plane.settings, session["account"]["id"], rel)
+
+    def link_for(url: str) -> str:
+        if url.startswith(("javascript:", "data:")):
+            return ""
+        if url.startswith(("https://", "http://")):
+            return url
+        if url.startswith("/") or ".." in url.split("/"):
+            return ""
+        if url.endswith(".md"):
+            return "/ui/vault/note?path=" + quote("Clippings/" + url)
+        return "/ui/vault/asset?path=" + quote("Clippings/" + url)
+
+    meta, rendered = render_markdown(text, link_for=link_for)
+    props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
+    return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
+
+
+def _vault_asset(plane, session: dict, rel: str) -> Page:
+    from ssios.vault import read_asset
+
+    data, content_type = read_asset(plane.settings, session["account"]["id"], rel)
+    return Page(200, data, content_type=content_type)
+
+
 def _settings(plane, session: dict) -> str:
     status = plane.status(_human(plane))
     safe = {
@@ -704,7 +754,15 @@ def _settings(plane, session: dict) -> str:
         + "".join(switches)
         + f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         f"<label>Default city <input name=\"location\" value=\"{location}\" maxlength=\"80\"></label> "
-        "<button type=\"submit\">Save city</button></form></section>"
+        "<button type=\"submit\">Save city</button></form>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"auto_save\" value=\"{'off' if prefs.get('auto_save') else 'on'}\">"
+        f"<button type=\"submit\">{'Turn auto-save off' if prefs.get('auto_save') else 'Turn auto-save on'}</button></form>"
+        "<p>Auto-save is off by default. A clip is written to your vault only after you approve it.</p>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Time zone <input name=\"time_zone\" value=\"{html.escape(str((plane.accounts.users.get(session['account']['id']) or {}).get('time_zone') or ''))}\" placeholder=\"America/Los_Angeles\"></label> "
+        "<button type=\"submit\">Save time zone</button></form>"
+        "</section>"
     )
     return _page(session, "Settings", form + f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
 
@@ -716,6 +774,15 @@ def _settings_post(plane, session: dict, body: dict) -> Page:
     op = str(body.get("op") or "")
     if skill and op in {"enable", "disable"}:
         plane.skills.set_account(account_id, name=skill, enabled=op == "enable")
+    elif body.get("auto_save") in {"on", "off"}:
+        plane.skills.set_account(account_id, auto_save=body.get("auto_save") == "on")
+    elif body.get("link_style") in {"relative", "wikilink"}:
+        plane.skills.set_account(account_id, link_style=str(body.get("link_style")))
+    elif "time_zone" in body:
+        try:
+            plane.accounts.set_time_zone(account_id, str(body.get("time_zone") or ""))
+        except SsiosError as exc:
+            return Page(exc.status, _page(session, "Settings", f"<p>{html.escape(exc.detail)}</p>"))
     elif location is not None:
         plane.skills.set_account(account_id, location=str(location))
     return Page(200, _settings(plane, session))
@@ -943,6 +1010,7 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         + "</span></span></summary><div class=\"popover\" role=\"menu\">"
         "<a href=\"/ui/connections\">Connections</a>"
         "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
+        "<a href=\"/ui/vault\">Notes</a>"
         "<a href=\"/ui/settings\">Settings</a>"
         + admin
         + "<p class=\"menu-label\">More</p>"

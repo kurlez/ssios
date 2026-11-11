@@ -69,6 +69,21 @@ class AccountStore:
         raw_invites = invites.get("invites") if isinstance(invites, dict) else {}
         self.invites = raw_invites if isinstance(raw_invites, dict) else {}
 
+    def set_time_zone(self, account_id: str, name: str) -> str:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        cleaned = " ".join(str(name or "").split())
+        if cleaned:
+            try:
+                ZoneInfo(cleaned)
+            except ZoneInfoNotFoundError as exc:
+                raise SsiosError("config_invalid", "time_zone must be an IANA time zone name", 400) from exc
+        with self._lock:
+            item = self._require(account_id)
+            item["time_zone"] = cleaned
+            self._save_users()
+        return cleaned
+
     def _save_users(self) -> None:
         write_json(self.registry_path, {"users": self.users})
 

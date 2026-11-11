@@ -82,6 +82,8 @@ allow_domains = []
 deny_domains = []
 timeout_seconds = 8
 max_bytes = 200000
+# Empty uses <state>/vaults/<account>. Do not point this at .ssios, .ssios-demo, or .ssios-memfs.
+vault_dir = ""
 
 [memory]
 # letta-memfs-compat: the compatibility library used when the Letta CLI is absent. It is not upstream MemFS.

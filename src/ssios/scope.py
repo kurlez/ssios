@@ -153,6 +153,12 @@ class AccountScope:
                 raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
             write_nofollow(self.home / "accepted", str(record["approval_id"]) + ".md", data, mode=0o600)
             return {"action": action, "meta": self.staged_meta(str(record["proposal_id"]))}
+        if action == "vault.clip":
+            data = self.staged_bytes(str(record["proposal_id"]))
+            if sha256_bytes(data) != record["payload_sha256"]:
+                raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
+            saved = self.plane.skills.commit_clip(self.account_id, data.decode("utf-8"), self.staged_meta(str(record["proposal_id"])))
+            return {"action": action, "path": saved.get("path"), "meta": saved}
         if action == "memory.commit":
             revision = self.memory().apply(
                 str(record["proposal_id"]),

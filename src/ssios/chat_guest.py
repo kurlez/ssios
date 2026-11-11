@@ -226,7 +226,12 @@ def _boot(plane, request: ChatGuestRequest, root: Path, backend: str):
     import secrets
 
     token = "guest-" + secrets.token_hex(8)
-    grant = {"system": "You are the SSIOS guest. Stay inside the workspace.", "user": request.prompt}
+    from ssios.calendar_intent import clock_block
+
+    grant = {
+        "system": "You are the SSIOS guest. Stay inside the workspace. Never invent a date, a weekday, or a time.\n\n" + clock_block(plane, {"id": request.account_id}),
+        "user": request.prompt,
+    }
     session = _prepare_codex(plane, task, token, grant, binary)
     cancel = threading.Event()
     deadline = time.monotonic() + float(plane.settings.task_timeout_seconds) + float(plane.settings.guest_prepare_timeout_seconds)

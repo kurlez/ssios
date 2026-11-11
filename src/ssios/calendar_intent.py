@@ -133,13 +133,17 @@ def is_legacy_calendar(message: str) -> bool:
     return any(token in folded for token in _LEGACY_COMMANDS)
 
 
-def account_zone(settings):
-    name = str(getattr(settings, "ui_time_zone", "") or "")
+def account_zone(settings, account: dict | None = None):
+    name = ""
+    if isinstance(account, dict):
+        name = str(account.get("time_zone") or "")
+    if not name:
+        name = str(getattr(settings, "ui_time_zone", "") or "")
     if name:
         try:
             return ZoneInfo(name), name
         except ZoneInfoNotFoundError as exc:
-            raise SsiosError("config_invalid", "ui time_zone must be an IANA time zone name", 500) from exc
+            raise SsiosError("config_invalid", "time_zone must be an IANA time zone name", 500) from exc
     current = datetime.now().astimezone().tzinfo
     key = str(getattr(current, "key", "") or "")
     return current, key or "local"
@@ -156,8 +160,96 @@ def clock_now(plane, zone) -> datetime:
     return raw.astimezone(zone)
 
 
+def host_clock(plane, account: dict | None = None) -> tuple[datetime, str]:
+    """The one clock for chat context and for relative dates."""
+    stored = account
+    users = getattr(getattr(plane, "accounts", None), "users", None)
+    if isinstance(account, dict) and isinstance(users, dict):
+        found = users.get(str(account.get("id") or ""))
+        if isinstance(found, dict):
+            stored = found
+    zone, zone_name = account_zone(plane.settings, stored if isinstance(stored, dict) else None)
+    return clock_now(plane, zone), zone_name
+
+
+def clock_block(plane, account: dict | None = None) -> str:
+    now, zone_name = host_clock(plane, account)
+    stamp = now.replace(microsecond=0).isoformat()
+    return (
+        "HOST-CLOCK\n"
+        f"Time zone: {zone_name}\n"
+        f"Local date: {now.strftime('%A')}, {now.day} {now.strftime('%B %Y')}\n"
+        f"Local time: {now.strftime('%H:%M')}\n"
+        f"ISO: {stamp}\n"
+        "Never invent a date, a weekday, or a time. Use this clock."
+    )
+
+
+def clock_answer(message: str, now: datetime, zone_name: str) -> str:
+    """A pure date or time question. Empty when the model should answer."""
+    text = " ".join(str(message or "").split())
+    kind = _clock_kind(text)
+    if not kind:
+        return ""
+    iso = now.replace(microsecond=0).isoformat()
+    if kind == "time":
+        return f"The local time is {now.strftime('%H:%M')} ({iso}) in {zone_name}."
+    if kind == "weekday":
+        return f"Today is {now.strftime('%A')} in {zone_name}."
+    day = now
+    if kind == "tomorrow":
+        day = now + timedelta(days=1)
+    elif kind == "day_after":
+        day = now + timedelta(days=2)
+    elif kind == "yesterday":
+        day = now - timedelta(days=1)
+    label = {"today": "Today", "tomorrow": "Tomorrow", "day_after": "The day after tomorrow", "yesterday": "Yesterday"}[kind]
+    return f"{label} is {day.strftime('%A')}, {day.day} {day.strftime('%B %Y')}, in {zone_name} ({day.replace(microsecond=0).isoformat()})."
+
+
+def _clock_kind(text: str) -> str:
+    folded = text.casefold().rstrip("？?").strip()
+    phrases = {
+        "今天的日期": "today",
+        "今天几号": "today",
+        "今天是几号": "today",
+        "今天是什么日期": "today",
+        "今天星期几": "weekday",
+        "今天周几": "weekday",
+        "今天是星期几": "weekday",
+        "今天是周几": "weekday",
+        "现在几点": "time",
+        "现在几点了": "time",
+        "现在几号": "today",
+        "明天几号": "tomorrow",
+        "明天的日期": "tomorrow",
+        "后天几号": "day_after",
+        "昨天几号": "yesterday",
+    }
+    if text.rstrip("？?").strip() in phrases:
+        return phrases[text.rstrip("？?").strip()]
+    english = {
+        "what is the date": "today",
+        "what's the date": "today",
+        "whats the date": "today",
+        "what is today's date": "today",
+        "what's today's date": "today",
+        "what is the date today": "today",
+        "what day is it": "weekday",
+        "what day is today": "weekday",
+        "what is the time": "time",
+        "what's the time": "time",
+        "what time is it": "time",
+        "what is tomorrow's date": "tomorrow",
+        "what's tomorrow's date": "tomorrow",
+        "what is tomorrow": "tomorrow",
+        "what day is tomorrow": "tomorrow",
+    }
+    return english.get(folded, "")
+
+
 def intent_messages(message: str, *, repair: bool) -> list[dict]:
-    system = _INTENT_SYSTEM
+    system = _INTENT_SYSTEM + " Never invent a date or an ISO timestamp. The host clock computes every date."
     if repair:
         system += " The previous answer was not valid JSON. Return only the object."
     return [

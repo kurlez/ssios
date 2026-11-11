@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from collections.abc import Iterator
 
-from ssios.calendar_intent import account_zone, clock_now, deadline_from, is_legacy_calendar, plan_calendar
+from ssios.calendar_intent import clock_answer, clock_block, deadline_from, host_clock, is_legacy_calendar, plan_calendar
 from ssios.chat_guest import ChatGuestRequest, ProductionChatGuest
 from ssios.chat_router import RouteDecision, classify
 from ssios.errors import FlowInterrupt, SsiosError
@@ -22,7 +22,8 @@ from ssios.google_calendar import parse_event_snapshots
 from ssios.scope import AccountScope, memory_excerpt
 _SYSTEM = (
     "You are SSIOS on this machine. Answer from the conversation and the memory excerpt. "
-    "This turn has no tools. Do not claim that files, mail, or memory were changed."
+    "This turn has no tools. Do not claim that files, mail, or memory were changed. "
+    "Never invent a date, a weekday, or a time. Use the HOST-CLOCK block."
 )
 _MAX_MESSAGE = 8000
 
@@ -50,7 +51,9 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     yield {"event": "conversation", "data": {"id": record["id"]}}
     yield {"event": "route", "data": decision.public()}
     try:
-        if decision.route == "direct":
+        if clock_answer(message, *host_clock(plane, scope.account)):
+            yield from _clock_turn(plane, scope, record["id"], message, decision)
+        elif decision.route == "direct":
             yield from _direct(plane, scope, record["id"], decision)
         elif decision.route == "memory":
             yield from _memory(plane, scope, record["id"], message)
@@ -106,6 +109,19 @@ def continue_after_fetch(plane, account: dict, applied: dict, peer_ip: str) -> I
     yield {"event": "done", "data": {"ok": True}}
 
 
+def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:
+    del decision
+    now, zone_name = host_clock(plane, scope.account)
+    answer = clock_answer(message, now, zone_name)
+    if not answer:
+        return
+    scope.chat().append(
+        conversation_id,
+        {"role": "assistant", "text": answer, "route": {"route": "direct", "reason": "The host clock answered.", "source": "rule"}},
+    )
+    yield {"event": "outcome", "data": {"text": answer}}
+
+
 def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDecision | None, cloud_text: str = "") -> Iterator[dict]:
     messages = _messages(scope, conversation_id, cloud_text)
     cancel = threading.Event()
@@ -134,7 +150,7 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     result = plane.skills.run(scope.account_id, message, peer_ip=peer_ip)
     blocks = result["blocks"]
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
-    reply = _grounded_reply(plane, message, summary, blocks)
+    reply = _grounded_reply(plane, message, summary, blocks, scope.account)
     stored = {
         "role": "assistant",
         "text": summary,
@@ -145,6 +161,36 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         stored["reply"] = reply
     scope.chat().append(conversation_id, stored)
     yield {"event": "results", "data": {"text": summary, "blocks": blocks, "reply": reply}}
+    clip = result.get("clip") if isinstance(result, dict) else None
+    if not isinstance(clip, dict):
+        return
+    prefs = plane.skills.account_prefs(scope.account_id)
+    if prefs.get("auto_save"):
+        saved = plane.skills.commit_clip(
+            scope.account_id,
+            clip["markdown"],
+            {"path": clip["relpath"], "title": clip["title"], "staging": clip["staging"]},
+        )
+        line = "Saved the clip to " + saved["path"] + ". The note stays untrusted."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": line})
+        yield {"event": "outcome", "data": {"text": line}}
+        return
+    if _wants_clip(message):
+        approval = scope.create_approval(
+            action="vault.clip",
+            project_id=scope.project_id(),
+            task_id="chat",
+            payload=clip["markdown"].encode("utf-8"),
+            meta={"path": clip["relpath"], "title": clip["title"], "staging": clip["staging"], "expected_revision": "vault"},
+        )
+        preview = "Save this clip to your vault.\n\n" + clip["title"] + "\n" + clip["relpath"] + "\nNothing is written until you approve it."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": preview, "approval_id": approval["id"]})
+        yield _approval_event(approval, preview)
+
+
+def _wants_clip(message: str) -> bool:
+    folded = message.casefold()
+    return any(cue in folded for cue in ("save", "clip")) or any(cue in message for cue in ("保存", "剪藏"))
 
 
 def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
@@ -165,7 +211,7 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> I
 def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision, *, follow_vm: bool, peer_ip: str = "127.0.0.1") -> Iterator[dict]:
     from ssios.google_connector import requires_approval
 
-    tool, arguments, limits, followup = _fetch_plan(scope.plane, message, decision.services[0])
+    tool, arguments, limits, followup = _fetch_plan(scope.plane, message, decision.services[0], scope.account)
     route_name = "connector_vm" if follow_vm else "connector"
     if not requires_approval(tool):
         yield from _read_tool(
@@ -184,11 +230,10 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
 
 
 def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, follow_vm: bool = False, peer_ip: str = "127.0.0.1", user_message: str = "") -> Iterator[dict]:
-    from ssios.calendar_intent import account_zone
     from ssios.google_connector import session_for_account
 
-    zone, zone_name = account_zone(scope.plane.settings)
-    del zone
+    _now, zone_name = host_clock(scope.plane, scope.account)
+    del _now
     own = session_for_account(scope.account)
     result = scope.plane.google.read_now(
         own,
@@ -202,7 +247,7 @@ def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: 
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     reply = ""
     if not followup and not follow_vm:
-        reply = _grounded_reply(scope.plane, user_message, summary, blocks)
+        reply = _grounded_reply(scope.plane, user_message, summary, blocks, scope.account)
     stored = {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}}
     if reply:
         stored["reply"] = reply
@@ -259,7 +304,7 @@ def read_blocks(tool: str, arguments: dict, text: str, zone_name: str) -> list[d
     return [{"kind": "note", "header": tool, "summary": "Done.", "events": []}]
 
 
-def _grounded_reply(plane, message: str, summary: str, blocks: list[dict]) -> str:
+def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], account: dict | None = None) -> str:
     """One sentence in the user's language. The cards stay the source of the count."""
     lines = []
     count = 0
@@ -270,7 +315,7 @@ def _grounded_reply(plane, message: str, summary: str, blocks: list[dict]) -> st
             count += 1
             bits = [str(item.get("title") or ""), str(item.get("when") or ""), str(item.get("location") or ""), str(item.get("meta") or "")]
             lines.append(" | ".join(bit for bit in bits if bit))
-    facts = "GROUNDED-READ\ncount=" + str(count) + "\n" + summary + "\n" + "\n".join(lines[:20])
+    facts = clock_block(plane, account) + "\nGROUNDED-READ\ncount=" + str(count) + "\n" + summary + "\n" + "\n".join(lines[:20])
     messages = [
         {
             "role": "system",
@@ -523,7 +568,7 @@ def _propose_tool(scope, conversation_id: str, tool: str, arguments: dict, limit
     yield _approval_event(approval, preview)
 
 
-def _fetch_plan(plane, message: str, service: str) -> tuple[str, dict, dict, dict | None]:
+def _fetch_plan(plane, message: str, service: str, account: dict | None = None) -> tuple[str, dict, dict, dict | None]:
     from ssios.drive_intent import plan_drive
     from ssios.mail_intent import plan_mail
 
@@ -537,19 +582,19 @@ def _fetch_plan(plane, message: str, service: str) -> tuple[str, dict, dict, dic
     if service == "gmail":
         return "gmail.search", plan_mail(message), wide, None
     if service == "calendar":
-        return _calendar_plan(plane, message, limits)
+        return _calendar_plan(plane, message, limits, account)
     planned = plan_drive(message)
     if planned.get("mode") == "folder_id":
         wide = {**wide, "folder_ids": [planned["folder_id"]]}
     return "drive.search", planned, wide, None
 
 
-def _calendar_plan(plane, message: str, limits: dict) -> tuple[str, dict, dict, dict | None]:
+def _calendar_plan(plane, message: str, limits: dict, account: dict | None = None) -> tuple[str, dict, dict, dict | None]:
     if not is_legacy_calendar(message):
-        zone, zone_name = account_zone(plane.settings)
+        now, zone_name = host_clock(plane, account)
         tool, arguments, followup = plan_calendar(
             message,
-            now=clock_now(plane, zone),
+            now=now,
             zone_name=zone_name,
             llm=plane.llm,
             deadline=deadline_from(plane.settings),
@@ -726,7 +771,12 @@ def _vm(plane, scope: AccountScope, conversation_id: str, prompt: str, peer_ip: 
     task_id = "task-" + secrets.token_hex(8)
     scope.save_task({"id": task_id, "status": "running", "backend": "", "isolated": False, "boot_ms": None, "created_at": time.time()})
     plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="vm.start", target=task_id, result="started")
-    request = ChatGuestRequest(account_id=scope.account_id, account_home=scope.home, task_id=task_id, prompt=prompt)
+    request = ChatGuestRequest(
+        account_id=scope.account_id,
+        account_home=scope.home,
+        task_id=task_id,
+        prompt=clock_block(plane, scope.account) + "\n\n" + prompt,
+    )
     guest = plane.chat_guest or ProductionChatGuest()
     result = None
     error = ""
@@ -829,7 +879,7 @@ def _pump(func) -> Iterator[tuple[str, object]]:
 
 def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> list[dict]:
     excerpt = memory_excerpt(scope)
-    system = _SYSTEM
+    system = _SYSTEM + "\n\n" + clock_block(scope.plane, scope.account)
     if excerpt:
         system += "\n\nMEMORY-CONTEXT\n" + excerpt
     if cloud_text:

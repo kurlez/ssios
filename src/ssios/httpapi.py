@@ -184,7 +184,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if page.stream is not None:
             self._stream(page)
             return
-        data = page.body.encode("utf-8")
+        data = page.body if isinstance(page.body, bytes) else page.body.encode("utf-8")
         self.send_response(page.status)
         if page.location:
             self.send_header("Location", page.location)

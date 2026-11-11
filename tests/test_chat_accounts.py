@@ -589,6 +589,47 @@ class HouseholdTest(PlaneTest):
         self.assertEqual(status, 200, page)
         return page
 
+    def test_pure_date_questions_use_the_host_clock(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        self._los_angeles()
+        calls = []
+        real = self.plane.llm.stream_chat
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        self.plane.llm.stream_chat = wrapped
+        page = self._send(self.ada, "今天的日期")
+        self.assertIn("Tuesday, 10 November 2026", page)
+        self.assertIn("2026-11-10T09:00:00-08:00", page)
+        self.assertIn("America/Los_Angeles", page)
+        self.assertNotIn("2023", page)
+        self.assertEqual(calls, [])
+        tomorrow = self._send(self.ada, "明天几号")
+        self.assertIn("Wednesday, 11 November 2026", tomorrow)
+        self.assertIn("2026-11-11T09:00:00-08:00", tomorrow)
+        weekday = self._send(self.ada, "今天星期几")
+        self.assertIn("Today is Tuesday", weekday)
+        clock = self._send(self.ada, "what time is it")
+        self.assertIn("09:00", clock)
+        self.assertIn("2026-11-10T09:00:00-08:00", clock)
+        self.assertEqual(calls, [])
+        self.plane.accounts.set_time_zone(self._ada_id(), "America/New_York")
+        eastern = self._send(self.ada, "what time is it")
+        self.assertIn("12:00", eastern)
+        self.assertIn("-05:00", eastern)
+        self.assertIn("America/New_York", eastern)
+        self.plane.accounts.set_time_zone(self._ada_id(), "")
+        self._send(self.ada, "edit readme.md")
+        self.assertTrue(self.guest.prompts)
+        self.assertIn("HOST-CLOCK", self.guest.prompts[-1])
+        self.assertIn("2026-11-10T09:00:00-08:00", self.guest.prompts[-1])
+        self.assertIn("Never invent a date", self.guest.prompts[-1])
+        del datetime, ZoneInfo
+
     def test_direct_answer_and_vm_approval_card(self) -> None:
         direct = self._send(self.owner, "What is a microVM?")
         self.assertIn("Route: direct", direct)

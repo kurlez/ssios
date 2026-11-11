@@ -59,6 +59,7 @@ class Settings:
     skills_deny_domains: tuple[str, ...]
     skills_timeout_seconds: float
     skills_max_bytes: int
+    skills_vault_dir: str
     ui_bind: str
     ui_time_zone: str
     state_dir: Path
@@ -190,6 +191,7 @@ def load_settings(
     skills_deny_domains = _host_list(skills.get("deny_domains", []))
     skills_timeout_seconds = float(skills.get("timeout_seconds", 8))
     skills_max_bytes = int(skills.get("max_bytes", 200000))
+    skills_vault_dir = str(skills.get("vault_dir", "") or "")
     if not 1 <= skills_timeout_seconds <= 30 or not 1024 <= skills_max_bytes <= 2000000:
         raise SsiosError("config_invalid", "skills budget is out of range", 500)
     ui = _section(data, "ui")
@@ -261,6 +263,7 @@ def load_settings(
         skills_deny_domains=skills_deny_domains,
         skills_timeout_seconds=skills_timeout_seconds,
         skills_max_bytes=skills_max_bytes,
+        skills_vault_dir=skills_vault_dir,
         ui_bind=ui_bind,
         ui_time_zone=ui_time_zone,
         state_dir=state_path,

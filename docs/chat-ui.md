@@ -6,6 +6,8 @@ This page is the run guide for the local chat UI. It was not executed on the App
 
 Sign in with a household account. Each account has its own conversation files, MemFS repository, tasks, approvals, workspace, and Gmail/Drive connection. The files live under the state directory you pass to `--state`. They are not part of the git repository.
 
+Every local answer and every guest prompt includes a host clock: the local date, weekday, time, time zone, and an ISO timestamp with its offset. The zone is the account's time zone when one is saved in Settings, otherwise `[ui] time_zone`, otherwise the computer's zone. A question that only asks for the date or the time is answered from that clock. The model is told not to invent a date. Calendar phrases use the same clock.
+
 The router prints its choice and the reason on the turn:
 
 - A plain question goes to local Ollama. No guest is started.
