@@ -1,0 +1,305 @@
+"""The chat page must attach Send. A plain POST still returns HTML."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import struct
+import subprocess
+import time
+import unittest
+import urllib.request
+from pathlib import Path
+
+from ssios.chat_store import ChatStore
+
+
+def _chrome() -> str:
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+def _port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class _Page:
+    """A few DevTools calls against headless Chrome. No extra packages."""
+
+    def __init__(self, binary: str) -> None:
+        self.port = _port()
+        self.profile = Path(f"/tmp/ssios-chat-browser-{self.port}")
+        self.profile.mkdir(parents=True, exist_ok=True)
+        self.proc = subprocess.Popen(
+            [
+                binary,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--remote-allow-origins=*",
+                f"--remote-debugging-port={self.port}",
+                f"--user-data-dir={self.profile}",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.errors: list[str] = []
+        self._id = 0
+        self._sock = None
+        self._buf = b""
+        deadline = time.monotonic() + 10
+        version = None
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/version", timeout=0.5) as response:
+                    version = json.loads(response.read().decode())
+                    break
+            except Exception:
+                time.sleep(0.1)
+        if not version:
+            self.close()
+            raise RuntimeError("Chrome did not open a debugging port")
+        try:
+            request = urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                target = json.loads(response.read().decode())
+        except Exception:
+            self.close()
+            raise
+        self._connect(target["webSocketDebuggerUrl"])
+        self.call("Runtime.enable")
+        self.call("Network.enable")
+        self.call("Page.enable")
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        shutil.rmtree(self.profile, ignore_errors=True)
+
+    def call(self, method: str, params: dict | None = None, timeout: float = 10) -> dict:
+        self._id += 1
+        ident = self._id
+        self._send({"id": ident, "method": method, "params": params or {}})
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            message = self._recv(deadline - time.monotonic())
+            if message.get("id") == ident:
+                if "error" in message:
+                    raise RuntimeError(message["error"])
+                return message.get("result") or {}
+            self._note(message)
+        raise TimeoutError(method)
+
+    def goto(self, url: str) -> None:
+        self.call("Page.navigate", {"url": url})
+        self.wait("document.readyState === 'complete'")
+
+    def wait(self, expression: str, timeout: float = 8) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = self.eval(expression)
+            if value:
+                return
+            time.sleep(0.05)
+        raise AssertionError(expression)
+
+    def eval(self, expression: str):
+        result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        if result.get("exceptionDetails"):
+            self.errors.append(str(result["exceptionDetails"].get("text") or "evaluate failed"))
+            return None
+        return (result.get("result") or {}).get("value")
+
+    def _note(self, message: dict) -> None:
+        method = message.get("method") or ""
+        params = message.get("params") or {}
+        if method == "Runtime.exceptionThrown":
+            details = params.get("exceptionDetails") or {}
+            self.errors.append(str(details.get("text") or details.get("exception") or "pageerror"))
+        elif method == "Runtime.consoleAPICalled" and params.get("type") == "error":
+            self.errors.append("console error")
+
+    def _connect(self, ws_url: str) -> None:
+        host, path = ws_url.split("://", 1)[1].split("/", 1)
+        hostname, port = host.rsplit(":", 1)
+        self._sock = socket.create_connection((hostname, int(port)), timeout=5)
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        request = (
+            f"GET /{path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self._sock.sendall(request.encode())
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += self._sock.recv(4096)
+        head, _, rest = data.partition(b"\r\n\r\n")
+        self._buf = rest
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise RuntimeError("websocket upgrade failed")
+
+    def _send(self, payload: dict) -> None:
+        raw = json.dumps(payload).encode()
+        mask = os.urandom(4)
+        header = bytes([0x81, 0x80 | len(raw)]) if len(raw) < 126 else bytes([0x81, 0x80 | 126]) + struct.pack("!H", len(raw))
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(raw))
+        self._sock.sendall(header + mask + masked)
+
+    def _recv(self, timeout: float) -> dict:
+        self._sock.settimeout(max(0.1, timeout))
+        while True:
+            frame = self._frame()
+            if frame is None:
+                continue
+            return json.loads(frame)
+
+    def _frame(self) -> str | None:
+        while len(self._buf) < 2:
+            self._buf += self._sock.recv(4096)
+        first, second = self._buf[0], self._buf[1]
+        opcode = first & 0x0F
+        length = second & 0x7F
+        offset = 2
+        if length == 126:
+            while len(self._buf) < 4:
+                self._buf += self._sock.recv(4096)
+            length = struct.unpack("!H", self._buf[2:4])[0]
+            offset = 4
+        elif length == 127:
+            while len(self._buf) < 10:
+                self._buf += self._sock.recv(4096)
+            length = struct.unpack("!Q", self._buf[2:10])[0]
+            offset = 10
+        while len(self._buf) < offset + length:
+            self._buf += self._sock.recv(65536)
+        payload = self._buf[offset : offset + length]
+        self._buf = self._buf[offset + length :]
+        if opcode == 0x9:
+            self._sock.sendall(bytes([0x8A, len(payload)]) + payload)
+            return None
+        if opcode == 0x8:
+            raise RuntimeError("socket closed")
+        return payload.decode()
+
+
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"
+    "de0000000c4944415408d763f8ffff3f0005fe02fe33d32f0000000049454e44ae426082"
+)
+
+
+class ChatSendBrowserTest(unittest.TestCase):
+    def setUp(self) -> None:
+        binary = _chrome()
+        if not binary:
+            self.skipTest("headless Chrome is not installed")
+        from support import PlaneTest
+        from test_ui import _form
+
+        self.case = PlaneTest()
+        self.case.setUp()
+        self.addCleanup(self.case._stop)
+        self.addCleanup(self.case.tmp.cleanup)
+        self._form = _form
+        self.case.plane.accounts.add_member("ada", "other-horse-stable")
+        status, _page, cookie = _form(self.case.base, "/ui/login", {"username": "ada", "password": "other-horse-stable"})
+        self.assertEqual(status, 200)
+        self.cookie = cookie.split(";", 1)[0].split("=", 1)[1]
+        self.ada = next(item for item in self.case.plane.accounts.public_list() if item["username"] == "ada")
+        self.page = _Page(binary)
+        self.addCleanup(self.page.close)
+        self.page.call(
+            "Network.setCookie",
+            {"name": "ssios_session", "value": self.cookie, "url": self.case.base},
+        )
+
+    def _open(self, path: str) -> None:
+        self.page.goto(self.case.base + path)
+        self.assertEqual(self.page.errors, [])
+
+    def _type_and_send(self, text: str, *, enter: bool = False) -> None:
+        literal = json.dumps(text)
+        self.page.eval(
+            "var box = document.querySelector('textarea[name=message]');"
+            f"box.value = {literal};"
+            "box.dispatchEvent(new Event('input', {bubbles: true}));"
+            "true"
+        )
+        if enter:
+            self.page.eval(
+                "document.querySelector('textarea[name=message]').dispatchEvent("
+                "new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); true"
+            )
+        else:
+            self.page.eval("document.querySelector('button.send').click(); true")
+
+    def test_plain_post_renders_html(self) -> None:
+        from test_ui import _get
+
+        page = _get(self.case.base, "/ui/chat", "ssios_session=" + self.cookie)[1]
+        csrf = page.split('name="csrf" value="', 1)[1].split('"', 1)[0]
+        status, body, _cookie = self._form(
+            self.case.base,
+            "/ui/chat/send",
+            {"csrf": csrf, "message": "Hello from the form", "override": "auto"},
+            cookie="ssios_session=" + self.cookie,
+            extra={"Accept": "text/html"},
+        )
+        self.assertEqual(status, 200, body[:300])
+        self.assertIn("<html", body)
+        self.assertIn("Synthetic local answer", body)
+        self.assertFalse(body.lstrip().startswith("event:"))
+        conv = body.split('class="conversation">', 1)[1].split("<", 1)[0]
+        shown = _get(self.case.base, "/ui/chat?conversation=" + conv, "ssios_session=" + self.cookie)[1]
+        self.assertIn("Hello from the form", shown)
+
+    def test_send_click_enter_and_paste_have_no_page_errors(self) -> None:
+        store = ChatStore(self.case.plane.accounts.home(self.ada["id"]))
+        prior = store.create("Harbor desk notes")
+        store.append(prior["id"], {"role": "user", "text": "Harbor desk notes"})
+        store.append(prior["id"], {"role": "assistant", "text": "The synthetic desk plan is ready."})
+        self._open("/ui/chat?conversation=" + prior["id"])
+        self.page.wait("document.body.innerText.includes('Harbor desk notes')")
+
+        self._open("/ui/chat")
+        self._type_and_send("Hello desk")
+        self.page.wait("document.body.innerText.includes('Hello desk') && document.body.innerText.includes('Synthetic local answer')")
+        self.assertEqual(self.page.errors, [])
+
+        self._type_and_send("Second desk note", enter=True)
+        self.page.wait("document.body.innerText.includes('Second desk note')")
+        self.assertEqual(self.page.errors, [])
+
+        payload = json.dumps(list(PNG))
+        ready = self.page.eval(
+            "var bytes = new Uint8Array(" + payload + ");"
+            "var file = new File([bytes], 'desk.png', {type: 'image/png'});"
+            "var data = new DataTransfer();"
+            "data.items.add(file);"
+            "var paste = new Event('paste', {bubbles: true});"
+            "Object.defineProperty(paste, 'clipboardData', {value: data});"
+            "document.querySelector('textarea[name=message]').dispatchEvent(paste);"
+            "(document.getElementById('file-note') || {}).textContent || ''"
+        )
+        self.assertIn("1 file ready", ready or "")
+        self._type_and_send("See the desk photo")
+        self.page.wait("document.body.innerText.includes('See the desk photo') && document.body.innerText.includes('Synthetic local answer')")
+        self.assertEqual(self.page.errors, [])

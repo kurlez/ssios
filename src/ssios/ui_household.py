@@ -28,6 +28,9 @@ CHAT_JS = r"""
   var turnFailed = false;
   var box = form.querySelector("textarea");
   var send = form.querySelector(".send");
+  var pending = [];
+  var note = document.getElementById("file-note");
+  var lastDay = "";
   var state = {};
   try { state = JSON.parse(dataNode ? dataNode.textContent || "{}" : "{}"); } catch (err) { state = {}; }
   var lastRoute = {route: "", reason: ""};
@@ -73,8 +76,6 @@ CHAT_JS = r"""
       }
     });
   }
-  var pending = [];
-  var note = document.getElementById("file-note");
   function takeFiles(list) {
     Array.prototype.forEach.call(list || [], function (file) {
       if (file && pending.length < 6) pending.push(file);
@@ -122,6 +123,7 @@ CHAT_JS = r"""
     grow();
     syncSend();
     var steps = null;
+    var stepsHolder = {node: null, set: function (node) { steps = node; this.node = node; }};
     var headers = {"Accept": "text/event-stream"};
     var payload = params;
     if (!useFile) {
@@ -167,7 +169,6 @@ CHAT_JS = r"""
           return pump();
         });
       }
-      var stepsHolder = {node: steps, set: function (node) { steps = node; this.node = node; }};
       return pump();
     }).catch(function () {
       typing.remove();
@@ -262,7 +263,6 @@ CHAT_JS = r"""
     return wrap;
   }
 
-  var lastDay = "";
   function markDay(at) {
     if (!at) return;
     var day = new Date(at * 1000).toDateString();
@@ -887,6 +887,12 @@ def _public_account(plane, method, path, body, query, peer_ip):
     return Page(404, _login_page(""))
 
 
+def _wants_event_stream(accept: str) -> bool:
+    """The chat script asks for an event stream. A plain form POST asks for a page."""
+    types = [part.split(";", 1)[0].strip().lower() for part in str(accept or "").split(",") if part.strip()]
+    return "text/event-stream" in types and "text/html" not in types
+
+
 def _send(plane, session, body, peer_ip, headers):
     from ssios.ui import Page, _page
 
@@ -897,7 +903,7 @@ def _send(plane, session, body, peer_ip, headers):
     quote = str(body.get("quote") or "")
     image, file_ids = _accept_uploads(plane, account["id"], body, peer_ip, conversation)
     accept = str(headers.get("Accept") or "")
-    if "text/event-stream" in accept:
+    if _wants_event_stream(accept):
         return Page(
             200,
             "",
