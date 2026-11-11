@@ -24,6 +24,8 @@ class ChatGuestRequest:
     account_home: Path
     task_id: str
     prompt: str
+    tools: object = None
+    cancel: object = None
 
 
 class ProductionChatGuest:

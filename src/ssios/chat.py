@@ -80,32 +80,62 @@ def iter_turn(
     message = " ".join(str(text or "").split())
     if not message or len(message) > _MAX_MESSAGE:
         raise SsiosError("chat_rejected", "message rejected", 400)
+    from ssios.orchestrator import choose_route, guest_ready
+    from ssios.pending_slot import consume
+
     resumed = None
+    fallback = ""
+    ready = guest_ready(plane)
     if conversation_id:
-        stored = scope.chat().get(conversation_id)
-        pending = stored.get("pending_pick")
+        stored_conv = scope.chat().get(conversation_id)
+        pending = stored_conv.get("pending_pick")
         if isinstance(pending, dict):
             if re.fullmatch(r"[1-9]", message):
                 yield from _choose_calendar(plane, scope, conversation_id, message, pending, peer_ip)
                 return
             scope.chat().set_pending(conversation_id, None)
-        resumed = _apply_slot(scope, conversation_id, stored.get("pending_slot"), message)
+        outcome = consume(stored_conv.get("pending_slot"), message)
+        if outcome.get("action") == "keep":
+            scope.chat().set_slot(conversation_id, outcome.get("slot"))
+        elif outcome.get("action") == "clear":
+            scope.chat().set_slot(conversation_id, None)
+        elif outcome.get("action") == "resume":
+            scope.chat().set_slot(conversation_id, None)
+            resumed = outcome
     place = ""
     acted = message
-    if resumed and resumed.get("skill") == "weather":
+    if resumed and ready:
+        decision = RouteDecision(
+            route="codex",
+            reason="The previous question was waiting for this answer, so Codex continues it.",
+            reason_code="rule_codex",
+            source="rule",
+            skill=str(resumed.get("skill") or ""),
+        )
+        place = str(resumed.get("value") or "")
+    elif resumed and resumed.get("skill") == "weather":
         place = str(resumed.get("value") or "")
         decision = RouteDecision(
             route="skill",
-            reason="The previous question asked for this, so the weather skill continues.",
+            reason="The previous question asked for this, so the weather skill continues. " + "Codex guest is not available, so this stayed on the host.",
             reason_code="rule_pending",
             source="rule",
             skill="weather",
         )
     elif resumed:
         acted = str(resumed.get("composed") or message)
-        decision = classify(acted, override or "auto", llm=plane.llm, deadline=None)
+        decision, fallback = choose_route(acted, guest_ready=ready, override=override or "auto", llm=plane.llm)
     else:
-        decision = classify(message, override or "auto", llm=plane.llm, deadline=None)
+        decision, fallback = choose_route(message, guest_ready=ready, override=override or "auto", llm=plane.llm)
+    if fallback and fallback not in decision.reason:
+        decision = RouteDecision(
+            route=decision.route,
+            reason=decision.reason + " " + fallback,
+            reason_code=decision.reason_code,
+            source=decision.source,
+            services=decision.services,
+            skill=decision.skill,
+        )
     _audit_route(plane, account["id"], peer_ip, decision)
     store = scope.chat()
     if conversation_id:
@@ -150,6 +180,8 @@ def iter_turn(
             yield from _stage_fetch(scope, record["id"], acted, decision, follow_vm=True, peer_ip=peer_ip)
         elif decision.route == "vm":
             yield from _vm(plane, scope, record["id"], message, peer_ip)
+        elif decision.route == "codex":
+            yield from _codex(plane, scope, record["id"], message, peer_ip, place=place)
         elif decision.route == "skill":
             yield from _skill(plane, scope, record["id"], message, peer_ip, place=place)
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
@@ -311,6 +343,109 @@ def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDec
             "route": decision.public() if decision else {"route": "direct", "reason": "Local answer after an approved read.", "source": "rule"},
         },
     )
+
+
+def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, place: str = "") -> Iterator[dict]:
+    """Run Codex in the guest. If it cannot start, use the host path and say why."""
+    import queue
+
+    from ssios.mcp_host import ToolSession
+    from ssios.orchestrator import choose_route, codex_prompt, present_answer
+
+    session = ToolSession(plane, scope.account, peer_ip)
+    cancel = threading.Event()
+    if not hasattr(plane, "_codex_cancel"):
+        plane._codex_cancel = {}
+    plane._codex_cancel[conversation_id] = cancel
+    request = ChatGuestRequest(
+        account_id=scope.account_id,
+        account_home=scope.home,
+        task_id="chat-" + conversation_id[-8:],
+        prompt=codex_prompt(message, pending_value=place),
+        tools=session.call,
+        cancel=cancel,
+    )
+    box: queue.Queue = queue.Queue()
+
+    def on_status(payload: dict) -> None:
+        if cancel.is_set():
+            raise SsiosError("cancelled", "The turn was cancelled.", 400)
+        box.put(("status", payload))
+
+    def worker() -> None:
+        try:
+            box.put(("result", plane.chat_guest.run(plane, request, on_status)))
+        except SsiosError as exc:
+            box.put(("error", exc))
+        except Exception as exc:
+            box.put(("error", SsiosError("microvm_fail_closed", f"The guest stopped because of {exc.__class__.__name__}.", 503)))
+        finally:
+            box.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+    outcome = None
+    error = None
+    while True:
+        item = box.get()
+        if item is None:
+            break
+        kind, payload = item
+        if kind == "status":
+            yield {"event": "status", "data": payload}
+        elif kind == "result":
+            outcome = payload
+        else:
+            error = payload
+    plane._codex_cancel.pop(conversation_id, None)
+    if cancel.is_set():
+        text = "Cancelled. A pending approval that was already created stays pending."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if error is not None or not isinstance(outcome, dict):
+        detail = error.detail if isinstance(error, SsiosError) else "The guest is unavailable."
+        code = error.code if isinstance(error, SsiosError) else "microvm_fail_closed"
+        note = f"Codex guest is not available ({code}), so this stayed on the host. {detail}"
+        scope.chat().append(conversation_id, {"role": "assistant", "text": note})
+        yield {"event": "outcome", "data": {"text": note}}
+        decision, _ignored = choose_route(message, guest_ready=False, llm=plane.llm)
+        yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, decision, place)
+        return
+    answer = present_answer(str(outcome.get("text") or ""), session.results)
+    scope.chat().append(
+        conversation_id,
+        {
+            "role": "assistant",
+            "text": answer,
+            "route": {"route": "codex", "reason": "Codex answered from the host tools.", "source": "rule"},
+        },
+    )
+    yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
+
+
+def _dispatch_host(plane, scope, conversation_id: str, message: str, peer_ip: str, decision: RouteDecision, place: str) -> Iterator[dict]:
+    if decision.route == "direct":
+        yield from _direct(plane, scope, conversation_id, decision)
+        yield from _propose_explicit(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "skill":
+        yield from _skill(plane, scope, conversation_id, message, peer_ip, place=place)
+        yield from _propose_explicit(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "connector":
+        yield from _stage_fetch(scope, conversation_id, message, decision, follow_vm=False, peer_ip=peer_ip)
+    elif decision.route == "connector_vm":
+        yield from _stage_fetch(scope, conversation_id, message, decision, follow_vm=True, peer_ip=peer_ip)
+    elif decision.route == "memory":
+        yield from _memory(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "tasks":
+        yield from _task_command(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "reminders":
+        yield from _reminder_command(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "schedule":
+        yield from _schedule(plane, scope, conversation_id, message, peer_ip)
+    elif decision.route == "account":
+        yield from _account_facts(scope, conversation_id, message)
+    elif decision.route == "vm":
+        yield from _vm(plane, scope, conversation_id, message, peer_ip)
 
 
 def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, place: str = "") -> Iterator[dict]:
