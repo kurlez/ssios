@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +13,43 @@ from ssios.config import lan_enabled
 from ssios.errors import SsiosError
 from ssios.netguard import is_loopback, origin_allowed, require_host, require_peer
 from ssios.ui import Page, handle as handle_ui
+
+
+def _multipart_memory(content_type: str, raw: bytes) -> dict:
+    """Read a form upload into strings. The bytes are not written to a file."""
+    match = re.search(r"boundary=([^;]+)", content_type)
+    if match is None:
+        raise SsiosError("bad_request", "upload rejected", 400)
+    marker = match.group(1).strip().strip('"')
+    if not marker or len(marker) > 200:
+        raise SsiosError("bad_request", "upload rejected", 400)
+    try:
+        boundary = b"--" + marker.encode("ascii")
+    except UnicodeError as exc:
+        raise SsiosError("bad_request", "upload rejected", 400) from exc
+    result: dict[str, str] = {}
+    for chunk in raw.split(boundary):
+        chunk = chunk.strip(b"\r\n")
+        if not chunk or chunk == b"--":
+            continue
+        if chunk.endswith(b"--"):
+            chunk = chunk[:-2].rstrip(b"\r\n")
+        if b"\r\n\r\n" not in chunk:
+            continue
+        header, body = chunk.split(b"\r\n\r\n", 1)
+        if len(body) > 100000:
+            raise SsiosError("too_large", "upload rejected", 413)
+        found = re.search(br'name="([^"]+)"', header)
+        if found is None:
+            continue
+        name = found.group(1).decode("ascii", "replace")
+        if name not in {"csrf", "op", "service", "client_id", "client_secret", "client_file", "confirm", "redirect_url", "account_id"}:
+            continue
+        try:
+            result[name] = body.decode("utf-8")
+        except UnicodeError as exc:
+            raise SsiosError("oauth_client_invalid", "the client file is not text", 400) from exc
+    return result
 
 
 class AppHTTPServer(ThreadingHTTPServer):
@@ -181,7 +219,10 @@ class AppHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         if not raw:
             return {}
-        if "application/json" in self.headers.get("Content-Type", ""):
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("multipart/form-data"):
+            return _multipart_memory(content_type, raw)
+        if "application/json" in content_type:
             data = json.loads(raw.decode("utf-8"))
             if not isinstance(data, dict):
                 raise SsiosError("bad_request", "json object required", 400)

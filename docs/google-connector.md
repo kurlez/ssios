@@ -81,7 +81,7 @@ Do this on the Mac that runs SSIOS. The browser consent has to be completed by y
 
 1. In Google Cloud Console, create an OAuth client of type Desktop app. Leave the project in Testing and add only the Google account you will use as a test user. Do not publish the app to skip verification.
 2. Enable the Gmail API, the Drive API, and the Google Calendar API for that project. On the OAuth consent screen, add the Gmail and Drive read-only scopes you will use, plus `https://www.googleapis.com/auth/calendar.events` and `https://www.googleapis.com/auth/calendar.calendarlist.readonly`. Do not add `https://www.googleapis.com/auth/calendar` unless you have a separate reason outside SSIOS. SSIOS rejects that full scope.
-3. Install the keyring package, then copy the client id and client secret into the OS keychain. They are not written into the repo or the state directory, and they are not passed to a shell command:
+3. Install the keyring package. On the Connections page, signed in as that account, save the client id and secret or upload the Desktop `client_secret_*.json` file. The same `install_client` path stores them in the Keychain. The page shows only the last characters of the client id. The secret is not written into the repo, the state directory, the config, or the audit log, and it is not passed to a shell command. The command-line prompt does the same thing:
 
 ```bash
 pip install keyring
@@ -96,8 +96,8 @@ PYTHONPATH=src python3 -m ssios oauth-install-client \
 
 The prompt reads the secret without echoing it. `YOUR_ACCOUNT_ID` is the household account id from login (letters, digits, `_`, `-`). Use your own id, not someone else's.
 
-4. In your config, under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]` for the services you want. Leave a name out to keep that service denied. Restart `ssios up` with the same `--state` and `--config` if it is already running.
-5. Start consent. A browser opens. Sign in and approve the requested read-only scope yourself:
+4. In the shared config, under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]` for the services this Mac may use. A name left out stays denied for every account, and the Connections page shows that toggle as disabled. Each signed-in account then turns its own services on from the Connections page. That choice is stored under the account's state, not in the shared TOML. A service works only when both switches are on. Restart SSIOS if you change the shared config while it is running.
+5. On the Connections page, choose Connect for a service that is turned on, or start consent from the command line. A browser opens. Sign in and approve the requested scope yourself:
 
 ```bash
 PYTHONPATH=src python3 -m ssios oauth-connect \

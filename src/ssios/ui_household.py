@@ -545,6 +545,8 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
         return _send(plane, session, body, peer_ip, headers)
     if path == "/ui/chat/events" and method == "GET":
         return Page(200, "", stream=iter(["event: ready\ndata: {}\n\n"]), content_type="text/event-stream; charset=utf-8")
+    if path == "/ui/connections/help" and method == "GET":
+        return Page(200, _google_help_page(session))
     if path == "/ui/connections" and method == "GET":
         return Page(200, _connections_page(plane, session, "", peer_ip))
     if path == "/ui/connections" and method == "POST":
@@ -872,57 +874,162 @@ def _connection_view(plane, account: dict) -> dict:
     return plane.google.status(session_for_account(account))
 
 
+def _google_help_page(session) -> str:
+    from ssios.ui import _page
+
+    body = (
+        "<p>Create the client in Google Cloud, then paste it on the Connections page. "
+        "The secret stays in the Keychain.</p>"
+        "<ol class=\"help\"><li>Create an OAuth client of type Desktop app. Leave the project in Testing and add only your test user.</li>"
+        "<li>Enable the Gmail API, the Drive API, and the Google Calendar API.</li>"
+        "<li>On the consent screen, add the read-only Gmail and Drive scopes, plus calendar.events and calendar.calendarlist.readonly. "
+        "Do not add the broad calendar scope.</li>"
+        "<li>Download the Desktop client JSON, or copy the client id and secret into the form. Do not put the secret in the config file.</li></ol>"
+        "<p><a href=\"/ui/connections\">Back to Connections</a></p>"
+    )
+    return _page(session, "Google Cloud client", body)
+
+
 def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -> str:
     from ssios.netguard import is_loopback
+    from ssios.google_connector import session_for_account
     from ssios.ui import _page
 
     account = session["account"]
-    status = _connection_view(plane, account)
+    own = session_for_account(account)
+    status = plane.google.status(own)
+    client = plane.google.client_public(own)
     connectors = status.get("connectors") if isinstance(status.get("connectors"), dict) else {}
     csrf = html.escape(str(session.get("csrf") or ""))
-    forms = []
+    ready = bool(client.get("ready"))
+    any_on = False
+    any_linked = False
+    cards = []
     for name in ("gmail", "drive", "calendar"):
         item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
         connected = bool(item.get("connected"))
-        when = str(item.get("connected_at") or "")
-        label = f"connected {when}".strip() if connected else "not connected"
-        action = "disconnect" if connected else "connect"
+        any_linked = any_linked or connected
+        gate = plane.google.service_gate(account["id"], name)
+        if gate == "on":
+            any_on = True
+        state = "Connected" if connected else "Not connected"
+        legacy = f"{name}: connected" if connected else f"{name}: not connected"
+        if gate == "config":
+            reason = "Disabled in config by the administrator."
+            switch = ""
+        elif gate == "account":
+            reason = "Turn on this service to connect it."
+            switch = (
+                f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+                "<button name=\"op\" value=\"enable\" type=\"submit\">Turn on</button></form>"
+            )
+        else:
+            reason = ""
+            switch = (
+                f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+                "<button name=\"op\" value=\"disable\" type=\"submit\">Turn off</button></form>"
+            )
+        if connected:
+            button = (
+                f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+                f"<button class=\"primary\" name=\"op\" value=\"disconnect\" type=\"submit\">Disconnect {name}</button></form>"
+            )
+        elif gate != "on" or not ready:
+            why = reason or "Set up the Google client first."
+            button = f"<p>{html.escape(why)}</p><button class=\"primary\" type=\"button\" disabled>Connect {name}</button>"
+        else:
+            button = (
+                f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+                f"<button class=\"primary\" name=\"op\" value=\"connect\" type=\"submit\">Connect {name}</button></form>"
+            )
         dot = "dot on" if connected else "dot"
-        forms.append(
-            f"<article class=\"svc\"><span class=\"{dot}\"></span><div><h2>{html.escape(name.title())}</h2>"
-            f"<p>{html.escape(name)}: {html.escape(label)}</p></div>"
-            f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-            f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
-            f"<button class=\"primary\" name=\"op\" value=\"{action}\" type=\"submit\">{action.title()} {name}</button></form></article>"
+        cards.append(
+            "<article class=\"svc\"><span class=\"" + dot + "\"></span><div><h2>" + html.escape(name.title()) + "</h2>"
+            "<p>" + html.escape(state) + "</p><p class=\"hint\">" + html.escape(legacy) + "</p>" + switch + "</div>" + button + "</article>"
         )
-    if is_loopback(peer_ip):
-        note = (
-            "<p>Open the consent URL in a browser on this Mac. "
-            "Google redirects to 127.0.0.1 on this Mac.</p>"
+    steps = (
+        "<ol class=\"setup-steps\">"
+        + ("<li class=\"done\">1 Set up the client</li>" if ready else "<li>1 Set up the client</li>")
+        + ("<li class=\"done\">2 Enable services</li>" if any_on else "<li>2 Enable services</li>")
+        + ("<li class=\"done\">3 Connect</li>" if any_linked else "<li>3 Connect</li>")
+        + "</ol>"
+    )
+    tail = html.escape(str(client.get("client_id_tail") or ""))
+    if ready:
+        client_card = (
+            "<article class=\"card\"><h2>Google OAuth client</h2><p>Set up. Client id ends in " + tail + ".</p>"
+            "<p><a href=\"/ui/connections/help\">Google Cloud steps</a></p>"
+            f"<form method=\"post\" action=\"/ui/connections\" enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<label>Client ID <input name=\"client_id\" autocomplete=\"off\"></label>"
+            "<label>Client secret <input name=\"client_secret\" type=\"password\" autocomplete=\"off\"></label>"
+            "<label>Desktop client file <input name=\"client_file\" type=\"file\" accept=\"application/json,.json\"></label>"
+            "<button name=\"op\" value=\"install-client\" type=\"submit\">Replace</button></form>"
+            f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<label>Type remove to delete the client and revoke its tokens <input name=\"confirm\" autocomplete=\"off\"></label>"
+            "<button class=\"danger\" name=\"op\" value=\"remove-client\" type=\"submit\">Remove</button></form></article>"
         )
     else:
+        client_card = (
+            "<article class=\"card\"><h2>Google OAuth client</h2><p>Not set up.</p>"
+            "<p><a href=\"/ui/connections/help\">Google Cloud steps</a></p>"
+            f"<form method=\"post\" action=\"/ui/connections\" enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<label>Client ID <input name=\"client_id\" autocomplete=\"off\"></label>"
+            "<label>Client secret <input name=\"client_secret\" type=\"password\" autocomplete=\"off\"></label>"
+            "<label>Desktop client file <input name=\"client_file\" type=\"file\" accept=\"application/json,.json\"></label>"
+            "<button class=\"primary\" name=\"op\" value=\"install-client\" type=\"submit\">Save client</button></form></article>"
+        )
+    if is_loopback(peer_ip):
+        note = "<p class=\"hint\">Finish consent on this Mac. Google redirects to 127.0.0.1 here.</p>"
+    else:
         note = (
-            "<p>This browser is not on the Mac that runs SSIOS. "
-            "Copy the consent URL and open it in a browser on that Mac. "
-            "Google redirects to 127.0.0.1 there. "
-            "If this browser was redirected to a 127.0.0.1 address, paste that full address below. "
-            "The consent check stays on the Mac.</p>"
+            "<p class=\"hint\">This browser is not on the Mac that runs SSIOS. Google redirects to 127.0.0.1 there. "
+            "Paste that full address below. The check stays on the Mac.</p>"
             f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
             "<label>Service <select name=\"service\"><option>gmail</option><option>drive</option><option>calendar</option></select></label>"
             "<label>Redirected 127.0.0.1 address <input name=\"redirect_url\"></label>"
             "<button name=\"op\" value=\"finish\" type=\"submit\">Finish consent</button></form>"
         )
-    return _page(session, "Connections", notice + note + "<div class=\"svc-grid\">" + "".join(forms) + "</div>")
+    return _page(session, "Connections", notice + steps + client_card + note + "<div class=\"svc-grid\">" + "".join(cards) + "</div>")
 
 
-def _connection_action(plane, own, service: str, op: str, redirect_url: str) -> dict:
+def _connection_action(plane, own, service: str, op: str, redirect_url: str, body: dict) -> dict:
     if op == "connect":
         return plane.google.connect(own, service, open_browser=False)
     if op == "disconnect":
         return plane.google.disconnect(own, service)
     if op == "finish":
         return plane.google.submit_redirect(own, service, redirect_url)
+    if op == "install-client":
+        return {"client": _install_from_form(plane, own, body)}
+    if op == "remove-client":
+        if str(body.get("confirm") or "") != "remove":
+            raise SsiosError("oauth_client_invalid", "Type remove to delete the client. Nothing was changed.", 400)
+        return plane.google.remove_client(own)
+    if op == "enable":
+        plane.google.set_service(own, service, True)
+        return {}
+    if op == "disable":
+        plane.google.set_service(own, service, False)
+        return {}
     raise SsiosError("connector_rejected", "connection action rejected", 400)
+
+
+def _install_from_form(plane, own, body: dict) -> dict:
+    from ssios.google_connector import parse_desktop_client
+
+    uploaded = str(body.get("client_file") or "").strip()
+    if uploaded:
+        client_id, client_secret = parse_desktop_client(uploaded)
+    else:
+        client_id = str(body.get("client_id") or "").strip()
+        client_secret = str(body.get("client_secret") or "")
+    return plane.google.install_client(own, client_id, client_secret)
 
 
 def _connections_post(plane, session, body, peer_ip):
@@ -936,8 +1043,9 @@ def _connections_post(plane, session, body, peer_ip):
     service = str(body.get("service") or "")
     op = str(body.get("op") or "")
     own = session_for_account(account)
+    replacing = op == "install-client" and plane.google.client_public(own).get("ready")
     try:
-        result = _connection_action(plane, own, service, op, str(body.get("redirect_url") or ""))
+        result = _connection_action(plane, own, service, op, str(body.get("redirect_url") or ""), body)
     except SsiosError as exc:
         from ssios.chat import english_connector_error
 
@@ -948,6 +1056,18 @@ def _connections_post(plane, session, body, peer_ip):
         plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.disconnect", target=service, result="ok")
     elif op == "finish":
         plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.connect", target=service, result="ok")
+    elif op == "install-client":
+        plane.security_audit.write(
+            actor=account_id,
+            ip=peer_ip,
+            action="oauth.client.replace" if replacing else "oauth.client.install",
+            target=account_id,
+            result="ok",
+        )
+    elif op == "remove-client":
+        plane.security_audit.write(actor=account_id, ip=peer_ip, action="oauth.client.remove", target=account_id, result="ok")
+    elif op in {"enable", "disable"}:
+        plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector." + op, target=service, result="ok", extra={"service": service})
     if op == "connect":
         url = html.escape(str(result.get("authorization_url") or ""))
         detail = (
@@ -956,6 +1076,14 @@ def _connections_post(plane, session, body, peer_ip):
         )
     elif op == "finish":
         detail = "<p>Consent finished for this account.</p>"
+    elif op == "install-client":
+        detail = "<p>The Google client is saved in the Keychain.</p>"
+    elif op == "remove-client":
+        detail = "<p>The Google client was removed and its tokens were revoked.</p>"
+    elif op == "enable":
+        detail = "<p>Service turned on.</p>"
+    elif op == "disable":
+        detail = "<p>Service turned off.</p>"
     else:
         detail = "<p>Disconnected.</p>"
     return Page(200, _connections_page(plane, session, detail, peer_ip))

@@ -933,6 +933,111 @@ class HouseholdTest(PlaneTest):
         self.assertEqual(status, 200, done)
         return done
 
+    def test_connection_client_form_hides_the_secret_and_respects_toggles(self) -> None:
+        from dataclasses import replace
+
+        secret = "uploaded-secret-value"
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.ada), "op": "install-client", "client_id": "desktop-client-abcdef", "client_secret": secret},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, page)
+        self.assertIn("Set up. Client id ends in abcdef", page)
+        self.assertNotIn(secret, page)
+        self.assertEqual(self.store.get(self._ada_id(), "client-secret"), secret)
+        self.assertIsNone(self.store.get(self.plane.accounts.legacy_admin()["id"], "client-secret"))
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("oauth.client.install", audit)
+        self.assertNotIn(secret, audit)
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(secret.encode(), path.read_bytes())
+        status, denied, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"op": "install-client", "client_id": "other", "client_secret": "other-secret"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 403, denied)
+        status, foreign, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {
+                "csrf": self._csrf(self.ada),
+                "op": "install-client",
+                "account_id": self.plane.accounts.legacy_admin()["id"],
+                "client_id": "owner-client",
+                "client_secret": secret,
+            },
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 403, foreign)
+        self.assertIsNone(self.store.get(self.plane.accounts.legacy_admin()["id"], "client-id"))
+        boundary = "----ssiosform"
+        uploaded = json.dumps({"installed": {"client_id": "file-client-zzzzzz", "client_secret": "file-secret-value"}})
+        raw = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\n{self._csrf(self.ada)}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\ninstall-client\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"client_file\"; filename=\"client_secret_test.json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{uploaded}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        request = urllib.request.Request(
+            self.base + "/ui/connections",
+            data=raw,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Cookie": self.ada},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            uploaded_page = response.read().decode()
+        self.assertIn("ends in zzzzzz", uploaded_page)
+        self.assertNotIn("file-secret-value", uploaded_page)
+        self.assertIn("oauth.client.replace", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(self.store.get(self._ada_id(), "client-secret"), "file-secret-value")
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(b"file-secret-value", path.read_bytes())
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("gmail",))
+        gated = self._open("/ui/connections", self.ada, "text/html")[2].decode()
+        self.assertIn("Disabled in config by the administrator.", gated)
+        status, blocked, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.ada), "op": "enable", "service": "calendar"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 403, blocked)
+        status, off, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.ada), "op": "disable", "service": "gmail"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, off)
+        self.assertIn("Turn on this service to connect it.", off)
+        self.assertIn("connector.disable", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
+        status, kept, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.ada), "op": "remove-client", "confirm": "no"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 400, kept)
+        self.assertEqual(self.store.get(self._ada_id(), "client-secret"), "file-secret-value")
+        status, removed, _cookie = _form(
+            self.base,
+            "/ui/connections",
+            {"csrf": self._csrf(self.ada), "op": "remove-client", "confirm": "remove"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, removed)
+        self.assertIn("Not set up", removed)
+        self.assertIsNone(self.store.get(self._ada_id(), "client-secret"))
+        self.assertIn("oauth.client.remove", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))
+
     def test_calendar_connections_approvals_and_errors(self) -> None:
         from ssios.chat import english_connector_error
         from ssios.errors import SsiosError

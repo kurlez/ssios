@@ -717,6 +717,7 @@ main, .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
 button { background: transparent; cursor: pointer; width: auto; }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.danger, .card.danger button.primary { background: var(--danger); color: #fff; border-color: transparent; }
 @media (prefers-color-scheme: dark) {
   button.danger, .card.danger button.primary { color: #3f1515; }
@@ -791,6 +792,9 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .steps .spin::before { content: "\\25CC  "; }
 .error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
 .error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: var(--muted); }
+.setup-steps .done { color: var(--ink); font-weight: 600; }
+.help { list-style: decimal; padding-left: 1.25rem; }
 .svc-grid { display: grid; gap: 16px; }
 .svc { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
 .svc form { margin-left: auto; }

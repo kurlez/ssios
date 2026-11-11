@@ -20,6 +20,7 @@ import base64
 import hashlib
 import html
 import json
+from pathlib import Path
 import re
 import secrets
 import threading
@@ -85,6 +86,18 @@ class AccountSession:
         return validate_account_id(self.account_id)
 
 
+def parse_desktop_client(raw: str) -> tuple[str, str]:
+    """Read a Google Desktop client file from memory. The text is not stored here."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SsiosError("oauth_client_invalid", "the client file is not JSON", 400) from exc
+    installed = data.get("installed") if isinstance(data, dict) else None
+    if not isinstance(installed, dict):
+        raise SsiosError("oauth_client_invalid", "the file is not a Desktop client", 400)
+    return str(installed.get("client_id") or ""), str(installed.get("client_secret") or "")
+
+
 def member_session(account_id: str) -> AccountSession:
     return AccountSession(validate_account_id(account_id), "member")
 
@@ -131,6 +144,68 @@ class GoogleConnector:
         self.store.put(account_id, "client-secret", client_secret)
         return {"account_id": account_id, "stored": True}
 
+    def client_public(self, session: AccountSession) -> dict:
+        """Whether this account has a client. The secret is not returned."""
+        account_id = self._bind(session)
+        client_id = self.store.get(account_id, "client-id") or ""
+        ready = bool(client_id and self.store.get(account_id, "client-secret"))
+        tail = client_id[-6:] if ready and len(client_id) >= 6 else (client_id if ready else "")
+        return {"ready": ready, "client_id_tail": tail}
+
+    def remove_client(self, session: AccountSession) -> dict:
+        """Revoke this account's tokens and delete its keychain entries, including the client."""
+        account_id = self._bind(session)
+        return self.revoke_and_delete(account_id)
+
+    def service_choice(self, account_id: str) -> set[str]:
+        """Per-account switches. A missing file follows every service name; the config is still the ceiling."""
+        accounts = getattr(self.plane, "accounts", None)
+        if accounts is None:
+            return set(CONNECTORS)
+        try:
+            path = accounts.home(account_id) / "connectors.json"
+        except SsiosError:
+            return set(CONNECTORS)
+        if not path.is_file() or path.is_symlink():
+            return set(CONNECTORS)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return set(CONNECTORS)
+        raw = data.get("enabled") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return set(CONNECTORS)
+        return {str(item) for item in raw if str(item) in CONNECTORS}
+
+    def service_gate(self, account_id: str, name: str) -> str:
+        """``on``, ``account``, or ``config``. Config off wins over the account switch."""
+        if name not in self.plane.settings.connectors_enabled:
+            return "config"
+        if name not in self.service_choice(account_id):
+            return "account"
+        return "on"
+
+    def set_service(self, session: AccountSession, name: str, enabled: bool) -> str:
+        account_id = self._bind(session)
+        name = _connector_name(name)
+        if name not in self.plane.settings.connectors_enabled:
+            raise SsiosError("connector_disabled", "Disabled in config by the administrator.", 403)
+        chosen = set(self.service_choice(account_id))
+        if enabled:
+            chosen.add(name)
+        else:
+            chosen.discard(name)
+        path = self._prefs_path(account_id)
+        if path.is_symlink():
+            raise SsiosError("path_rejected", "connector settings path rejected", 400)
+        from ssios.util import write_json
+
+        write_json(path, {"enabled": sorted(chosen)})
+        return name
+
+    def _prefs_path(self, account_id: str) -> Path:
+        return self.plane.accounts.home(validate_account_id(account_id)) / "connectors.json"
+
     def connect(
         self,
         session: AccountSession,
@@ -146,6 +221,10 @@ class GoogleConnector:
         chosen = scope or DEFAULT_SCOPE[connector]
         _check_scope(connector, chosen)
         self._require_client(account_id)
+        gate = self.service_gate(account_id, connector)
+        if gate != "on":
+            detail = "Disabled in config by the administrator." if gate == "config" else "Turn on this service to connect it."
+            raise SsiosError("connector_disabled", detail, 403)
         self._errors.pop((account_id, connector), None)
         verifier = secrets.token_urlsafe(64)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("utf-8")).digest()).rstrip(b"=").decode("ascii")
@@ -266,7 +345,7 @@ class GoogleConnector:
         limits = _normalize_limits(limits or {}, self.plane.settings)
         if tool.startswith("calendar."):
             arguments = prepare_calendar(tool, arguments, limits)
-        self._enabled(tool)
+        self._enabled(account_id, tool)
         self._connected_scope(account_id, tool, limits)
         if self._calls.get(account_id, 0) >= int(limits["max_calls"]):
             raise SsiosError("connector_budget", "connector call budget is exhausted", 429)
@@ -444,12 +523,14 @@ class GoogleConnector:
 
     def _require_client(self, account_id: str) -> None:
         if not self.store.get(account_id, "client-id") or not self.store.get(account_id, "client-secret"):
-            raise SsiosError("oauth_client_missing", "oauth client is not in the secret store", 400)
+            raise SsiosError("oauth_client_missing", "Set up the Google client first.", 400)
 
-    def _enabled(self, tool: str) -> None:
+    def _enabled(self, account_id: str, tool: str) -> None:
         name = tool.split(".", 1)[0]
-        if name not in self.plane.settings.connectors_enabled:
-            raise SsiosError("connector_disabled", "connector is not enabled", 403)
+        gate = self.service_gate(account_id, name)
+        if gate != "on":
+            detail = "Disabled in config by the administrator." if gate == "config" else "Turn on this service to connect it."
+            raise SsiosError("connector_disabled", detail, 403)
 
     def _connected_scope(self, account_id: str, tool: str, limits: dict) -> None:
         name = tool.split(".", 1)[0]
