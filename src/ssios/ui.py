@@ -367,10 +367,12 @@ def _account(session: dict) -> dict:
 
 def _tasks(plane, session: dict, status_filter: str = "open") -> str:
     from ssios.goals import GoalStore, goal_mode
+    from ssios.reminders import ReminderStore, sweep_accounts
     from ssios.scope import AccountScope
 
     account = _account(session)
     scope = AccountScope(plane, account)
+    sweep_accounts(plane)
     chosen = status_filter if status_filter in {"open", "done", "dropped", "in_progress", "all"} else "open"
     goals = GoalStore(scope.home).all()
     if chosen == "open":
@@ -424,9 +426,30 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
         guest.append(
             f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
         )
+    reminder_store = ReminderStore(scope.home)
+    notices = []
+    for notice in reminder_store.unseen():
+        notices.append(f"<li>Reminder: {html.escape(str(notice.get('text') or ''))} was due {html.escape(str(notice.get('due') or ''))}.</li>")
+    dismiss = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"dismiss\" type=\"submit\">Dismiss</button></form>"
+    ) if notices else ""
+    reminder_rows = []
+    for item in reminder_store.open_items():
+        reminder_id = html.escape(str(item.get("id") or ""))
+        reminder_rows.append(
+            f"<li>{html.escape(str(item.get('due') or ''))} {html.escape(str(item.get('text') or ''))} "
+            f"{html.escape(str(item.get('repeat') or ''))}"
+            f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"id\" value=\"{reminder_id}\">"
+            "<button name=\"op\" value=\"snooze\" type=\"submit\">Snooze</button>"
+            "<button name=\"op\" value=\"cancel\" type=\"submit\">Cancel</button></form></li>"
+        )
     body = (
         f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
         + "<ul>" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
+        + "<h2>Reminders</h2>" + (f"<ul>{''.join(notices)}</ul>" + dismiss if notices else "")
+        + "<ul>" + ("".join(reminder_rows) or "<li>No open reminders.</li>") + "</ul>"
         + "<h2>Guest tasks</h2><ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
     )
     return _page(session, "Tasks", body)
@@ -435,6 +458,7 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
 def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
     from ssios.calendar_intent import host_clock
     from ssios.goals import manual_goal, set_goal_mode, undo_goal
+    from ssios.reminders import ReminderStore
     from ssios.scope import AccountScope
 
     account = _account(session)
@@ -458,6 +482,12 @@ def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
             now=now,
             peer_ip=peer_ip,
         )
+    elif op == "snooze":
+        ReminderStore(scope.home).snooze_matching(str(body.get("id") or ""), 60, now)
+    elif op == "cancel":
+        ReminderStore(scope.home).cancel_matching(str(body.get("id") or ""))
+    elif op == "dismiss":
+        ReminderStore(scope.home).mark_seen()
     else:
         raise SsiosError("goal_invalid", "goal action rejected", 400)
     return Page(200, _tasks(plane, session, "open"))

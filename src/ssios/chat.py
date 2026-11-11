@@ -71,6 +71,10 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
             yield from _skill(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
+        elif decision.route == "tasks":
+            yield from _task_command(plane, scope, record["id"], message, peer_ip)
+        elif decision.route == "reminders":
+            yield from _reminder_command(plane, scope, record["id"], message, peer_ip)
         else:
             raise SsiosError("chat_rejected", "route rejected", 400)
     except SsiosError as exc:
@@ -79,7 +83,8 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     except Exception as exc:
         yield remember_failure(scope, record["id"], "chat_failed", f"The turn stopped because of {exc.__class__.__name__}.", 500)
         return
-    yield from _track_goals(plane, scope, record["id"], message, peer_ip)
+    if decision.route not in {"tasks", "reminders", "memory"}:
+        yield from _track_goals(plane, scope, record["id"], message, peer_ip)
     yield {"event": "done", "data": {"ok": True}}
 
 
@@ -228,6 +233,191 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
 def _wants_clip(message: str) -> bool:
     folded = message.casefold()
     return any(cue in folded for cue in ("save", "clip")) or any(cue in message for cue in ("保存", "剪藏"))
+
+
+def _task_command(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    from ssios.calendar_intent import account_zone
+    from ssios.goals import GoalStore, _audit, manual_goal, task_command
+    from ssios.reminders import ReminderStore, reminder_schedule, reminder_text
+
+    command = task_command(message) or {"op": "list"}
+    now, zone_name = host_clock(plane, scope.account)
+    store = GoalStore(scope.home)
+    if command["op"] == "list":
+        lines = ["Open tasks:"]
+        found = store.open_goals()
+        if not found:
+            lines.append("No open tasks.")
+        for goal in found:
+            due = f" due {goal['due']}" if goal.get("due") else ""
+            lines.append(f"- {goal.get('title')}{due}")
+        text = "\n".join(lines)
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if command["op"] == "add":
+        goal = manual_goal(
+            scope,
+            title=command["title"],
+            description=message[:240],
+            status="open",
+            goal_id="",
+            now=now,
+            peer_ip=peer_ip,
+            conversation_id=conversation_id,
+        )
+        zone, _name = account_zone(plane.settings, scope.account)
+        schedule = reminder_schedule(message, now, zone)
+        extra = ""
+        if schedule is not None:
+            item = ReminderStore(scope.home).add(
+                text=reminder_text(command["title"]),
+                phrase=message,
+                due=schedule["due"],
+                zone_name=zone_name,
+                created=now,
+                task_id=goal["id"],
+                repeat=schedule["repeat"],
+            )
+            updated = dict(goal)
+            updated["due"] = schedule["due"].replace(microsecond=0).isoformat()
+            updated["updated_at"] = now.replace(microsecond=0).isoformat()
+            store.append(updated, previous=goal)
+            extra = "\nReminder " + item["due"] + "."
+        text = "Added task: " + goal["title"] + "." + extra
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    title = command.get("title") or ""
+    match = next((goal for goal in store.open_goals() if title and (title.casefold() in str(goal.get("title") or "").casefold() or str(goal.get("title") or "").casefold() in title.casefold())), None)
+    if match is None:
+        text = "No open task matched. Nothing was changed."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if command["op"] == "complete":
+        manual_goal(scope, title=match["title"], description=str(match.get("description") or ""), status="done", goal_id=match["id"], now=now, peer_ip=peer_ip, conversation_id=conversation_id)
+        text = "Completed task: " + match["title"] + ". Pending reminders for it were cancelled."
+    elif command["op"] == "drop":
+        manual_goal(scope, title=match["title"], description=str(match.get("description") or ""), status="dropped", goal_id=match["id"], now=now, peer_ip=peer_ip, conversation_id=conversation_id)
+        text = "Dropped task: " + match["title"] + "."
+    elif command["op"] == "edit":
+        goal = dict(match)
+        goal["title"] = str(command.get("name") or match["title"])[:80]
+        goal["updated_at"] = now.replace(microsecond=0).isoformat()
+        store.append(goal, previous=match)
+        _audit(scope, peer_ip, "goal.update", match["id"], "open")
+        text = "Updated task: " + goal["title"] + "."
+    else:
+        zone, _name = account_zone(plane.settings, scope.account)
+        schedule = reminder_schedule(command.get("when") or message, now, zone)
+        goal = dict(match)
+        goal["due"] = schedule["due"].replace(microsecond=0).isoformat() if schedule else goal.get("due")
+        goal["updated_at"] = now.replace(microsecond=0).isoformat()
+        store.append(goal, previous=match)
+        _audit(scope, peer_ip, "goal.update", match["id"], "open")
+        text = "Updated task: " + match["title"] + (f" due {goal['due']}." if goal.get("due") else ".")
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+    yield {"event": "outcome", "data": {"text": text}}
+
+
+def _reminder_command(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    from ssios.calendar_intent import account_zone
+    from ssios.reminders import ReminderStore, reminder_command, reminder_schedule, reminder_text, saved_line, snooze_minutes
+
+    command = reminder_command(message)
+    now, zone_name = host_clock(plane, scope.account)
+    zone, _name = account_zone(plane.settings, scope.account)
+    store = ReminderStore(scope.home)
+    if command == "list":
+        lines = ["Open reminders:"]
+        found = store.open_items()
+        if not found:
+            lines.append("No open reminders.")
+        for item in found:
+            lines.append(f"- {item.get('due')} {item.get('text')}")
+        text = "\n".join(lines)
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if command == "cancel":
+        done = store.cancel_matching(_reminder_needle(message))
+        text = "Cancelled the reminder." if done else "No open reminder matched. Nothing was changed."
+        for item in done:
+            plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="reminder.cancel", target=item["id"], result="cancelled")
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if command == "snooze":
+        changed = store.snooze_matching(_reminder_needle(message), snooze_minutes(message), now)
+        text = ("Snoozed until " + changed[0]["due"] + ".") if changed else "No open reminder matched. Nothing was changed."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    schedule = reminder_schedule(message, now, zone)
+    if schedule is None:
+        text = "Say a time, such as tomorrow at 9am or every Monday."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    item = store.add(
+        text=reminder_text(message),
+        phrase=message,
+        due=schedule["due"],
+        zone_name=zone_name,
+        created=now,
+        repeat=schedule["repeat"],
+    )
+    line = saved_line(schedule["due"], zone_name, item["text"]) + " (" + item["due"] + ")"
+    if schedule["repeat"]:
+        line += " Repeats " + schedule["repeat"] + "."
+    line += " This is a reminder, not a calendar event. Add it to Google Calendar only after you approve."
+    scope.chat().append(conversation_id, {"role": "assistant", "text": line, "results": [_reminder_block(item, line)]})
+    yield {"event": "results", "data": {"text": line, "blocks": [_reminder_block(item, line)], "reply": ""}}
+    plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="reminder.create", target=item["id"], result="ok")
+    yield from _offer_calendar(scope, conversation_id, item, zone_name)
+
+
+def _reminder_needle(message: str) -> str:
+    from ssios.reminders import reminder_text
+
+    text = reminder_text(message)
+    text = re.sub(
+        r"\b(snooze|cancel|the|reminder|for|my|every|monday|tuesday|wednesday|thursday|friday|saturday|sunday|minutes|minute|hours|hour|day|daily)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b\d+\b", " ", text)
+    for cue in ("取消提醒", "别提醒", "推迟", "稍后提醒", "每周一", "每星期一", "每天"):
+        text = text.replace(cue, " ")
+    return " ".join(text.split())
+
+
+def _offer_calendar(scope, conversation_id: str, item: dict, zone_name: str) -> Iterator[dict]:
+    from datetime import timedelta
+
+    try:
+        due = datetime.fromisoformat(str(item.get("due") or ""))
+    except ValueError:
+        return
+    end = due + timedelta(minutes=30)
+    limits = {"max_items": 5, "max_bytes": 4096, "include_body": False}
+    arguments = {
+        "calendar_id": "primary",
+        "title": str(item.get("text") or "Reminder")[:80],
+        "start": due.replace(microsecond=0).isoformat(),
+        "end": end.replace(microsecond=0).isoformat(),
+        "time_zone": zone_name,
+        "send_updates": "none",
+        "description": "Created from a local reminder.",
+    }
+    try:
+        yield from _propose_tool(scope, conversation_id, "calendar.create_event", arguments, limits)
+    except SsiosError:
+        note = "Calendar is not connected, so no event was proposed."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": note})
+        yield {"event": "outcome", "data": {"text": note}}
 
 
 def _memory(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str = "127.0.0.1") -> Iterator[dict]:

@@ -132,6 +132,12 @@ class ControlPlane:
         self._check_perms()
         if self._uses_upstream():
             self.upstream.preflight()
+        try:
+            from ssios.reminders import sweep_accounts
+
+            sweep_accounts(self)
+        except Exception:
+            pass
 
     def _ensure_layout(self) -> None:
         state = self.settings.state_dir

@@ -102,6 +102,39 @@ def _previous(path, goal_id: str) -> dict | None:
     return found
 
 
+def task_command(message: str) -> dict | None:
+    """Deterministic task commands. Empty when the message is not one of them."""
+    text = " ".join(str(message or "").split())
+    folded = text.casefold()
+    if re.search(r"\b(list my tasks|show my tasks)\b", folded) or any(cue in text for cue in ("我的任务", "列出任务", "有哪些任务")):
+        return {"op": "list"}
+    found = re.search(r"(?:add a task:?|帮我记个任务|记个任务)\s*[:：]?\s*(.{2,160})", text, re.IGNORECASE)
+    if found:
+        return {"op": "add", "title": found.group(1).strip(" .")}
+    found = re.search(r"把(.+?)(?:标记完成|标为完成|设为完成)", text)
+    if found:
+        return {"op": "complete", "title": found.group(1).strip(" .")}
+    found = re.search(r"\bmark (.+?) (?:done|complete|completed)\b", folded)
+    if found:
+        return {"op": "complete", "title": found.group(1).strip(" .")}
+    found = re.search(r"\b(?:drop|cancel) (?:the )?task (.+)$", folded)
+    if found:
+        return {"op": "drop", "title": found.group(1).strip(" .")}
+    found = re.search(r"\brename (?:the )?task (.+?) to (.+)$", folded)
+    if found:
+        return {"op": "edit", "title": found.group(1).strip(" ."), "name": found.group(2).strip(" .")}
+    found = re.search(r"把任务(.+?)改成(.+)$", text)
+    if found:
+        return {"op": "edit", "title": found.group(1).strip(" ."), "name": found.group(2).strip(" .")}
+    found = re.search(r"\bset (?:the )?task (.+?) due (.+)$", folded)
+    if found:
+        return {"op": "due", "title": found.group(1).strip(" ."), "when": found.group(2).strip()}
+    found = re.search(r"把(.+?)改到(.+)$", text)
+    if found and "任务" in text:
+        return {"op": "due", "title": found.group(1).replace("任务", "").strip(" ."), "when": found.group(2).strip()}
+    return None
+
+
 def explicit_goal(message: str) -> dict | None:
     """A goal the user asked for. Chit-chat returns nothing."""
     text = " ".join(str(message or "").split())
@@ -305,6 +338,10 @@ def manual_goal(scope, *, title: str, description: str, status: str, goal_id: st
             goal["evidence"] = {"conversation_id": conversation_id, "message_id": "", "reason": "manual"}
         store.append(goal, previous=current)
         _audit(scope, peer_ip, "goal.update", goal["id"], status)
+        if status in {"done", "dropped"}:
+            from ssios.reminders import ReminderStore
+
+            ReminderStore(scope.home).cancel_for_task(goal["id"])
     mirror_vault(scope, store.all())
     return goal
 

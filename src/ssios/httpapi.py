@@ -374,6 +374,20 @@ class ControlServer:
 
         self._thread = threading.Thread(target=self.httpd.serve_forever, name="ssios-http", daemon=True)
         self._thread.start()
+        self._reminder_thread = threading.Thread(target=self._reminders, name="ssios-reminders", daemon=True)
+        self._reminder_thread.start()
+
+    def _reminders(self) -> None:
+        import time
+
+        from ssios.reminders import sweep_accounts
+
+        while not self._stopped:
+            try:
+                sweep_accounts(self.httpd.plane)
+            except Exception:
+                pass
+            time.sleep(30)
 
     def stop(self) -> None:
         if self._stopped:
