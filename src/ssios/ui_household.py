@@ -222,7 +222,7 @@ CHAT_JS = r"""
         return reader.read().then(function (chunk) {
           if (chunk.done) {
             typing.remove();
-            if (!turnFailed && !String(raw || "").trim() && !sawResult) {
+            if (!turnFailed && !String(raw || "").trim() && !sawResult && answer.dataset.answered !== "1") {
               showError(answer.querySelector(".content"), "The turn ended with no answer.\n\nError code: chat_empty\nHint: Reload the chat. If it is still empty, run ssios vm-diagnose.");
             } else if (!turnFailed && String(raw || "").trim()) renderMarkdown(answer.querySelector(".content"), raw);
             return;
@@ -689,6 +689,9 @@ CHAT_JS = r"""
     if (name === "approval") addApproval({id: payload.id, status: "pending", actionable: true, preview: payload.preview || "", destructive: !!payload.destructive || String(payload.preview || "").indexOf("DESTRUCTIVE") === 0, action: payload.action, payload_sha256: payload.payload_sha256, expected_revision: payload.expected_revision, bound_hash: payload.bound_hash});
     if (name === "error") {
       turnFailed = true;
+      answer.dataset.answered = "1";
+      var typingNode = answer.querySelector(".typing");
+      if (typingNode) typingNode.remove();
       showError(answer.querySelector(".content"), payload.detail || "The turn failed.");
     }
     if (name === "conversation" && payload.id) {
@@ -697,6 +700,7 @@ CHAT_JS = r"""
     }
     if (name === "results") {
       if (onResult) onResult();
+      answer.dataset.answered = "1";
       var typingNode = answer.querySelector(".typing");
       if (typingNode) typingNode.remove();
       var contentNode = answer.querySelector(".content");
@@ -723,9 +727,12 @@ CHAT_JS = r"""
       }
     }
     if (name === "outcome" && (payload.visible || payload.text)) {
+      answer.dataset.answered = "1";
+      var typingNode = answer.querySelector(".typing");
+      if (typingNode) typingNode.remove();
       var note = document.createElement("p");
       note.textContent = payload.visible || payload.text;
-      column.appendChild(note);
+      answer.querySelector(".content").appendChild(note);
     }
     return raw;
   }

@@ -358,6 +358,42 @@ class ChatSendBrowserTest(unittest.TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(item["url"].startswith("/ui/files/file-") for item in rows))
 
+    def test_a_failed_guest_clears_the_writing_indicator(self) -> None:
+        import ssios.chat_guest as guests
+
+        original = guests.chat_guest_report
+        guests.chat_guest_report = lambda settings: {"ok": True, "detail": "files are present"}
+        self.addCleanup(lambda: setattr(guests, "chat_guest_report", original))
+        from ssios.google_connector import GoogleConnector, GoogleEndpoints
+        from ssios.secret_store import MemorySecretStore
+
+        self.case.plane._google = GoogleConnector(self.case.plane, MemorySecretStore(), GoogleEndpoints())
+        self.case.plane.llm.report_script = ["Harbor Desk said the studio plan is on the desk. [1]"]
+
+        def read_now(session, *, project_id, tool, arguments, limits, peer_ip="127.0.0.1"):
+            del session, limits, peer_ip
+            row = {"from": "Harbor Desk", "subject": "Studio plan", "date": "Nov 10", "snippet": "The studio plan is on the desk."}
+            return {
+                "tool": tool,
+                "text": "Note || mail-header " + json.dumps(row),
+                "arguments": arguments,
+                "item_count": 1,
+                "project_id": project_id,
+            }
+
+        self.case.plane.google.read_now = read_now
+        self._open("/ui/chat")
+        self._type_and_send("帮我总结一下最近的邮件")
+        self.page.wait(
+            "document.querySelectorAll('.typing').length === 0"
+            " && document.body.innerText.includes('Harbor Desk said the studio plan is on the desk.')"
+            " && document.body.innerText.includes('Run ssios vm-diagnose for the details.')"
+            " && !document.body.innerText.includes('Assistant is writing')"
+            " && !document.body.innerText.includes('AttributeError')",
+            timeout=20,
+        )
+        self.assertEqual(self.page.errors, [])
+
     def _shot(self, name: str) -> None:
         import base64
 

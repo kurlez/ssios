@@ -86,7 +86,9 @@ class ControlPlane:
         self.tasks: dict[str, dict] = {}
         self.accounts = AccountStore(settings.state_dir)
         self.security_audit = SecurityAudit(settings.state_dir / "audit" / "security.jsonl")
-        self.chat_guest = None
+        from ssios.chat_guest import ProductionChatGuest
+
+        self.chat_guest = ProductionChatGuest()
         self.login_limiter = AttemptLimiter(limit=5, window=600, lock_seconds=60)
         self.signup_limiter = AttemptLimiter(limit=3, window=3600, lock_seconds=600)
         self._tokens: dict[str, str] = {}

@@ -118,6 +118,9 @@ def _place(message: str) -> str:
         return ""
     if _PLACE.fullmatch(text):
         return text
+    # A bare place in another script, such as Москва or 東京. A question was already cleared.
+    if any(ord(char) > 127 for char in text) and re.fullmatch(r"(?u)\w[\w .,'’-]{0,39}", text):
+        return text[:80]
     return ""
 
 

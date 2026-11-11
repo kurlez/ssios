@@ -104,23 +104,23 @@ def iter_turn(
             resumed = outcome
     place = ""
     acted = message
-    if resumed and ready:
+    if resumed and str(resumed.get("skill") or "") == "weather":
+        place = str(resumed.get("value") or "")
+        decision = RouteDecision(
+            route="skill",
+            reason="The previous question asked for a place, so the weather skill continues.",
+            reason_code="rule_pending",
+            source="rule",
+            skill="weather",
+        )
+    elif resumed and ready:
+        place = str(resumed.get("value") or "")
         decision = RouteDecision(
             route="codex",
             reason="The previous question was waiting for this answer, so Codex continues it.",
             reason_code="rule_codex",
             source="rule",
             skill=str(resumed.get("skill") or ""),
-        )
-        place = str(resumed.get("value") or "")
-    elif resumed and resumed.get("skill") == "weather":
-        place = str(resumed.get("value") or "")
-        decision = RouteDecision(
-            route="skill",
-            reason="The previous question asked for this, so the weather skill continues. " + "Codex guest is not available, so this stayed on the host.",
-            reason_code="rule_pending",
-            source="rule",
-            skill="weather",
         )
     elif resumed:
         acted = str(resumed.get("composed") or message)
@@ -383,12 +383,20 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         box.put(("status", payload))
 
     def worker() -> None:
+        guest = getattr(plane, "chat_guest", None)
         try:
-            box.put(("result", plane.chat_guest.run(plane, request, on_status)))
+            if guest is None or not callable(getattr(guest, "run", None)):
+                failed = SsiosError("microvm_fail_closed", "The guest did not start.", 503)
+                failed.diagnostic = "AttributeError: 'NoneType' object has no attribute 'run'"
+                box.put(("error", failed))
+                return
+            box.put(("result", guest.run(plane, request, on_status)))
         except SsiosError as exc:
             box.put(("error", exc))
         except Exception as exc:
-            box.put(("error", SsiosError("microvm_fail_closed", f"The guest stopped because of {exc.__class__.__name__}.", 503)))
+            failed = SsiosError("microvm_fail_closed", "The guest did not start.", 503)
+            failed.diagnostic = f"{exc.__class__.__name__}: {exc}"
+            box.put(("error", failed))
         finally:
             finished.set()
             box.put(None)
@@ -419,9 +427,8 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         yield {"event": "outcome", "data": {"text": text}}
         return
     if error is not None or not isinstance(outcome, dict):
-        detail = error.detail if isinstance(error, SsiosError) else "The guest is unavailable."
-        code = error.code if isinstance(error, SsiosError) else "microvm_fail_closed"
-        note = f"Codex guest is not available ({code}), so this stayed on the host. {detail}"
+        _record_guest_failure(scope, conversation_id, error)
+        note = "The guest did not start, so this stayed on this computer. Run ssios vm-diagnose for the details."
         scope.chat().append(conversation_id, {"role": "assistant", "text": note})
         yield {"event": "outcome", "data": {"text": note}}
         decision, _ignored = choose_route(message, guest_ready=False, llm=plane.llm)
@@ -437,6 +444,48 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         },
     )
     yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
+    yield from _codex_approvals(scope, conversation_id, session.results)
+
+
+def _record_guest_failure(scope, conversation_id: str, error: BaseException | None) -> None:
+    """Keep the launch exception for vm-diagnose. The chat shows a short note instead."""
+    from ssios.chat_guest import _redact
+
+    if isinstance(error, SsiosError):
+        code = error.code or "microvm_fail_closed"
+        detail = str(getattr(error, "diagnostic", "") or "")
+        if not detail:
+            detail = f"{code}: {error.detail}"
+    else:
+        code = "microvm_fail_closed"
+        detail = "The guest is unavailable." if error is None else f"{error.__class__.__name__}: {error}"
+    scope.save_task(
+        {
+            "id": "chat-" + conversation_id[-8:],
+            "status": "failed",
+            "backend": "",
+            "isolated": False,
+            "boot_ms": None,
+            "error_code": code,
+            "error_detail": _redact(detail)[:500],
+        }
+    )
+
+
+def _codex_approvals(scope, conversation_id: str, results: list[dict]) -> Iterator[dict]:
+    """A write tool's pending card. The model cannot approve it."""
+    for item in results:
+        if item.get("status") != "pending" or not item.get("approval_id"):
+            continue
+        approval_id = str(item["approval_id"])
+        try:
+            raw = scope.approvals().get(approval_id)
+            approval = scope.approvals().public(raw)
+        except SsiosError:
+            continue
+        preview = "Waiting for your approval. Nothing is written until you approve it.\n\n" + str(item.get("text") or "")
+        scope.chat().append(conversation_id, {"role": "assistant", "text": preview, "approval_id": approval["id"]})
+        yield _approval_event(approval, preview)
 
 
 def _dispatch_host(plane, scope, conversation_id: str, message: str, peer_ip: str, decision: RouteDecision, place: str) -> Iterator[dict]:

@@ -13,6 +13,7 @@ from ssios.chat_router import RouteDecision, classify
 
 _REPORT = re.compile(r"总结|概括|汇报|\b(summarize|summarise|summary|report|digest)\b", re.IGNORECASE)
 _UNDO = re.compile(r"^(undo|撤销)(\b| )", re.IGNORECASE)
+_FIELD_FORM = re.compile(r"\b(create|update|delete)\s+calendar\s+event\b", re.IGNORECASE)
 _FALLBACK = "Codex guest is not available, so this stayed on the host."
 
 
@@ -34,8 +35,7 @@ def choose_route(message: str, *, guest_ready: bool, override: str = "auto", llm
     if _explicit_host(message) and override != "force_vm":
         return classify(message, override, llm=llm), ""
     decision = classify(message, override, llm=llm)
-    report = bool(_REPORT.search(message))
-    if not pending_fill and not report and decision.route == "direct" and decision.reason_code == "rule_direct":
+    if not _needs_codex(message, decision, pending_fill):
         return decision, ""
     if guest_ready and override != "force_direct":
         return (
@@ -55,7 +55,14 @@ def choose_route(message: str, *, guest_ready: bool, override: str = "auto", llm
 
 
 def guest_ready(plane) -> bool:
+    """True only when a launcher is installed and its prerequisites are present.
+
+    A missing launcher is not ready, even if the kernel and the Codex binary are on disk.
+    A test double can set orchestrator_ready. The production guest uses the real report.
+    """
     guest = getattr(plane, "chat_guest", None)
+    if guest is None or not callable(getattr(guest, "run", None)):
+        return False
     forced = getattr(guest, "orchestrator_ready", None)
     if isinstance(forced, bool):
         return forced
@@ -67,8 +74,29 @@ def guest_ready(plane) -> bool:
         return False
 
 
+def _needs_codex(message: str, decision: RouteDecision, pending_fill: bool) -> bool:
+    """Reports, several sources, workspace work, and a pending follow-up. A weather or web skill stays on the host."""
+    if decision.route == "skill":
+        return False
+    if pending_fill or _REPORT.search(message):
+        return True
+    if _FIELD_FORM.search(message):
+        return False
+    if decision.route in {"vm", "connector_vm"}:
+        return True
+    if len(decision.services) > 1:
+        return True
+    text = str(message or "")
+    if re.search(r"\band\b.+\b(task|reminder)\b", text, re.IGNORECASE) or ("然后" in text and ("任务" in text or "提醒" in text)):
+        return True
+    return False
+
+
 def present_answer(text: str, results: list[dict]) -> str:
     """Keep the model's words. Drop a citation that does not match a tool result, then append Sources."""
+    reads = [item for item in results if item.get("kind") == "read"]
+    if reads and all(int(item.get("item_count") or 0) == 0 for item in reads):
+        text = "No items were returned, so this is the tool result.\n" + "\n".join(str(item.get("text") or "") for item in reads)
     allowed = set()
     for index, item in enumerate(results, start=1):
         allowed.add(str(item.get("id") or ""))
@@ -96,6 +124,11 @@ def _explicit_host(message: str) -> bool:
     from ssios.reminders import reminder_command, wants_forget, wants_remember
 
     text = " ".join(str(message or "").split())
+    folded = text.casefold()
+    reads = bool(re.search(r"\b(read|messages|inbox|mail)\b", folded) or any(word in text for word in ("邮件", "邮箱", "收件箱")))
+    writes = bool(re.search(r"\b(task|reminder)\b", folded) or any(word in text for word in ("任务", "提醒")))
+    if reads and writes:
+        return False
     if task_command(text) or reminder_command(text) or wants_forget(text) or wants_remember(text):
         return True
     if name_question(text) or _UNDO.match(text):

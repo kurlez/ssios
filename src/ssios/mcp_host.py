@@ -73,13 +73,22 @@ class ToolSession:
         self.account = account
         self.peer_ip = peer_ip or "127.0.0.1"
         self.results: list[dict] = []
+        self._writes: dict[str, dict] = {}
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
         limit = int(getattr(getattr(self.plane, "settings", None), "codex_step_limit", 6) or 6)
         if len(self.results) >= limit:
             raise SsiosError("mcp_tool_denied", "The step limit for this turn is reached.", 429)
-        result = call_tool(self.plane, self.account, name, arguments or {}, self.peer_ip, len(self.results) + 1)
+        args = arguments or {}
+        key = ""
+        if name in WRITE_TOOLS:
+            key = name + "\n" + json.dumps(args, sort_keys=True, ensure_ascii=False)
+            if key in self._writes:
+                return self._writes[key]
+        result = call_tool(self.plane, self.account, name, args, self.peer_ip, len(self.results) + 1)
         self.results.append(result)
+        if key:
+            self._writes[key] = result
         return result
 
 
