@@ -54,6 +54,7 @@ def html_to_markdown(raw: bytes, page_url: str) -> dict:
     try:
         parser.feed(raw.decode("utf-8", "replace"))
         parser.close()
+        parser._flush()
     except Exception:
         parser.parts.append(re.sub(r"<[^>]+>", " ", raw.decode("utf-8", "replace")))
     title = " ".join(parser.title).strip() or "Untitled"

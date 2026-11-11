@@ -421,6 +421,7 @@ class SkillBroker:
         if not rel.startswith("Clippings/") or not rel.endswith(".md") or ".." in rel.split("/"):
             raise SsiosError("path_rejected", "clip path rejected", 400)
         root = account_vault(self.plane.settings, account_id)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
         write_nofollow(root, rel, markdown.encode("utf-8"), mode=0o644)
         home = self._prefs_path(account_id)
         staging = home.parent / "clip-staging" / str(meta.get("staging") or "") / "assets" if home else None
