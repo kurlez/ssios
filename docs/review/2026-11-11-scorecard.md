@@ -10,7 +10,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Failed or empty connector reads do not call the model | Done | Same test: a 403 and an empty inbox leave `complete_chat` uncalled | 95 |
 | Summaries that name a sender, subject, or date outside the results are dropped | Done | `_mentions_are_in_results`; the same test drops Jane Doe / 2023 | 90 |
 | Host clock in every prompt and deterministic date answers | Done earlier | `test_pure_date_questions_use_the_host_clock` | 94 |
-| Relative times stored as absolute timestamps | Done for reminders and for dated memory notes | `test_reminder_uses_an_absolute_time_across_midnight` | 86 |
+| Relative times stored as absolute timestamps | Done for one-off and weekly reminders, and for dated memory notes | `test_reminder_uses_an_absolute_time_across_midnight`; `tests/test_reminders.py` stores `2026-11-11T09:00:00-08:00` and `weekly:mon` | 90 |
 | The model cannot claim a save that did not happen | Reminders skip the model. Notes stay staged until approval | Reminder test asserts the model sentence is absent | 84 |
 
 ## P0 Connectors
@@ -53,10 +53,8 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | --- | --- | --- | --- |
 | Weather and web fetch on the host, SSRF checks, untrusted pages | Done earlier | `tests/test_skills.py` | 86 |
 | Obsidian vault clips, assets, and Notes view | Routes exist from an earlier commit. Image and injection tests are still thin | `src/ssios/vault.py` | 58 |
-| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | Absolute reminders, a Tasks.md mirror, and a daily flag exist. There is no background notifier and no evidence-based task completion | `test_reminder_uses_an_absolute_time_across_midnight` | 48 |
+| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | Evidence, undo, and the injection case are in `tests/test_goals.py`. Chat commands, weekly reminders, cancel-on-complete, and a missed reminder after the clock moves are in `tests/test_reminders.py`. The Tasks page shows the notice. There is no live badge while another page stays open | `tests/test_goals.py`, `tests/test_reminders.py` | 76 |
 
 ## Total
 
-Mean of the 24 rows above: **82 / 100**.
-
-This is below 90. The next gaps are auto-commit with undo, memory edit and forget on the panel, an expired-approval retry test, a real task completion loop, and a Mac check of KaTeX plus the reconnect badge.
+Mean of the 28 rows above: **84 / 100** (2355 / 28). The earlier 82 treated this table as 24 rows. After `5c34c5e` and `3169505` the task row is 76 and absolute times are 90. The remaining gaps are auto-commit with undo, memory edit and forget, a validated fact extractor, an expired-approval retry test, a live reminder badge, vault image clips, and screenshots for KaTeX and Needs reconnect.
