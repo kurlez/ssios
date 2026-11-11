@@ -2,16 +2,7 @@
 
 Run this on the Apple M4 Mac mini. It uses a new state directory and does not read or write `.ssios`, `.ssios-demo`, or `.ssios-memfs`.
 
-```bash
-export SSIOS_STATE="$HOME/Library/Application Support/ssios"
-mkdir -p "$SSIOS_STATE"
-```
-
-The commands below use that directory. If you already keep a config at `.ssios/ollama.toml`, copy it to a new file. Do not pass `--state .ssios`.
-
-```bash
-cp config/ssios.example.toml "$SSIOS_STATE/ollama.toml"
-```
+`./scripts/ssios` uses that directory unless `SSIOS_STATE` is already set, and `$SSIOS_STATE/ollama.toml` unless `SSIOS_CONFIG` is set. It does not accept `.ssios`, `.ssios-demo`, or `.ssios-memfs`. If you already keep a config at `.ssios/ollama.toml`, copy the keys you want by hand into the new file. Do not point the script at `.ssios`.
 
 Edit only the copy. These are the same guest settings as `scripts/macos-vz-codex-smoke.sh`, plus the chat model. `[llm] ollama_model` answers chat and reads calendar requests. `[agent.codex] model` is only the model inside the guest. The two names are independent.
 
@@ -46,16 +37,15 @@ From a checkout that contains both the chat UI and the Google connector:
 ```bash
 git fetch origin
 git checkout cursor/ssios-chat-ui-2e2e
-pip install 'keyring>=25'
+./scripts/ssios setup
 ```
 
-`keyring` talks to the macOS Keychain in-process. If it is missing, connect fails with `secure_store_unavailable`. Secrets are not passed to the `security` command.
+`setup` creates `.venv` with the checkout's Python, installs `keyring` there, and copies the sample config only when `$SSIOS_STATE/ollama.toml` is missing or empty. `keyring` talks to the macOS Keychain in-process. If it is missing, connect fails with `secure_store_unavailable`. Secrets are not passed to the `security` command.
 
 ## Admin and local UI
 
 ```bash
-PYTHONPATH=src python3 -m ssios user add --admin --username owner \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios user add --admin --username owner
 ```
 
 Type a new password twice. It is not printed.
@@ -63,22 +53,20 @@ Type a new password twice. It is not printed.
 Check the guest prerequisites before starting the UI. This does not boot a guest. With the example config still on `dev-guard` and `summary`, the report names those keys and does not pretend the guest is `macos-vz`.
 
 ```bash
-PYTHONPATH=src python3 -m ssios ui --check \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios diagnose
 ```
 
 After the config edits above, prepare the pinned Codex binary and the aarch64 kernel. `vm-prepare` reads `profile` from the config file. It does not accept `--profile`.
 
 ```bash
-PYTHONPATH=src python3 -m ssios vm-prepare \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios vm-prepare
 ```
 
-Then start the UI:
+Then start the UI. `start` returns after printing the URL. `status`, `logs`, `restart`, and `stop` use the pid file under `$SSIOS_STATE/run/`.
 
 ```bash
-PYTHONPATH=src python3 -m ssios ui \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios start
+./scripts/ssios status
 ```
 
 Open the printed `http://127.0.0.1:<port>/ui/login` URL.
@@ -91,8 +79,7 @@ Open the printed `http://127.0.0.1:<port>/ui/login` URL.
 Stop the UI and start it again with `--lan`:
 
 ```bash
-PYTHONPATH=src python3 -m ssios ui --lan \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios restart --lan
 ```
 
 The process prints full sign-in URLs: `https://<hostname>.local:<port>/ui/login` and `https://<private-ip>:<port>/ui/login`, plus the certificate SHA-256 fingerprint. Open one of those URLs. A browser that opens the site root is sent to that sign-in page, or to chat if that browser is already signed in. Compare the fingerprint with the browser warning before you continue. macOS may ask to allow incoming connections. Allow it if a browser on another home computer should connect. If you deny it, a browser on this Mac can still use loopback. Only private source addresses are accepted.
@@ -107,12 +94,10 @@ As `ada`, send `remember the fixture code is HARBOR` and approve the memory card
 
 Create a Desktop OAuth client in a Google Cloud project that stays in Testing. Add only your test user. Enable the Gmail API, the Drive API, and the Google Calendar API. Do not publish the app. Calendar consent uses `https://www.googleapis.com/auth/calendar.events` and `https://www.googleapis.com/auth/calendar.calendarlist.readonly`. Do not request the broad `https://www.googleapis.com/auth/calendar` scope.
 
-The account id is the `acct-...` value on the admin row for `ada`, not the username. Install the client for that member. The secret prompt does not echo.
+Install the client for that member. The wrapper adds `--state` and `--config`. Pass the account id from the Admin row. The secret prompt does not echo, and the wrapper does not print it.
 
 ```bash
-PYTHONPATH=src python3 -m ssios oauth-install-client \
-  --account YOUR_ACCOUNT_ID \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios oauth-install-client --account kent
 ```
 
 In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows one status line and only the Connect button while that service is disconnected. The consent URL is in a field you can copy. Open it in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. From another computer, paste that full `127.0.0.1` address into Finish consent. The state check stays on the Mac. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected. An admin can connect that admin's own account the same way, and still cannot open another account's cards.
@@ -133,8 +118,7 @@ Sign in as `owner`. Admin shows Gmail, Drive, and Calendar as yes or no, plus co
 Reset `ada`'s password from Admin. That revokes `ada`'s sessions and Google connection. `ada` must sign in again and connect again before another read works.
 
 ```bash
-PYTHONPATH=src python3 -m ssios audit-verify \
-  --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml"
+./scripts/ssios audit-verify
 ```
 
 The chain check prints `chain ok`. The log has no message bodies, memory text, mail, file contents, tokens, or passwords.

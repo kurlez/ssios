@@ -18,22 +18,29 @@ Nothing from a guest is applied until the owning account approves the card. An a
 
 ## Start on the Mac
 
-Ollama stays on `127.0.0.1:11434`. Copy the sample config and set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to `America/Los_Angeles` on Wenfeng's Mac. An empty value uses the computer's local zone.
+Ollama stays on `127.0.0.1:11434`. `./scripts/ssios` uses `$HOME/Library/Application Support/ssios` and `$SSIOS_STATE/ollama.toml`. It uses the repo `.venv` when that directory exists. It does not read or write `.ssios`, `.ssios-demo`, or `.ssios-memfs`.
 
 ```bash
-cp config/ssios.example.toml .ssios/ollama.toml
-# edit provider and ollama_model in the copy
-PYTHONPATH=src python3 -m ssios user add --admin --username owner \
-  --state .ssios --config .ssios/ollama.toml
+./scripts/ssios setup
 ```
 
-Type the password twice. It is hashed with scrypt and is not printed. The first admin owns the existing memory tree in place. The command does not move or delete `.ssios`, `.ssios-demo`, or `.ssios-memfs`.
+`setup` creates `.venv` if needed, installs `keyring`, and copies `config/ssios.example.toml` only when the config is missing or empty. Edit the copy: set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to `America/Los_Angeles` on Wenfeng's Mac. An empty value uses the computer's local zone. Do not put an OAuth client secret in the file.
 
 ```bash
-PYTHONPATH=src python3 -m ssios ui --state .ssios --config .ssios/ollama.toml
+./scripts/ssios user add --admin --username owner
 ```
 
-Open the printed `http://127.0.0.1:<port>/ui/login` URL. Sign in with the username and password. Chat is at `/ui/chat`.
+Type the password twice. It is hashed with scrypt and is not printed.
+
+```bash
+./scripts/ssios start
+./scripts/ssios status
+./scripts/ssios logs
+./scripts/ssios restart
+./scripts/ssios stop
+```
+
+`start` runs the UI in the background and prints the URL from `listen.url`. `restart` stops that process and starts it again. `stop` signals only the process recorded in `$SSIOS_STATE/run/ui.pid` after checking that it is this UI. `logs` follows `$SSIOS_STATE/run/ui.log`. Open the printed URL and sign in. Chat is at `/ui/chat`. `./scripts/ssios fg` runs the same server in this terminal.
 
 - Direct answer: send `What is a microVM?` and leave the route on Auto. The badge says `direct`. The conversation stays in the sidebar for that account. Reopening the page, or restarting the server, reloads the messages, the route, and any approval card with its current state. Another account cannot see it.
 - Guest task: send `edit readme.md`. The turn shows booting, running, and the isolation checks, then an approval card. Approving records the result. It does not run the change on the host outside the account workspace.
@@ -45,7 +52,7 @@ Open the printed `http://127.0.0.1:<port>/ui/login` URL. Sign in with the userna
 The default bind is `127.0.0.1`. To serve other computers on the home LAN:
 
 ```bash
-PYTHONPATH=src python3 -m ssios ui --lan --state .ssios --config .ssios/ollama.toml
+./scripts/ssios restart --lan
 ```
 
 The same choice can be saved as `[ui] bind = "0.0.0.0"` in the config copy. Any other bind address is rejected.
@@ -61,7 +68,7 @@ Every page, including the chat event stream, requires a signed-in account. Login
 ## Accounts and the admin console
 
 ```bash
-PYTHONPATH=src python3 -m ssios user add --username ada --state .ssios --config .ssios/ollama.toml
+./scripts/ssios user add --username ada
 ```
 
 That host command creates an active member. A person can also request an account at `/ui/signup`, or open a one-time invite created in the admin console. Those accounts stay pending until an admin approves them. Sign-up is rate-limited. A request cannot choose the admin role.
@@ -106,7 +113,7 @@ The chat UI calls the connector in `src/ssios/google_connector.py`. The API, sco
 
 The signed-in account, whether member or admin, can connect, disconnect, and propose a read or a calendar change for that same account. An admin still cannot open or approve another account's cards, and cannot read that account's tokens or mail. The Connections page shows Gmail, Drive, and Calendar separately from `status(session)["connectors"]`. Connecting Calendar does not mark Gmail or Drive connected. The admin console uses `admin_connection_status` for other accounts and sees only connected and connected_at for each connector. Password reset and account deletion call `revoke_and_delete`, which includes Calendar. Chat uses `propose_fetch`. After the owning account approves, `take_result` shows the read text or `created` / `updated` / `deleted` plus the event id. A calendar update card shows the before and after text. A delete card is marked destructive. Attendees are not emailed unless `send_updates` is `all` or `externalOnly`.
 
-Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `ssios oauth-install-client`, which reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file.
+Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `./scripts/ssios oauth-install-client --account kent`. The account value is the id shown on the Admin row. The command reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file. The wrapper does not print that secret.
 
 ## Tests
 

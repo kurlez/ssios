@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# Start and stop the local SSIOS UI without a long command line.
+# This script does not print tokens, does not read OAuth secrets, and does not
+# touch .ssios, .ssios-demo, or .ssios-memfs.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$ROOT/src"
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/ssios <command> [args]
+
+  setup      Create .venv, install runtime dependencies, and copy a sample config if needed
+  start      Run the UI in the background and print its URL
+  stop       Stop the UI that this script started
+  restart    Stop, then start
+  status     Show whether the UI is running
+  logs       Follow the UI log
+  fg         Run the UI in this terminal
+  diagnose   Run vm-diagnose and ui --check
+
+Any other SSIOS command is passed through with --state and --config filled in.
+Example: ./scripts/ssios oauth-install-client --account kent
+         ./scripts/ssios start --lan
+         ./scripts/ssios user add --admin --username owner
+
+The state directory defaults to "$HOME/Library/Application Support/ssios" on macOS
+and "$XDG_STATE_HOME/ssios" (or "$HOME/.local/state/ssios") on Linux.
+Override it with SSIOS_STATE. The config defaults to "$SSIOS_STATE/ollama.toml".
+Override it with SSIOS_CONFIG.
+EOF
+}
+
+default_state() {
+  case "$(uname -s)" in
+    Darwin) printf '%s\n' "$HOME/Library/Application Support/ssios" ;;
+    *) printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/ssios" ;;
+  esac
+}
+
+refuse_state() {
+  local path="$1" part rest
+  case "$path" in
+    .ssios|.ssios-demo|.ssios-memfs|.ssios/*|.ssios-demo/*|.ssios-memfs/*)
+      printf 'Refusing state directory %s\n' "$path" >&2
+      exit 2
+      ;;
+  esac
+  rest="$path"
+  while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    case "$part" in
+      .ssios|.ssios-demo|.ssios-memfs)
+        printf 'Refusing state directory %s\n' "$path" >&2
+        exit 2
+        ;;
+    esac
+    if [[ "$rest" == */* ]]; then
+      rest="${rest#*/}"
+    else
+      break
+    fi
+  done
+}
+
+pick_python() {
+  if [[ -n "${SSIOS_PYTHON:-}" && -x "$SSIOS_PYTHON" ]]; then
+    printf '%s\n' "$SSIOS_PYTHON"
+  elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+    printf '%s\n' "$ROOT/.venv/bin/python"
+  else
+    command -v python3
+  fi
+}
+
+resolve_paths() {
+  STATE="${SSIOS_STATE:-$(default_state)}"
+  refuse_state "$STATE"
+  if [[ "$STATE" != /* ]]; then
+    STATE="$PWD/$STATE"
+  fi
+  refuse_state "$STATE"
+  CONFIG="${SSIOS_CONFIG:-$STATE/ollama.toml}"
+  refuse_state "$CONFIG"
+  RUNDIR="$STATE/run"
+  PIDFILE="$RUNDIR/ui.pid"
+  LOG="$RUNDIR/ui.log"
+  export SSIOS_STATE="$STATE"
+  export SSIOS_CONFIG="$CONFIG"
+}
+
+apply_overrides() {
+  local arg
+  local -a kept=()
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+      --state)
+        [[ $# -ge 2 ]] || { printf 'Missing value for --state\n' >&2; exit 2; }
+        SSIOS_STATE="$2"
+        shift 2
+        ;;
+      --state=*)
+        SSIOS_STATE="${arg#--state=}"
+        shift
+        ;;
+      --config)
+        [[ $# -ge 2 ]] || { printf 'Missing value for --config\n' >&2; exit 2; }
+        SSIOS_CONFIG="$2"
+        shift 2
+        ;;
+      --config=*)
+        SSIOS_CONFIG="${arg#--config=}"
+        shift
+        ;;
+      *)
+        kept+=("$arg")
+        shift
+        ;;
+    esac
+  done
+  EXTRA=()
+  if [[ ${#kept[@]} -gt 0 ]]; then
+    EXTRA=("${kept[@]}")
+  fi
+  resolve_paths
+}
+
+read_pid() {
+  [[ -f "$PIDFILE" ]] || return 1
+  local pid
+  pid="$(tr -cd '0-9' < "$PIDFILE" || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+is_alive() {
+  kill -0 "$1" 2>/dev/null
+}
+
+is_our_ui() {
+  local pid="$1" cmd
+  is_alive "$pid" || return 1
+  cmd="$(ps -ww -p "$pid" -o args= 2>/dev/null || true)"
+  [[ "$cmd" == *"-m ssios"* ]] || return 1
+  [[ "$cmd" == *" ui "* || "$cmd" == *" ui" ]] || return 1
+  [[ "$cmd" == *"--state $STATE"* || "$cmd" == *"--state=$STATE"* ]] || return 1
+}
+
+clear_stale() {
+  local pid
+  pid="$(read_pid || true)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$PIDFILE"
+    return 0
+  fi
+  if is_our_ui "$pid"; then
+    return 1
+  fi
+  if is_alive "$pid"; then
+    printf 'pidfile %s is not the SSIOS UI; not stopping it\n' "$pid" >&2
+    return 2
+  fi
+  rm -f "$PIDFILE"
+  return 0
+}
+
+print_urls() {
+  local line
+  [[ -f "$STATE/listen.url" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      http://*|https://*) printf '%s\n' "$line" ;;
+    esac
+  done < "$STATE/listen.url"
+}
+
+redact_stream() {
+  local line
+  while IFS= read -r line || [[ -n "${line:-}" ]]; do
+    case "$line" in
+      *[Cc]lient_secret*|*[Rr]efresh_token*|*[Aa]ccess_token*|*Bearer\ *|*human.token*|*worker.token*|*[Pp]assword[[:space:]]=*|*[Aa]uthorization:*)
+        printf '%s\n' '[redacted]'
+        ;;
+      *)
+        printf '%s\n' "$line"
+        ;;
+    esac
+  done
+}
+
+ensure_run() {
+  if [[ -L "$RUNDIR" || -L "$PIDFILE" || -L "$LOG" ]]; then
+    printf 'Refusing a symlinked run file under %s\n' "$STATE" >&2
+    exit 2
+  fi
+  mkdir -p "$RUNDIR"
+  chmod 700 "$RUNDIR"
+}
+
+ui_command() {
+  CMD=("$PY" -u -m ssios ui --state "$STATE" --config "$CONFIG")
+  if [[ ${#EXTRA[@]} -gt 0 ]]; then
+    CMD+=("${EXTRA[@]}")
+  fi
+}
+
+cmd_setup() {
+  if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
+    python3 -m venv "$ROOT/.venv"
+  fi
+  PY="$ROOT/.venv/bin/python"
+  "$PY" -m pip install --disable-pip-version-check 'keyring>=25'
+  ensure_config
+}
+
+ensure_config() {
+  local dir
+  dir="$(dirname "$CONFIG")"
+  mkdir -p "$dir"
+  if [[ ! -e "$CONFIG" || ! -s "$CONFIG" ]]; then
+    cp "$ROOT/config/ssios.example.toml" "$CONFIG"
+    printf 'Wrote %s\n' "$CONFIG"
+  else
+    printf 'Left existing config in place: %s\n' "$CONFIG"
+  fi
+  cat <<EOF
+Edit that file before starting the UI. Do not put an OAuth client secret in it.
+  [runtime] backend, agent, memory_mb
+  [limits] task_timeout_seconds
+  [llm] ollama_model
+  [agent.codex] model
+  [ui] time_zone
+  [connectors] enabled
+On a Mac the guest pair is backend = "macos-vz" and agent = "codex".
+EOF
+}
+
+wait_for_url() {
+  local pid tries
+  tries=0
+  while [[ "$tries" -lt 100 ]]; do
+    pid="$(read_pid || true)"
+    if [[ -n "$pid" ]] && ! is_alive "$pid"; then
+      printf 'The UI exited before it printed a URL.\n' >&2
+      if [[ -f "$LOG" ]]; then
+        tail -n 20 "$LOG" >&2 || true
+      fi
+      rm -f "$PIDFILE"
+      return 1
+    fi
+    if [[ -f "$STATE/listen.url" ]]; then
+      printf 'UI is running (pid %s)\n' "$pid"
+      print_urls
+      return 0
+    fi
+    sleep 0.2
+    tries=$((tries + 1))
+  done
+  printf 'The UI is still starting. See %s\n' "$LOG" >&2
+  return 1
+}
+
+cmd_start() {
+  local stale
+  set +e
+  clear_stale
+  stale=$?
+  set -e
+  if [[ "$stale" -eq 2 ]]; then
+    return 1
+  fi
+  if [[ "$stale" -eq 1 ]]; then
+    cmd_status
+    return 0
+  fi
+  ensure_run
+  if [[ -f "$STATE/listen.url" && ! -L "$STATE/listen.url" ]]; then
+    mv "$STATE/listen.url" "$RUNDIR/listen.url.prev"
+  fi
+  : >> "$LOG"
+  chmod 600 "$LOG" || true
+  if [[ ${#EXTRA[@]} -gt 0 ]]; then
+    nohup "$0" _run-ui "${EXTRA[@]}" >/dev/null 2>&1 &
+  else
+    nohup "$0" _run-ui >/dev/null 2>&1 &
+  fi
+  wait_for_url
+}
+
+_run-ui() {
+  ui_command
+  "${CMD[@]}" > >(redact_stream >> "$LOG") 2>&1 &
+  local child=$!
+  printf '%s\n' "$child" > "$PIDFILE"
+  chmod 600 "$PIDFILE" || true
+  wait "$child"
+}
+
+cmd_stop() {
+  local pid tries
+  pid="$(read_pid || true)"
+  if [[ -z "$pid" ]]; then
+    printf 'stopped\n'
+    return 0
+  fi
+  if ! is_alive "$pid"; then
+    rm -f "$PIDFILE"
+    printf 'stopped\n'
+    return 0
+  fi
+  if ! is_our_ui "$pid"; then
+    printf 'pidfile %s is not the SSIOS UI; not stopping it\n' "$pid" >&2
+    return 1
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  tries=0
+  while [[ "$tries" -lt 50 ]]; do
+    if ! is_alive "$pid"; then
+      rm -f "$PIDFILE"
+      printf 'stopped\n'
+      return 0
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  if is_our_ui "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.2
+  elif is_alive "$pid"; then
+    rm -f "$PIDFILE"
+    printf 'stopped\n'
+    return 0
+  fi
+  rm -f "$PIDFILE"
+  printf 'stopped\n'
+}
+
+cmd_status() {
+  local pid
+  pid="$(read_pid || true)"
+  if [[ -n "$pid" ]] && is_our_ui "$pid"; then
+    printf 'running pid %s\n' "$pid"
+    print_urls || true
+    return 0
+  fi
+  if [[ -n "$pid" ]] && is_alive "$pid"; then
+    printf 'pidfile %s is not the SSIOS UI\n' "$pid" >&2
+    return 1
+  fi
+  printf 'stopped\n'
+  return 1
+}
+
+cmd_logs() {
+  ensure_run
+  : >> "$LOG"
+  exec tail -f "$LOG"
+}
+
+cmd_fg() {
+  local child status
+  ensure_run
+  : >> "$LOG"
+  ui_command
+  "${CMD[@]}" > >(redact_stream | tee -a "$LOG") 2>&1 &
+  child=$!
+  printf '%s\n' "$child" > "$PIDFILE"
+  trap 'kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; rm -f "$PIDFILE"' INT TERM
+  set +e
+  wait "$child"
+  status=$?
+  set -e
+  rm -f "$PIDFILE"
+  return "$status"
+}
+
+cmd_diagnose() {
+  set +e
+  "$PY" -m ssios vm-diagnose --state "$STATE" --config "$CONFIG"
+  local first=$?
+  "$PY" -m ssios ui --check --state "$STATE" --config "$CONFIG"
+  local second=$?
+  set -e
+  if [[ "$first" -ne 0 ]]; then
+    return "$first"
+  fi
+  return "$second"
+}
+
+cmd_pass() {
+  local cmd="$1"
+  shift
+  apply_overrides "$@"
+  local -a args=("$PY" -m ssios "$cmd" --state "$STATE" --config "$CONFIG")
+  if [[ ${#EXTRA[@]} -gt 0 ]]; then
+    args+=("${EXTRA[@]}")
+  fi
+  exec "${args[@]}"
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" || "$cmd" == "help" ]]; then
+    usage
+    return 0
+  fi
+  shift
+  PY="$(pick_python)"
+  export PY
+  umask 077
+  cd "$ROOT"
+  case "$cmd" in
+    setup)
+      apply_overrides "$@"
+      cmd_setup
+      ;;
+    _ensure-config)
+      apply_overrides "$@"
+      ensure_config
+      ;;
+    start)
+      apply_overrides "$@"
+      cmd_start
+      ;;
+    stop)
+      apply_overrides "$@"
+      cmd_stop
+      ;;
+    restart)
+      apply_overrides "$@"
+      cmd_stop || true
+      cmd_start
+      ;;
+    status)
+      apply_overrides "$@"
+      cmd_status
+      ;;
+    logs)
+      apply_overrides "$@"
+      cmd_logs
+      ;;
+    fg)
+      apply_overrides "$@"
+      cmd_fg
+      ;;
+    diagnose)
+      apply_overrides "$@"
+      cmd_diagnose
+      ;;
+    _run-ui)
+      apply_overrides "$@"
+      _run-ui
+      ;;
+    _pid-is-ours)
+      local pid=""
+      if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+        pid="$1"
+        shift
+      fi
+      apply_overrides "$@"
+      if [[ -z "$pid" ]]; then
+        pid="$(read_pid || true)"
+      fi
+      if [[ -n "$pid" ]] && is_our_ui "$pid"; then
+        printf 'yes\n'
+        return 0
+      fi
+      printf 'no\n'
+      return 1
+      ;;
+    *)
+      cmd_pass "$cmd" "$@"
+      ;;
+  esac
+}
+
+main "$@"
