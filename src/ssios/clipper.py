@@ -159,6 +159,7 @@ def _tell(plane, account_id: str, text: str, approval_id: str = "") -> None:
 
 def clip_from_browser(plane, account_id: str, body: dict, peer_ip: str) -> dict:
     """Sanitize a page the user's browser already rendered and stage or save it."""
+    from ssios.article_pages import prepare_html, read_page
     from ssios.scope import AccountScope
     from ssios.skill_broker import looks_truncated
     from ssios.vault import html_to_markdown
@@ -170,14 +171,22 @@ def clip_from_browser(plane, account_id: str, body: dict, peer_ip: str) -> dict:
     if not html or len(html.encode("utf-8")) > _MAX_HTML:
         raise SsiosError("skill_denied", "The clip was empty or too large.", 400)
     title = str(body.get("title") or "")[:180]
-    converted = html_to_markdown(html.encode("utf-8"), url)
+    page = read_page(html.encode("utf-8"), url, cookie_sent=False)
+    raw = prepare_html(html.encode("utf-8"), url)
+    converted = html_to_markdown(raw, url)
+    body_text = str(converted.get("body") or "")
+    for index, (src, alt) in enumerate(converted.get("images") or []):
+        if str(src).startswith(("https://", "http://")):
+            body_text = body_text.replace(f"[[IMG:{index}]]", f"![{alt}]({src})")
+    converted["body"] = re.sub(r"\[\[IMG:\d+\]\]", "", body_text)
     if title:
         converted["title"] = title
     images = body.get("images") if isinstance(body.get("images"), list) else []
     if len(images) > _MAX_IMAGES:
         images = images[:_MAX_IMAGES]
     markdown = _document(converted, url, images)
-    truncated = looks_truncated(converted["body"])
+    blocked = page["problem"].reason if page.get("problem") is not None else ""
+    truncated = looks_truncated(converted["body"]) or blocked in {"paywall_needs_session", "session_expired", "wechat_verify", "article_deleted"}
     scope = AccountScope(plane, plane.accounts.users[account_id])
     prefs = plane.skills.account_prefs(account_id)
     from ssios.vault import slugify
@@ -245,6 +254,7 @@ def _document(converted: dict, url: str, images: list) -> str:
         f"title: {_yaml(converted.get('title') or 'Untitled')}",
         f"source: {_yaml(url)}",
         f"author: {_yaml(converted.get('author') or '')}",
+        f"published: {_yaml(converted.get('published') or '')}",
         f"clipped_at: {_yaml(fetched_at)}",
         'via: "browser-clipper"',
         "tags: [clipping]",

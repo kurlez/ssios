@@ -27,3 +27,11 @@ Fetched text is labeled untrusted. It is not parsed as a tool call, and it canno
 ## Chat
 
 `What's the weather in Seattle?` and `今天天气怎么样` render a weather card. A message that contains an `https://` address renders an article card. The guest is not started.
+
+## Substack and WeChat
+
+A Substack post, including a custom domain whose page identifies itself as Substack, and an `mp.weixin.qq.com` article are read for the title, the author or account name, the publish date, and the article text. WeChat text comes from `js_content`. Its images use `data-src`.
+
+A public Substack post is a normal GET. A paid post is read only when this account already has a site session for that exact host. SSIOS does not log in, does not store a password, and does not fetch an archive mirror.
+
+If the post needs a subscription, the reply asks you to save a site session or use the browser clipper. If WeChat asks for a verification check, or to open the WeChat app, the reply says to open the page and use the clipper. If the article was deleted, the reply says so. Nothing is invented.

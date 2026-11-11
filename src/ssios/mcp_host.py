@@ -302,10 +302,23 @@ def _web_fetch(plane, scope, arguments: dict, peer_ip: str) -> tuple[str, int]:
     if any(host == item or host.endswith("." + item) for item in _MIRROR_HOSTS):
         raise SsiosError("skill_denied", "Archive mirrors are not used.", 403)
     fetched = plane.skills.fetch(url, plane.skills.policy(), scope.account_id, "web_fetch", peer_ip)
-    from ssios.skill_broker import _article
+    from ssios.skill_broker import SkillBroker, _sent_site_cookie
 
-    title, body = _article(fetched["body"])
-    return f"{title}\n{body}", 1 if body else 0
+    final_url = str(fetched.get("final_url") or url)
+    info = SkillBroker(plane)._present(
+        scope.account_id,
+        fetched["body"],
+        final_url,
+        cookie_sent=_sent_site_cookie(plane, scope.account_id, final_url),
+        peer_ip=peer_ip,
+    )
+    lines = [info["title"], info["body"]]
+    if info.get("author"):
+        lines.insert(1, info["author"])
+    if info.get("published"):
+        lines.insert(2 if info.get("author") else 1, info["published"])
+    body = "\n".join(line for line in lines if line)
+    return body, 1 if info["body"] else 0
 
 
 def _weather(plane, scope, arguments: dict, peer_ip: str) -> tuple[str, int]:

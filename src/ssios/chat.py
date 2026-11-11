@@ -485,6 +485,11 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         if exc.reason == "session_expired":
             yield from _renew_prompt(scope, conversation_id, message, exc.detail)
             return
+        if exc.reason in {"paywall_needs_session", "wechat_verify", "article_deleted"}:
+            text = str(exc.detail or "The page could not be read.")
+            scope.chat().append(conversation_id, {"role": "assistant", "text": text, "error_code": exc.reason})
+            yield {"event": "outcome", "data": {"text": text}}
+            return
         if exc.code == "skill_denied" and str(exc.detail).startswith("Say a city"):
             yield from _hold_slot(scope, conversation_id, "weather", "location", "Which city? For example, Seattle or 上海.", message)
             return
@@ -1678,7 +1683,7 @@ def failure_hint(code: str) -> str:
         "skill_ssrf": "That address is not a public web site. Nothing was fetched.",
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
-        "skill_upstream": "The site may block automated readers. Try a public or syndicated copy, or paste the text or HTML so it can be clipped.",
+        "skill_upstream": "The site may block automated readers. Open the page in your browser and use the clipper, or paste the text or HTML.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
         "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",
         "connector_scope_missing": "Reconnect and grant the requested access. Nothing was invented.",

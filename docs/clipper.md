@@ -2,6 +2,8 @@
 
 SSIOS does not log into a publisher, does not store a password, and does not use an archive mirror. A subscription page is readable only while you keep a site session from the browser where you are already signed in.
 
+Substack and WeChat Official Account pages are fetched the same way. A paid Substack post needs a site session for that exact domain. A WeChat verification page, or a deleted article, is not filled in. Send this page remains the fallback when the fetch cannot see the article.
+
 The cookie stays in the macOS Keychain, one secret per account and per domain. It is not written to disk, not written to the audit log, and not kept in this repository. SSIOS sends it only to that exact host over HTTPS.
 
 Status is on Connections: Active, Expires in N days, or Expired. Three days before expiry, chat and the banner say so. Delete on Connections removes the cookie.
