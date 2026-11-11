@@ -12,6 +12,7 @@ from dataclasses import replace
 from support import ROOT, PlaneTest, wait_task
 
 from ssios.config import load_settings
+from ssios.errors import SsiosError
 from ssios.runtime import (
     cloud_hypervisor_guest_command,
     krunvm_create_command,
@@ -83,6 +84,26 @@ class CommandTest(unittest.TestCase):
         self.assertNotIn("--dns", created)
         self.assertNotIn("--net", created)
         self.assertNotIn("--readonly", created)
+        spaced = krunvm_create_command(
+            "krunvm",
+            name="ssiosabc",
+            image="docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7",
+            input_dir=Path("/Users/wliu/Library/Application Support/ssios/input"),
+            scratch_dir=Path("/Users/wliu/Library/Application Support/ssios/scratch"),
+            cpus=1,
+            memory_mb=256,
+        )
+        self.assertTrue(any("/Library/Application Support/ssios/input:/input" in item for item in spaced))
+        with self.assertRaises(SsiosError):
+            krunvm_create_command(
+                "krunvm",
+                name="ssiosabc",
+                image="python",
+                input_dir=Path("/tmp/in:put"),
+                scratch_dir=Path("/tmp/scratch"),
+                cpus=1,
+                memory_mb=256,
+            )
         echo = krunvm_echo_command("krunvm", "ssiosabc")
         self.assertEqual(echo[-2:], ["--", "ok"])
         start = krunvm_start_command("krunvm", "ssiosabc")
@@ -107,6 +128,28 @@ class CommandTest(unittest.TestCase):
         self.assertNotIn("--net", guest)
         self.assertIn("shared=on", " ".join(guest))
         self.assertIn("tag=input,socket=/tmp/input.sock", guest)
+        spaced_guest = cloud_hypervisor_guest_command(
+            binary="cloud-hypervisor",
+            kernel="/Users/wliu/Library/Application Support/ssios/vmlinux",
+            initramfs="/Users/wliu/Library/Application Support/ssios/initrd",
+            api_socket=Path("/tmp/api.sock"),
+            cpus=1,
+            memory_mb=256,
+            filesystems=[("workspace", Path("/Users/wliu/Library/Application Support/ssios/workspace.sock"))],
+            serial=Path("/Users/wliu/Library/Application Support/ssios/serial.log"),
+        )
+        self.assertTrue(any(item.endswith("/Library/Application Support/ssios/vmlinux") for item in spaced_guest))
+        self.assertTrue(any(item == "file=/Users/wliu/Library/Application Support/ssios/serial.log" for item in spaced_guest))
+        with self.assertRaises(SsiosError):
+            cloud_hypervisor_guest_command(
+                binary="cloud-hypervisor",
+                kernel="/tmp/vm,linux",
+                initramfs="/tmp/initrd",
+                api_socket=Path("/tmp/api.sock"),
+                cpus=1,
+                memory_mb=256,
+                filesystems=[],
+            )
 
 
 class ScriptedGuest:

@@ -111,6 +111,13 @@ def chat_guest_report(settings) -> dict:
         "vm_prepare": vm_prepare_command(settings),
         "detail": "",
     }
+    from ssios.macos_vz import state_path_report
+
+    path_report = state_path_report(Path(settings.state_dir))
+    report["state_path"] = path_report
+    if not path_report["ok"]:
+        report["detail"] = path_report["detail"]
+        return report
     if backend not in ("macos-vz", "cloud-hypervisor") or agent != "codex":
         report["detail"] = unsuitable_guest_detail(settings)
         return report
