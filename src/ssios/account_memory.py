@@ -79,9 +79,19 @@ def memory_context(scope, query: str = "") -> tuple[str, list[str]]:
 
 
 _STATEMENT = re.compile(
-    r"\b(my name is|i am called|i prefer|i like|i live in|i work at|i use)\b|我叫|我的名字是|我喜欢|我偏好|我住在",
+    r"\b(my name is|i am called|i prefer|i like|i live in|i'm in|i am in|i work at|i use)\b|我叫|我的名字是|我喜欢|我偏好|我住在|我在",
     re.IGNORECASE,
 )
+
+
+def stored_location(scope) -> str:
+    """The Location bullet in human.md, or empty when the account has not saved one."""
+    text = _read(scope.memory(), scope.project_id(), "human.md")
+    for line in _body(text).splitlines():
+        match = re.match(r"^-\s+(?:Location|lives):\s*(.+)$", line.strip(), re.IGNORECASE)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
 
 
 def stored_name(scope) -> str:
@@ -228,9 +238,11 @@ def explicit_facts(message: str) -> list[dict]:
     prefer = re.search(r"(?:i prefer|i like|我喜欢|我偏好)\s+([^。.]{1,80})", text, re.IGNORECASE)
     if prefer:
         facts.append({"path": "preferences.md", "key": "prefers", "value": prefer.group(1).strip(" .")})
-    home = re.search(r"(?:i live in|我住在)\s+([^。.]{1,80})", text, re.IGNORECASE)
+    home = re.search(r"(?:i live in|i'm in|i am in|我住在|我在)\s*([^。.?？!]{1,80})", text, re.IGNORECASE)
     if home:
-        facts.append({"path": "human.md", "key": "lives", "value": home.group(1).strip(" .")})
+        value = home.group(1).strip(" .")
+        if value and value[0] not in set("想看做说听写吃走读"):
+            facts.append({"path": "human.md", "key": "Location", "value": value})
     return facts
 
 

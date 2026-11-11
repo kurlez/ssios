@@ -105,6 +105,15 @@ class ChatStore:
         record["updated_at"] = time.time()
         self._write(record)
 
+    def set_slot(self, conv_id: str, slot: dict | None) -> None:
+        record = self.get(conv_id)
+        if slot is None:
+            record.pop("pending_slot", None)
+        else:
+            record["pending_slot"] = slot
+        record["updated_at"] = time.time()
+        self._write(record)
+
     def append(self, conv_id: str, message: dict) -> dict:
         record = self.get(conv_id)
         message = dict(message)

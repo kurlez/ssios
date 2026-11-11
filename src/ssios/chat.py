@@ -29,6 +29,42 @@ _SYSTEM = (
 _MAX_MESSAGE = 8000
 
 
+def _apply_slot(scope, conversation_id: str, slot: dict | None, message: str) -> dict | None:
+    from ssios.pending_slot import consume
+
+    outcome = consume(slot, message)
+    action = outcome.get("action")
+    if action == "miss":
+        return None
+    if action == "keep":
+        scope.chat().set_slot(conversation_id, outcome.get("slot"))
+        return None
+    scope.chat().set_slot(conversation_id, None)
+    if action == "resume":
+        return outcome
+    return None
+
+
+def _hold_slot(scope, conversation_id: str, skill: str, slot: str, prompt: str, origin: str, choices: list[str] | None = None) -> Iterator[dict]:
+    from ssios.pending_slot import fresh
+
+    scope.chat().set_slot(conversation_id, fresh(skill, slot, origin=origin, choices=choices))
+    scope.chat().append(
+        conversation_id,
+        {"role": "assistant", "text": prompt, "route": {"route": "skill", "reason": prompt, "source": "rule"}},
+    )
+    yield {"event": "outcome", "data": {"text": prompt}}
+
+
+def _note_missing_slot(scope, conversation_id: str, message: str, exc: SsiosError) -> None:
+    from ssios.pending_slot import fresh
+
+    kind = {"drive_intent_invalid": ("drive", "folder"), "calendar_intent_invalid": ("calendar", "date")}.get(exc.code)
+    if kind is None:
+        return
+    scope.chat().set_slot(conversation_id, fresh(kind[0], kind[1], origin=message))
+
+
 def iter_turn(
     plane,
     account: dict,
@@ -44,14 +80,32 @@ def iter_turn(
     message = " ".join(str(text or "").split())
     if not message or len(message) > _MAX_MESSAGE:
         raise SsiosError("chat_rejected", "message rejected", 400)
+    resumed = None
     if conversation_id:
-        pending = scope.chat().get(conversation_id).get("pending_pick")
+        stored = scope.chat().get(conversation_id)
+        pending = stored.get("pending_pick")
         if isinstance(pending, dict):
             if re.fullmatch(r"[1-9]", message):
                 yield from _choose_calendar(plane, scope, conversation_id, message, pending, peer_ip)
                 return
             scope.chat().set_pending(conversation_id, None)
-    decision = classify(message, override or "auto", llm=plane.llm, deadline=None)
+        resumed = _apply_slot(scope, conversation_id, stored.get("pending_slot"), message)
+    place = ""
+    acted = message
+    if resumed and resumed.get("skill") == "weather":
+        place = str(resumed.get("value") or "")
+        decision = RouteDecision(
+            route="skill",
+            reason="The previous question asked for this, so the weather skill continues.",
+            reason_code="rule_pending",
+            source="rule",
+            skill="weather",
+        )
+    elif resumed:
+        acted = str(resumed.get("composed") or message)
+        decision = classify(acted, override or "auto", llm=plane.llm, deadline=None)
+    else:
+        decision = classify(message, override or "auto", llm=plane.llm, deadline=None)
     _audit_route(plane, account["id"], peer_ip, decision)
     store = scope.chat()
     if conversation_id:
@@ -91,13 +145,14 @@ def iter_turn(
         elif decision.route == "schedule":
             yield from _schedule(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "connector":
-            yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=False, peer_ip=peer_ip)
+            yield from _stage_fetch(scope, record["id"], acted, decision, follow_vm=False, peer_ip=peer_ip)
         elif decision.route == "connector_vm":
-            yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=True, peer_ip=peer_ip)
+            yield from _stage_fetch(scope, record["id"], acted, decision, follow_vm=True, peer_ip=peer_ip)
         elif decision.route == "vm":
             yield from _vm(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "skill":
-            yield from _skill(plane, scope, record["id"], message, peer_ip)
+            yield from _skill(plane, scope, record["id"], message, peer_ip, place=place)
+            yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
         elif decision.route == "tasks":
@@ -107,6 +162,7 @@ def iter_turn(
         else:
             raise SsiosError("chat_rejected", "route rejected", 400)
     except SsiosError as exc:
+        _note_missing_slot(scope, record["id"], message, exc)
         yield remember_failure(scope, record["id"], exc.code, english_connector_error(exc), exc.status)
         return
     except Exception as exc:
@@ -215,6 +271,22 @@ def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, 
 
 
 def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDecision | None, cloud_text: str = "") -> Iterator[dict]:
+    if not cloud_text:
+        from ssios.skill_broker import match_skill
+
+        last = ""
+        for item in reversed(scope.chat().get(conversation_id).get("messages") or []):
+            if item.get("role") == "user":
+                last = str(item.get("text") or "")
+                break
+        if match_skill(last):
+            if not plane.skills.policy().get("enabled"):
+                text = "Web skills are off; an admin can turn them on"
+                scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "skill", "reason": text, "source": "policy"}})
+                yield {"event": "outcome", "data": {"text": text}}
+                return
+            yield from _skill(plane, scope, conversation_id, last, "127.0.0.1")
+            return
     messages = _messages(scope, conversation_id, cloud_text)
     files = list(getattr(scope, "_last_memory_files", []) or [])
     if files:
@@ -241,19 +313,43 @@ def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDec
     )
 
 
-def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, place: str = "") -> Iterator[dict]:
+    from ssios.account_memory import stored_location
     from ssios.site_session import warnings
 
     for note in warnings(plane, scope.account_id):
         scope.chat().append(conversation_id, {"role": "assistant", "text": note})
         yield {"event": "outcome", "data": {"text": note}}
+    saved = stored_location(scope)
     try:
-        result = plane.skills.run(scope.account_id, message, peer_ip=peer_ip)
+        result = plane.skills.run(
+            scope.account_id,
+            message,
+            peer_ip=peer_ip,
+            skill="weather" if place else "",
+            place=place,
+            default_location=saved if saved else None,
+        )
     except SsiosError as exc:
         if exc.reason == "session_expired":
             yield from _renew_prompt(scope, conversation_id, message, exc.detail)
             return
+        if exc.code == "skill_denied" and str(exc.detail).startswith("Say a city"):
+            yield from _hold_slot(scope, conversation_id, "weather", "location", "Which city? For example, Seattle or 上海.", message)
+            return
         raise
+    need = result.get("need") if isinstance(result, dict) else None
+    if isinstance(need, dict) and need.get("slot"):
+        yield from _hold_slot(
+            scope,
+            conversation_id,
+            "weather",
+            str(need.get("slot") or "place"),
+            str(need.get("prompt") or "Which place do you mean?"),
+            message,
+            choices=list(need.get("choices") or []),
+        )
+        return
     blocks = result["blocks"]
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     reply = _grounded_reply(plane, message, summary, blocks, scope.account)

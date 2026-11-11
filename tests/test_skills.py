@@ -206,10 +206,176 @@ class SkillTest(PlaneTest):
         self.assertNotIn("Transfer funds", audit)
         self.assertNotIn("alert", audit)
 
-    def _send(self, message: str) -> tuple[int, str, str]:
-        return _form(
-            self.base,
-            "/ui/chat/send",
-            {"csrf": self._csrf(), "message": message},
-            cookie=self.cookie,
+    def _send(self, message: str, conversation: str = "") -> tuple[int, str, str]:
+        body = {"csrf": self._csrf(), "message": message}
+        if conversation:
+            body["conversation"] = conversation
+        return _form(self.base, "/ui/chat/send", body, cookie=self.cookie)
+
+    def _conversation(self, page: str) -> str:
+        return page.split('class="conversation">', 1)[1].split("<", 1)[0]
+
+    def _slot(self, conversation: str) -> dict | None:
+        path = self.plane.accounts.home(self.account_id) / "chat" / f"{conversation}.json"
+        return json.loads(path.read_text(encoding="utf-8")).get("pending_slot")
+
+    def test_a_place_followup_resumes_weather_and_offers_the_location(self) -> None:
+        self.plane.skills.set_enabled(True)
+        self.plane.skills.opener = self._open_one_bellevue
+        status, asked, _cookie = self._send("今天天气怎么样")
+        self.assertEqual(status, 200, asked)
+        self.assertIn("Which city?", asked)
+        self.assertIn("Route: skill", asked)
+        conversation = self._conversation(asked)
+        self.assertEqual(self._slot(conversation)["slot"], "location")
+        self.assertEqual(self._slot(conversation)["skill"], "weather")
+        self.seen.clear()
+        status, resumed, _cookie = self._send("我在Bellevue", conversation)
+        self.assertEqual(status, 200, resumed)
+        self.assertIn("12°C", resumed)
+        self.assertIn("Bellevue", resumed)
+        self.assertIn("weather skill continues", resumed)
+        self.assertIn("Location: Bellevue", resumed)
+        self.assertIn("human.md", resumed)
+        self.assertTrue(any("Bellevue" in item and "geocoding-api" in item for item in self.seen))
+        self.assertIsNone(self._slot(conversation))
+
+    def test_saved_location_is_used_when_the_message_names_none(self) -> None:
+        from ssios.account_memory import files_for_facts
+        from ssios.scope import AccountScope
+
+        self.plane.skills.set_enabled(True)
+        scope = AccountScope(self.plane, self.plane.accounts.get(self.account_id))
+        files = files_for_facts(scope, [{"path": "human.md", "key": "Location", "value": "Seattle"}])
+        store = scope.memory()
+        proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
+        approval = scope.create_memory_approval(proposal)
+        record = scope.approvals().get(approval["id"])
+        scope.decide(
+            approval["id"],
+            {
+                "decision": "approve",
+                "action": record["action"],
+                "payload_sha256": record["payload_sha256"],
+                "expected_revision": record["expected_revision"],
+                "bound_hash": record["bound_hash"],
+            },
+            "127.0.0.1",
         )
+        status, page, _cookie = self._send("今天天气怎么样")
+        self.assertEqual(status, 200, page)
+        self.assertIn("Using Seattle", page)
+        self.assertIn("12°C", page)
+        self.assertNotIn("Which city?", page)
+        self.assertTrue(any("Seattle" in item for item in self.seen))
+
+    def test_an_ambiguous_place_asks_and_the_choice_continues(self) -> None:
+        self.plane.skills.set_enabled(True)
+        self.plane.skills.opener = self._open_two_bellevues
+        status, asked, _cookie = self._send("What's the weather in Bellevue?")
+        self.assertEqual(status, 200, asked)
+        self.assertIn("Bellevue, WA", asked)
+        self.assertIn("Bellevue, NE", asked)
+        conversation = self._conversation(asked)
+        self.assertEqual(self._slot(conversation)["slot"], "place")
+        status, chosen, _cookie = self._send("Bellevue, WA", conversation)
+        self.assertEqual(status, 200, chosen)
+        self.assertIn("12°C", chosen)
+        self.assertIn("Washington", chosen)
+        self.assertNotIn("Nebraska", chosen)
+        self.assertIsNone(self._slot(conversation))
+
+    def test_a_new_topic_or_expiry_or_three_turns_clears_the_pending_place(self) -> None:
+        from ssios.pending_slot import consume, fresh
+
+        self.plane.skills.set_enabled(True)
+        status, asked, _cookie = self._send("今天天气怎么样")
+        self.assertEqual(status, 200, asked)
+        conversation = self._conversation(asked)
+        self.seen.clear()
+        status, moved, _cookie = self._send("查一下我的邮件", conversation)
+        self.assertNotIn("12°C", moved)
+        self.assertNotIn("Which city?", moved)
+        self.assertFalse(any("geocoding-api" in item for item in self.seen))
+        self.assertIsNone(self._slot(conversation))
+        status, again, _cookie = self._send("今天下雨吗")
+        self.assertEqual(status, 200, again)
+        fresh_id = self._conversation(again)
+        path = self.plane.accounts.home(self.account_id) / "chat" / f"{fresh_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["pending_slot"]["expires_at"] = 1
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.seen.clear()
+        status, late, _cookie = self._send("我在Bellevue", fresh_id)
+        self.assertNotIn("12°C", late)
+        self.assertFalse(any("geocoding-api" in item for item in self.seen))
+        self.assertIsNone(self._slot(fresh_id))
+        status, waiting, _cookie = self._send("今天天气怎么样")
+        waiting_id = self._conversation(waiting)
+        for _ in range(3):
+            self._send("ok", waiting_id)
+        self.assertIsNone(self._slot(waiting_id))
+        slot = fresh("weather", "location", origin="今天天气怎么样", now=1_000)
+        self.assertEqual(consume(slot, "ok", now=1_000)["action"], "keep")
+        self.assertEqual(consume(slot, "ok", now=1_000 + 601)["action"], "clear")
+
+    def test_live_topics_say_skills_are_off_instead_of_asking_the_model(self) -> None:
+        called = []
+        real_stream = self.plane.llm.stream_chat
+        real_complete = self.plane.llm.complete_chat
+
+        def stream(*args, **kwargs):
+            called.append("stream")
+            return real_stream(*args, **kwargs)
+
+        def complete(*args, **kwargs):
+            called.append("complete")
+            return real_complete(*args, **kwargs)
+
+        self.plane.llm.stream_chat = stream
+        self.plane.llm.complete_chat = complete
+        for phrase in ("今天下雨吗", "what's the latest news", "what is the price of coffee"):
+            called.clear()
+            self.seen.clear()
+            status, page, _cookie = self._send(phrase)
+            self.assertEqual(status, 403, page)
+            self.assertIn("Web skills are off; an admin can turn them on", page)
+            self.assertEqual(called, [])
+            self.assertEqual(self.seen, [])
+
+    def _open_one_bellevue(self, url: str):
+        self.seen.append(url)
+        if "geocoding-api.open-meteo.com" in url and "Bellevue" in url:
+            body = json.dumps(
+                {"results": [{"name": "Bellevue", "latitude": 47.6, "longitude": -122.2, "admin1": "Washington", "country": "United States"}]}
+            ).encode()
+            return 200, {}, body
+        return self._open_body(url)
+
+    def _open_two_bellevues(self, url: str):
+        self.seen.append(url)
+        if "geocoding-api.open-meteo.com" in url and "Bellevue" in url and "WA" not in url and "Washington" not in url:
+            body = json.dumps(
+                {
+                    "results": [
+                        {"name": "Bellevue", "latitude": 47.6, "longitude": -122.2, "admin1": "Washington", "country": "United States"},
+                        {"name": "Bellevue", "latitude": 41.1, "longitude": -95.9, "admin1": "Nebraska", "country": "United States"},
+                    ]
+                }
+            ).encode()
+            return 200, {}, body
+        if "geocoding-api.open-meteo.com" in url:
+            body = json.dumps(
+                {"results": [{"name": "Bellevue", "latitude": 47.6, "longitude": -122.2, "admin1": "Washington", "country": "United States"}]}
+            ).encode()
+            return 200, {}, body
+        return self._open_body(url)
+
+    def _open_body(self, url: str):
+        if "geocoding-api.open-meteo.com" in url:
+            body = json.dumps({"results": [{"name": "Seattle", "latitude": 47.6, "longitude": -122.3, "admin1": "Washington", "country": "United States"}]}).encode()
+            return 200, {}, body
+        if "api.open-meteo.com" in url:
+            body = json.dumps({"current": {"temperature_2m": 12, "weather_code": 1, "wind_speed_10m": 10}}).encode()
+            return 200, {}, body
+        return 500, {}, b""
