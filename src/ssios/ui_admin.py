@@ -78,8 +78,8 @@ def _admin_page(plane, session, notice: str) -> str:
             flags.append(f"{name} {'yes' if item.get('connected') else 'no'} {item.get('connected_at') or ''}".strip())
         rows.append(
             "<tr><td>" + html.escape(str(account["username"])) + "</td><td>" + html.escape(str(account["role"]))
-            + "</td><td>" + html.escape(str(account["status"])) + "</td><td>" + html.escape(", ".join(flags)) + "</td><td>"
-            + _admin_forms(csrf, account) + "</td></tr>"
+            + "</td><td>" + html.escape(str(account["status"]))             + "</td><td>" + html.escape(", ".join(flags)) + "</td><td>"
+            + "<details class=\"kebab\"><summary>Actions</summary>" + _admin_forms(csrf, account) + "</details></td></tr>"
         )
     chain = plane.security_audit.verify()
     body = (
@@ -143,7 +143,7 @@ def _admin_delete(csrf: str, account: dict) -> str:
         f"<form class=\"row\" method=\"post\" action=\"/ui/admin/users/{account_id}\">"
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         f"<label>Type delete {username} <input name=\"confirm\" placeholder=\"delete {username}\"></label>"
-        "<button name=\"op\" value=\"delete\" type=\"submit\">Delete</button></form>"
+        "<button class=\"danger\" name=\"op\" value=\"delete\" type=\"submit\">Delete</button></form>"
     )
 
 

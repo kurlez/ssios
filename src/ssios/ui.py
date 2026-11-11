@@ -420,7 +420,7 @@ def _approvals(plane, session: dict) -> str:
             from ssios.google_connector import session_for_account
 
             shown = plane.google.preview(record, session_for_account(account))
-            kind = "approval danger" if shown.startswith("DESTRUCTIVE") else "approval"
+            kind = "card approval danger" if shown.startswith("DESTRUCTIVE") else "card approval"
             diff = html.escape(shown)
             rows.append(
                 "<article class=\"" + kind + "\"><h2>"
@@ -439,7 +439,7 @@ def _approvals(plane, session: dict) -> str:
             files = preview.get("files") or []
             diff = html.escape("\n\n".join(str(item.get("content") or "") for item in files))
         rows.append(
-            "<article><h2>"
+            "<article class=\"card approval\"><h2>"
             + html.escape(str(record.get("action")))
             + "</h2><pre>"
             + diff
@@ -459,7 +459,7 @@ def _decision_form(session: dict, record: dict) -> str:
     return (
         f"<form method=\"post\" action=\"/ui/approvals/{html.escape(record['approval_id'])}\">"
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">{fields}"
-        "<button name=\"decision\" value=\"approve\" type=\"submit\">Approve</button>"
+        "<button class=\"primary\" name=\"decision\" value=\"approve\" type=\"submit\">Approve</button>"
         "<button name=\"decision\" value=\"deny\" type=\"submit\">Deny</button></form>"
     )
 
@@ -683,58 +683,110 @@ _STYLE = """
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #f4f1ea; --ink: #1c1915; --muted: #6d645b; --panel: #fffdf8; --line: #e4dccf;
-  --user: #1c1915; --user-ink: #f6f1e7; --accent: #6b3a1f; --danger: #8b1e1e; --danger-bg: #fde8e4;
-  --code: #f3eee6;
+  --bg: #fafafa; --ink: #171717; --muted: #525252; --panel: #ffffff; --line: #e7e7e7;
+  --user: #ececec; --accent: #1d4ed8; --on-accent: #ffffff;
+  --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #166534; --warn: #92400e; --warn-bg: #fef3c7; --ok-bg: #dcfce7;
+  --code: #f4f4f5;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #141311; --ink: #f3eee6; --muted: #b3a89c; --panel: #211e1a; --line: #3a342c;
-    --user: #efe6d6; --user-ink: #1c1915; --accent: #e0b089; --danger: #ffb4a8; --danger-bg: #3a201c;
-    --code: #2a2622;
+    --bg: #0f0f10; --ink: #f5f5f5; --muted: #a3a3a3; --panel: #171717; --line: #2a2a2a;
+    --user: #2a2a2e; --accent: #93c5fd; --on-accent: #0f0f10;
+    --danger: #fecaca; --danger-bg: #3f1515; --ok: #bbf7d0; --warn: #fde68a; --warn-bg: #3f2e12; --ok-bg: #14301f;
+    --code: #1c1c1f;
   }
 }
 html, body { height: 100%; }
-body { margin: 0; display: flex; flex-direction: column; overflow: hidden; font: 16px/1.5 "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", sans-serif; color: var(--ink); background: var(--bg); }
+body { margin: 0; overflow: auto; font: 15px/1.6 -apple-system, "SF Pro", "PingFang SC", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--bg); }
+body.app-body { overflow: hidden; }
 a { color: var(--accent); }
-h1 { font-weight: 560; font-size: 1.4rem; }
-main { max-width: 52rem; margin: 0 auto; overflow: auto; width: 100%; flex: 1; min-height: 0; }
-.top { display: flex; align-items: center; gap: 0.75rem; padding: 0.7rem 1rem; flex: none; }
+h1 { font-weight: 600; font-size: 1.35rem; margin: 0 0 16px; }
+main, .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
+button { background: transparent; cursor: pointer; width: auto; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+button.danger, .card.danger button.primary { background: var(--danger); color: #fff; border-color: transparent; }
+@media (prefers-color-scheme: dark) {
+  button.danger, .card.danger button.primary { color: #3f1515; }
+}
+label { display: grid; gap: 4px; }
+form { display: grid; gap: 12px; }
+pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
+.app { height: 100%; display: flex; min-height: 0; }
+.sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
 .brand { font-weight: 650; color: var(--ink); text-decoration: none; }
-.account { margin-left: auto; }
-.account summary { cursor: pointer; }
-.account a, .account button { display: block; margin: 0.35rem 0; }
-form { display: grid; gap: 0.75rem; }
-label { display: grid; gap: 0.25rem; }
-input, textarea, select, button { font: inherit; padding: 0.45rem 0.6rem; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 0.5rem; }
-button { background: var(--ink); color: var(--bg); border: 0; width: max-content; cursor: pointer; }
-form.row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-pre, code { font-family: ui-monospace, "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace; }
-pre { white-space: pre-wrap; background: var(--code); padding: 0.8rem; border-radius: 0.6rem; }
-table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; vertical-align: top; padding: 0.4rem; border-bottom: 1px solid var(--line); }
-.app { flex: 1; min-height: 0; display: flex; }
-.shell { flex: 1; display: flex; min-height: 0; width: 100%; }
-.sidebar { width: 16rem; border-right: 1px solid var(--line); padding: 0.8rem; overflow: auto; }
-.sidebar a { display: block; margin: 0.25rem 0; }
-.thread { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.log { flex: 1; overflow: auto; padding: 1rem 1rem 0; }
-.column { max-width: 44rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.8rem; }
-.bubble { max-width: 85%; padding: 0.7rem 0.9rem; border-radius: 1rem; }
-.bubble.user { margin-left: auto; background: var(--user); color: var(--user-ink); }
-.bubble.assistant { margin-right: auto; background: var(--panel); border: 1px solid var(--line); }
-.badge { font-size: 0.75rem; color: var(--muted); border: 0; background: transparent; padding: 0; cursor: help; }
-.composer { flex: none; background: var(--bg); padding: 0.8rem 1rem 1rem; border-top: 1px solid var(--line); }
-.composer form { max-width: 44rem; margin: 0 auto; display: flex; gap: 0.5rem; align-items: end; }
-.composer textarea { flex: 1; resize: none; min-height: 2.6rem; max-height: 10rem; }
-.typing { color: var(--muted); font-size: 0.9rem; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 0.8rem; padding: 0.8rem; margin-top: 0.4rem; }
-.card.danger { border: 2px solid var(--danger); background: var(--danger-bg); }
-.card form { display: flex; gap: 0.5rem; }
+.new-chat { margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
+.convs { flex: 1; overflow: auto; min-height: 0; }
+.convs h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 8px 4px; }
+.conv { display: flex; align-items: center; gap: 4px; border-radius: 12px; }
+.conv a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; padding: 8px; }
+.conv:hover, .conv:focus-within { background: var(--panel); }
+.kebab { position: relative; }
+.kebab summary { list-style: none; cursor: pointer; opacity: 0; border-radius: 8px; padding: 4px 8px; }
+.conv:hover .kebab summary, .kebab[open] summary, .kebab summary:focus { opacity: 1; }
+.conv .kebab form { position: absolute; right: 0; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; width: 200px; }
+tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
+.more { margin-top: 8px; }
+.more summary, .dock summary { cursor: pointer; }
+.dock { margin-top: auto; position: relative; padding-top: 8px; }
+.dock summary { display: flex; align-items: center; gap: 8px; }
+.avatar, .mark { width: 28px; height: 28px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--user); font-size: 13px; }
+.popover { position: absolute; bottom: 40px; left: 0; right: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; display: grid; }
+.popover a, .popover button { text-align: left; }
+.stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.menu-btn { margin: 8px 16px 0; width: max-content; }
+.thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.log { flex: 1; overflow: auto; }
+.column { max-width: 760px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
+.msg { display: flex; gap: 8px; }
+.msg.user { justify-content: flex-end; }
+.msg.user .bubble { max-width: 75%; background: var(--user); border-radius: 16px; padding: 8px 12px; }
+.msg .body { min-width: 0; flex: 1; }
+.tools { display: flex; gap: 8px; align-items: center; }
+.copy, .stamp { opacity: 0; font-size: 12px; color: var(--muted); background: transparent; border: 0; padding: 0; }
+.msg:hover .copy, .msg:focus-within .copy, .msg:hover .stamp, .msg:focus-within .stamp, .codeblock:hover .copy, .codeblock:focus-within .copy { opacity: 1; }
+.pill { align-self: flex-start; width: auto; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: 2px 8px; cursor: help; }
+.codeblock { background: var(--code); border-radius: 12px; margin: 8px 0; }
+.codehead { display: flex; justify-content: space-between; padding: 4px 8px; color: var(--muted); font-size: 12px; }
+.codeblock pre { margin: 0; padding: 8px 12px 12px; white-space: pre-wrap; }
+.empty { text-align: center; margin: auto; padding: 48px 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chip { border-radius: 999px; }
+.composer { padding: 8px 16px 16px; }
+.composer-box { max-width: 760px; margin: 0 auto; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); padding: 8px 8px 8px 16px; box-shadow: 0 8px 24px rgba(0,0,0,.04); display: grid; gap: 8px; }
+.composer-box textarea { border: 0; resize: none; min-height: 24px; max-height: 160px; padding: 8px 0; background: transparent; width: 100%; outline: none; }
+.composer-bar { display: flex; justify-content: space-between; align-items: center; }
+.route-chip select { border: 0; background: transparent; padding: 4px 8px; }
+.send { width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; padding: 0; }
+.send:disabled { opacity: .4; }
+.hint { max-width: 760px; margin: 8px auto 0; color: var(--muted); font-size: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.card.danger { border-color: var(--danger); background: var(--danger-bg); }
+.card header, .card .actions { display: flex; align-items: center; gap: 8px; }
+.card .actions { justify-content: flex-end; }
+.card dl { display: grid; grid-template-columns: 8rem 1fr; gap: 4px 12px; margin: 12px 0; }
+.card dt { color: var(--muted); }
+.status { font-size: 12px; border-radius: 999px; padding: 2px 8px; background: var(--warn-bg); color: var(--warn); }
+.status.approved { background: var(--ok-bg); color: var(--ok); }
+.status.denied, .status.expired, .status.missing { background: var(--danger-bg); color: var(--danger); }
+.diff s { color: var(--muted); }
+.diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; }
+.steps .done::before { content: "\\2713  "; color: var(--ok); }
+.steps .spin::before { content: "\\25CC  "; }
+.error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
+.error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
+.svc-grid { display: grid; gap: 16px; }
+.svc { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.svc form { margin-left: auto; }
+.dot { width: 8px; height: 8px; border-radius: 99px; background: #737373; }
+.dot.on { background: #15803d; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); }
+td, th { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--line); }
 body.sidebar-closed .sidebar { display: none; }
 @media (max-width: 800px) {
-  .sidebar { position: fixed; inset: 3.2rem auto 0 0; z-index: 2; background: var(--bg); width: min(18rem, 86vw); }
-  body:not(.sidebar-open) .sidebar { display: none; }
+  .sidebar { display: none; position: fixed; inset: 0 auto 0 0; z-index: 4; width: min(260px, 86vw); }
+  body.sidebar-open .sidebar { display: flex; }
 }
 </style>
 """
@@ -749,35 +801,46 @@ def _login_page(code: str) -> str:
         "<label>Username <input name=\"username\" autocomplete=\"username\"></label>"
         "<label>Password <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>"
         f"<label>One-time code <input name=\"code\" value=\"{value}\"></label>"
-        "<button type=\"submit\">Sign in</button></form>"
+        "<button class=\"primary\" type=\"submit\">Sign in</button></form>"
         "<p><a href=\"/ui/signup\">Request an account</a></p>"
         "<p>The first admin is created on the host with <code>ssios user add --admin</code>. There is no default password.</p>"
         "</main></body></html>"
     )
 
 
-def _account_menu(session: dict) -> str:
+def _shell(session: dict, main: str, conversations: str = "") -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     account = session.get("account") if isinstance(session.get("account"), dict) else {}
     who = html.escape(str(account.get("username") or ""))
+    initial = html.escape((str(account.get("username") or "?")[:1] or "?").upper())
     admin = "<a href=\"/ui/admin\">Admin</a>" if account.get("role") == "admin" else ""
     return (
-        "<header class=\"top\"><a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
-        "<details class=\"account\"><summary>Signed in as " + who + "</summary>"
-        "<a href=\"/ui/connections\">Connections</a>"
-        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
-        "<a href=\"/ui/settings\">Settings</a>"
+        "<div class=\"app\"><aside id=\"sidebar\" class=\"sidebar\">"
+        "<a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
+        "<a class=\"new-chat\" href=\"/ui/chat\">New chat</a>"
+        + conversations
+        + "<details class=\"more\"><summary>More</summary>"
+        "<a href=\"/ui\">Console</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
+        "<a href=\"/ui/ingest\">Ingest</a><a href=\"/ui/summary\">Summary</a><a href=\"/ui/approvals\">Approvals</a>"
+        "</details><div class=\"dock\"><details><summary><span class=\"avatar\">"
+        + initial
+        + "</span>Signed in as "
+        + who
+        + "</summary><div class=\"popover\"><a href=\"/ui/connections\">Connections</a>"
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a><a href=\"/ui/settings\">Settings</a>"
         + admin
-        + "<a href=\"/ui/approvals\">Approvals</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
-        f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<button type=\"submit\">Sign out</button></form></details></header>"
+        + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button type=\"submit\">Sign out</button></form></div></details></div></aside>"
+        "<div class=\"stage\"><button type=\"button\" class=\"menu-btn\" id=\"sidebar-toggle\" aria-controls=\"sidebar\" aria-expanded=\"true\">Menu</button>"
+        + main
+        + "</div></div>"
     )
 
 
-def _page(session: dict, title: str, body: str, *, chat: bool = False) -> str:
-    shell = body if chat else f"<main><h1>{html.escape(title)}</h1>{body}</main>"
+def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "") -> str:
+    main = body if chat else f"<div class=\"page\"><h1>{html.escape(title)}</h1>{body}</div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _STYLE
-        + "<body>" + _account_menu(session) + shell + "</body></html>"
+        + "<body class=\"app-body\">" + _shell(session, main, conversations) + "</body></html>"
     )

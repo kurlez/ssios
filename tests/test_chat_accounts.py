@@ -1242,6 +1242,9 @@ class HouseholdTest(PlaneTest):
         self.assertIn("New chat", page)
         self.assertIn("Rename", page)
         self.assertIn("Delete", page)
+        self.assertIn("How can I help?", page)
+        self.assertIn("Message SSIOS", page)
+        self.assertIn("Enter to send, Shift+Enter for a new line", page)
         _status, owner_view = _get(self.base, "/ui/chat?conversation=" + conv, self.owner)
         self.assertNotIn("What is a microVM?", owner_view)
         status, renamed, _cookie = _form(
