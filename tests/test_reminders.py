@@ -130,3 +130,40 @@ class ReminderCommandTest(unittest.TestCase):
         self.assertNotIn("harbor", audit.casefold())
         self.assertNotIn("stretch", audit.casefold())
         self.assertNotIn("喝水", audit)
+
+
+class NoticeBadgeTest(unittest.TestCase):
+    def test_a_missed_reminder_stays_on_the_badge_after_restart(self) -> None:
+        from dataclasses import replace
+
+        from support import PlaneTest
+
+        from ssios.chat import iter_turn
+        from ssios.service import ControlPlane
+        from ssios.ui import NOTICES_PATH, _tasks
+
+        case = PlaneTest()
+        case.setUp()
+        self.addCleanup(case._stop)
+        self.addCleanup(case.tmp.cleanup)
+        zone = ZoneInfo("America/Los_Angeles")
+        case.plane.settings = replace(case.plane.settings, ui_time_zone="America/Los_Angeles")
+        case.plane.calendar_now = datetime(2026, 11, 10, 9, 0, tzinfo=zone)
+        account = case.plane.accounts.add_member("ada", "other-horse-stable")
+        events = list(iter_turn(case.plane, account, "明天早上9点提醒我喝水", "auto", "127.0.0.1"))
+        self.assertTrue(any(event.get("event") == "done" for event in events), events)
+        case.plane.calendar_now = datetime(2026, 11, 11, 9, 5, tzinfo=zone)
+        session_id, _csrf = case.plane.accounts.create_session(account["id"])
+        status, payload, _headers = case.call("GET", "/ui/notices", headers={"Cookie": f"ssios_session={session_id}"})
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(payload["count"], 1)
+        self.assertTrue(any("喝水" in item["text"] for item in payload["items"]))
+        page = _tasks(case.plane, {"account": account, "csrf": "csrf-test"})
+        self.assertIn('id="notice-count"', page)
+        self.assertIn(NOTICES_PATH, page)
+        restarted = ControlPlane(case.settings)
+        restarted.open()
+        again_status, again, _headers = case.call("GET", "/ui/notices", headers={"Cookie": f"ssios_session={session_id}"})
+        self.assertEqual(again_status, 200)
+        self.assertTrue(any("喝水" in item["text"] for item in again["items"]))
+        self.assertTrue(ReminderStore(case.plane.accounts.home(account["id"])).unseen())

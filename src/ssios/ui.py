@@ -77,6 +77,8 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return extra
     if method == "GET" and path == "/ui":
         return Page(200, _dashboard(plane, session))
+    if method == "GET" and path == "/ui/notices":
+        return _notices(plane, session)
     if method == "GET" and path == "/ui/tasks":
         return Page(200, _tasks(plane, session, query.get("status", "open")))
     if method == "POST" and path == "/ui/tasks":
@@ -366,6 +368,20 @@ def _account(session: dict) -> dict:
     if not isinstance(account, dict):
         raise SsiosError("unauthorized", "authentication required", 401)
     return account
+
+
+def _notices(plane, session: dict) -> Page:
+    from ssios.reminders import ReminderStore, sweep_accounts
+    from ssios.scope import AccountScope
+
+    sweep_accounts(plane)
+    scope = AccountScope(plane, _account(session))
+    items = [
+        {"text": str(item.get("text") or "")[:160], "due": str(item.get("due") or "")}
+        for item in ReminderStore(scope.home).unseen()
+    ]
+    payload = json.dumps({"count": len(items), "items": items[:10]}, ensure_ascii=False)
+    return Page(200, payload, content_type="application/json; charset=utf-8")
 
 
 def _tasks(plane, session: dict, status_filter: str = "open") -> str:
@@ -719,7 +735,8 @@ def _retry_approval(plane, session, scope, approval_id: str, peer_ip: str) -> Pa
     del peer_ip
     if not scope.has_approval(approval_id):
         raise SsiosError("not_found", "approval not found", 404)
-    record = scope.approvals().get(approval_id)
+    store = scope.approvals()
+    record = store.get(approval_id)
     if record.get("status") != "expired" or record.get("action") != "memory.commit":
         _log_approval(approval_id, "retry-rejected", record)
         return Page(200, _approval_status_page(plane, session, scope, approval_id, None))
@@ -729,8 +746,10 @@ def _retry_approval(plane, session, scope, approval_id: str, peer_ip: str) -> Pa
         return Page(200, _page(session, "Decided", "<p>Nothing to stage again.</p>"))
     fresh = scope.memory().propose(scope.project_id(), scope.memory().head(scope.project_id()), files, task_id="chat")
     approval = scope.create_memory_approval(fresh)
+    store = scope.approvals()
+    record = store.get(approval_id)
     record["status"] = "superseded"
-    scope.approvals().save()
+    store.save()
     _log_approval(approval_id, "retry", record)
     form = "<h2>New approval</h2>" + _decision_form(session, scope.approvals().get(approval["id"]))
     return Page(200, _approval_status_page(plane, session, scope, approval_id, None, form))
@@ -1151,6 +1170,7 @@ label { display: grid; gap: 4px; }
 form { display: grid; gap: 12px; }
 .goal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .goal-actions button { width: auto; }
+.badge { display: inline-block; min-width: 1.2em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: 12px; text-align: center; }
 pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .app { height: 100%; display: flex; min-height: 0; }
 .sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
@@ -1262,6 +1282,34 @@ def _asset_hash(text: str) -> str:
 
 
 STYLE_PATH = "/ui/assets/app-" + _asset_hash(APP_CSS) + ".css"
+NOTICES_JS = r"""
+(function () {
+  var count = document.getElementById("notice-count");
+  var banner = document.getElementById("notice-banner");
+  if (!count && !banner) return;
+  function paint(data) {
+    var n = Number(data && data.count) || 0;
+    var item = (data && data.items && data.items[0]) || {};
+    if (count) {
+      count.hidden = n < 1;
+      count.textContent = n ? String(n) : "";
+    }
+    if (banner) {
+      banner.hidden = n < 1;
+      banner.textContent = n ? ("Reminder: " + (item.text || "") + " was due " + (item.due || "")) : "";
+    }
+  }
+  function poll() {
+    fetch("/ui/notices", {headers: {"Accept": "application/json"}, credentials: "same-origin"})
+      .then(function (response) { return response.ok ? response.json() : {count: 0, items: []}; })
+      .then(paint)
+      .catch(function () {});
+  }
+  poll();
+  setInterval(poll, 15000);
+})();
+"""
+NOTICES_PATH = "/ui/assets/notices-" + _asset_hash(NOTICES_JS) + ".js"
 CONN_JS = """
 "use strict";
 document.querySelectorAll("[data-copy]").forEach(function (button) {
@@ -1289,6 +1337,8 @@ def _static_asset(method: str, path: str) -> Page | None:
         return None
     if path == STYLE_PATH:
         return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path == NOTICES_PATH:
+        return Page(200, NOTICES_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     if path.startswith("/ui/assets/chat-") and path.endswith(".js"):
         from ssios.ui_household import CHAT_JS, CHAT_PATH
 
@@ -1358,7 +1408,7 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         "<a href=\"/ui/connections\">Connections</a>"
         "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
         "<a href=\"/ui/vault\">Notes</a>"
-        "<a href=\"/ui/tasks\">Tasks</a>"
+        "<a href=\"/ui/tasks\">Tasks <span id=\"notice-count\" class=\"badge\" hidden></span></a>"
         "<a href=\"/ui/settings\">Settings</a>"
         + admin
         + "<p class=\"menu-label\">More</p>"
@@ -1366,7 +1416,8 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         "<a href=\"/ui/ingest\">Ingest</a><a href=\"/ui/summary\">Summary</a><a href=\"/ui/approvals\">Approvals</a>"
         + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button type=\"submit\">Sign out</button></form></div></details></div></aside>"
-        "<div class=\"stage\"><button type=\"button\" class=\"menu-btn\" id=\"sidebar-toggle\" aria-controls=\"sidebar\" aria-expanded=\"true\">Menu</button>"
+        "<div class=\"stage\"><p id=\"notice-banner\" class=\"notice\" hidden></p>"
+        "<button type=\"button\" class=\"menu-btn\" id=\"sidebar-toggle\" aria-controls=\"sidebar\" aria-expanded=\"true\">Menu</button>"
         + main
         + "</div></div>"
     )
@@ -1377,5 +1428,6 @@ def _page(session: dict, title: str, body: str, *, chat: bool = False, conversat
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _style_link()
-        + "<body class=\"app-body\">" + _shell(session, main, conversations) + "</body></html>"
+        + "<body class=\"app-body\">" + _shell(session, main, conversations)
+        + f"<script src=\"{NOTICES_PATH}\"></script></body></html>"
     )

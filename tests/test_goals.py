@@ -151,5 +151,50 @@ class GoalStoreTest(unittest.TestCase):
         self.assertNotIn("transfer funds", checklist)
 
 
+class GoalChatLoopTest(unittest.TestCase):
+    def test_a_tool_result_completes_the_goal_and_undo_reopens_it(self) -> None:
+        from datetime import timedelta
+
+        from support import PlaneTest
+
+        from ssios.chat import iter_turn
+        from ssios.goals import GoalStore, undo_goal
+        from ssios.reminders import ReminderStore
+
+        case = PlaneTest()
+        case.setUp()
+        self.addCleanup(case._stop)
+        self.addCleanup(case.tmp.cleanup)
+        account = case.plane.accounts.add_member("ada", "other-horse-stable")
+        scope = AccountScope(case.plane, account)
+        created = list(iter_turn(case.plane, account, "please call the harbor desk", "auto", "127.0.0.1"))
+        goal = next(event["data"] for event in created if event.get("event") == "goal" and event["data"].get("kind") == "added")
+        now = datetime(2026, 11, 12, 9, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+        ReminderStore(scope.home).add(
+            text="call the harbor desk",
+            phrase="synthetic",
+            due=now + timedelta(days=1),
+            zone_name="America/Los_Angeles",
+            created=now,
+            task_id=goal["id"],
+        )
+        finished = list(iter_turn(case.plane, account, "what do I have today please call the harbor desk", "auto", "127.0.0.1"))
+        self.assertTrue(any(event.get("event") == "goal" and event["data"].get("kind") == "completed" for event in finished))
+        self.assertEqual(GoalStore(scope.home).get(goal["id"])["status"], "done")
+        self.assertEqual(GoalStore(scope.home).get(goal["id"])["evidence"]["reason"], "tool result")
+        self.assertFalse(any(item.get("task_id") == goal["id"] and item.get("status") == "open" for item in ReminderStore(scope.home)._load()))
+        restored = undo_goal(scope, goal["id"], now, "127.0.0.1")
+        self.assertEqual(restored["status"], "open")
+        unrelated = list(iter_turn(case.plane, account, "what do I have today", "auto", "127.0.0.1"))
+        self.assertFalse(any(event.get("event") == "goal" and event["data"].get("kind") == "completed" for event in unrelated))
+        self.assertEqual(GoalStore(scope.home).get(goal["id"])["status"], "open")
+        list(iter_turn(case.plane, account, "Read https://example.com/notes", "auto", "127.0.0.1"))
+        self.assertEqual(GoalStore(scope.home).get(goal["id"])["status"], "open")
+        audit = (case.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("goal.complete", audit)
+        self.assertIn("goal.undo", audit)
+        self.assertNotIn("harbor desk", audit)
+
+
 if __name__ == "__main__":
     unittest.main()

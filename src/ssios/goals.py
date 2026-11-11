@@ -289,6 +289,9 @@ def apply_turn(scope, conversation_id: str, message_id: str, message: str, *, ev
             }
             store.append(updated, previous=current)
             _audit(scope, peer_ip, "goal.complete", updated["id"], "done")
+            from ssios.reminders import ReminderStore
+
+            ReminderStore(scope.home).cancel_for_task(updated["id"])
             chips.append({"kind": "completed", "id": updated["id"], "title": updated["title"]})
     if any(chip["kind"] in {"added", "completed"} for chip in chips):
         mirror_vault(scope, store.all())

@@ -1749,6 +1749,52 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("Chase", tomorrow)
         self.assertIn("Calendar is not connected.", tomorrow)
 
+    def test_expired_memory_approval_can_be_retried(self) -> None:
+        pending = self._send(self.ada, "remember the fixture code is QUAY")
+        self.assertIn("Nothing is written until you approve", pending)
+        approval = pending.split("/ui/approvals/", 1)[1].split('"', 1)[0]
+        path = self.plane.accounts.home(self._ada_id()) / "approvals.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["approvals"][approval]["expires_at"] = 1
+        path.write_text(json.dumps(data), encoding="utf-8")
+        status, expired, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + approval,
+            {
+                "csrf": pending.split('name="csrf" value="', 1)[1].split('"', 1)[0],
+                "decision": "approve",
+                "action": "memory.commit",
+                "payload_sha256": pending.split('name="payload_sha256" value="', 1)[1].split('"', 1)[0],
+                "expected_revision": pending.split('name="expected_revision" value="', 1)[1].split('"', 1)[0],
+                "bound_hash": pending.split('name="bound_hash" value="', 1)[1].split('"', 1)[0],
+            },
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, expired)
+        self.assertIn("Expired", expired)
+        self.assertIn(">Retry</button>", expired)
+        _status, before = _get(self.base, "/ui/memory", self.ada)
+        self.assertNotIn("QUAY", before)
+        status, retried, _cookie = _form(
+            self.base,
+            "/ui/approvals/" + approval,
+            {"csrf": self._csrf(self.ada), "decision": "retry"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 200, retried)
+        self.assertIn("New approval", retried)
+        self.assertIn("Superseded", retried)
+        approved = self._approve(self.ada, retried)
+        self.assertIn("Approved", approved)
+        self.assertIn("Saved to memory", approved)
+        import re
+
+        _status, after = _get(self.base, "/ui/memory", self.ada)
+        found = re.search(r'href="/ui/memory\?path=(topics/chat/[^"]+)"', after)
+        self.assertIsNotNone(found)
+        _status, note = _get(self.base, "/ui/memory?path=" + found.group(1), self.ada)
+        self.assertIn("QUAY", note)
+
     def test_explicit_goal_shows_a_chip_and_the_tasks_page(self) -> None:
         page = self._send(self.ada, "please call the harbor desk")
         self.assertIn("Added goal: call the harbor desk", page)

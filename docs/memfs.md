@@ -60,6 +60,10 @@ The core file list comes from `memory tokens`. Topic directories come from `MEMO
 
 Arguments that are explicitly rejected include `-p`, `--yolo`, `--permission-mode`, `--tools`, and `--disable-memory-guard`. There is therefore no full agent turn without a model. Creating an agent on the upstream local backend itself needs no account and no model call. That was verified on 0.34.45.
 
+## Chat memory
+
+Each account has a write mode in `memory-prefs.json`. The default is `approve`, so a chat fact waits on an approval card. `auto` writes the git commit immediately and keeps the previous file. The Undo button restores that file. The Memory page can edit or forget a note. A fact proposed by the local model is stored only when the user explicitly stated it and the value appears in that sentence. Text from a web page is not sent to the extractor.
+
 ## What is not done
 
 - `letta -p` is not run, and neither is any turn that would let the harness execute a shell

@@ -41,7 +41,7 @@ Chat:
 
 Completing or dropping a task cancels its pending reminders. A reminder firing does not complete the task. One-off reminders become `fired`. Repeating ones move to the next day or the next week.
 
-The host service checks reminders when it starts, on a timer while it is running, and when the Tasks page is opened. A reminder that was due while SSIOS was stopped is shown there on the next start. On macOS, the same moment can also raise a notification. On other systems the in-app notice is the delivery.
+The host service checks reminders when it starts, on a timer while it is running, and when the Tasks page is opened. A reminder that was due while SSIOS was stopped is shown there on the next start. Signed-in pages poll `/ui/notices` and show the count beside Tasks. On macOS, the same moment can also raise a notification. On other systems the in-app notice is the delivery.
 
 After a reminder is saved, SSIOS can offer a Google Calendar event. That offer is a write. It becomes an approval card, and nothing is created until the account approves it. If Calendar is not connected, SSIOS says so and does not invent an event.
 

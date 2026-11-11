@@ -52,6 +52,7 @@ class MemoryWriteTest(unittest.TestCase):
         events = list(iter_turn(self.case.plane, self.account, "remember that my name is Harbor", "auto", "127.0.0.1"))
         saved = "\n".join(str((event.get("data") or {}).get("text") or "") for event in events)
         self.assertIn("Saved to memory: human.md", saved)
+        self.assertNotIn("Synthetic local answer", saved)
         self.assertIn("- name: Harbor", self._human())
         undo = next(event["data"]["id"] for event in events if event.get("event") == "memory_undo")
         restore_memory(self.scope, undo, "127.0.0.1")
@@ -112,3 +113,12 @@ class MemoryWriteTest(unittest.TestCase):
         self.assertNotIn("human.md", self.scope.memory().list_markdown(self.scope.project_id()))
         listed = _memory(self.case.plane, self.session, "", "", "human")
         self.assertNotIn("Harbor", listed)
+
+    def test_a_saved_topic_is_loaded_by_keyword(self) -> None:
+        from ssios.account_memory import memory_context
+
+        set_write_mode(self.scope.home, "auto")
+        self._say("remember the harbor desk lamp")
+        text, used = memory_context(self.scope, "lamp")
+        self.assertTrue(any(item.startswith("topics/") for item in used))
+        self.assertIn("lamp", text.casefold())
