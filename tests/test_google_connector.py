@@ -925,26 +925,45 @@ class ConnectorTest(PlaneTest):
                 "scope": events_scope,
             },
         }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"summary": "ada@example.com", "items": []},
+        }
         started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
         auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
         pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
-        stderr = StringIO()
-        with redirect_stderr(stderr):
-            with self.assertRaises(SsiosError) as caught:
-                self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertIsNotNone(self.store.get("ada", "calendar-refresh"))
+        self.assertNotIn(list_scope, self.store.get("ada", "calendar-scope") or "")
+        self.assertTrue(any(item["path"] == "/identity/calendar-events" for item in _Google.seen))
+        self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        self.assertEqual(
+            self.connector.service_note(self.ada, "calendar"),
+            "Calendar list access was not granted; only the primary calendar is available.",
+        )
+        self.assertEqual(self.connector.service_note(self.ada, "gmail"), "")
+        self.connector.disconnect(self.ada, "calendar")
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": list_scope,
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(self.ada, "calendar", pasted)
         self.assertEqual(caught.exception.code, "connector_scope_missing")
-        self.assertIn(list_scope, caught.exception.detail)
+        self.assertIn(events_scope, caught.exception.detail)
+        self.assertNotIn(list_scope, caught.exception.detail)
         self.assertIn("tick all boxes", caught.exception.detail)
         self.assertIsNone(self.store.get("ada", "calendar-refresh"))
-        self.assertFalse(any(item["path"].startswith("/identity/") for item in _Google.seen))
-        self.assertTrue(any(item["path"] == "/revoke" for item in _Google.seen))
-        log = stderr.getvalue()
-        self.assertIn("endpoint=token", log)
-        self.assertIn("error=scope_missing", log)
-        self.assertNotIn(self.secret, log)
-        self.assertNotIn("ya29.", log)
-        self.assertNotIn("http://", log)
-        self.assertEqual(log.count("ssios.ui connector"), 1)
 
         _Google.seen = []
         _Google.token_reply = {

@@ -882,8 +882,8 @@ def _google_help_page(session) -> str:
         "The secret stays in the Keychain.</p>"
         "<ol class=\"help\"><li>Create an OAuth client of type Desktop app. Leave the project in Testing and add only your test user.</li>"
         "<li>Enable the Gmail API, the Drive API, and the Google Calendar API.</li>"
-        "<li>On the consent screen, add the read-only Gmail and Drive scopes, plus calendar.events and calendar.calendarlist.readonly. "
-        "Do not add the broad calendar scope.</li>"
+        "<li>On Data Access, add gmail.readonly, drive.readonly, and calendar.events. "
+        "calendar.calendarlist.readonly is optional. Do not add the broad calendar scope.</li>"
         "<li>Download the Desktop client JSON, or copy the client id and secret into the form. Do not put the secret in the config file.</li></ol>"
         "<p><a href=\"/ui/connections\">Back to Connections</a></p>"
     )
@@ -924,6 +924,10 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
             any_on = True
         state = "Connected" if connected else "Not connected"
         card_notice = notice if focus == name else ""
+        try:
+            limit_note = plane.google.service_note(own, name)
+        except SsiosError:
+            limit_note = ""
         if gate == "config":
             where = connector_config_location(plane.settings)
             reason = f"Disabled in config by the administrator. Edit {where} and add \"{name}\" to enabled."
@@ -969,6 +973,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
             "<article class=\"svc\"><span class=\"" + dot + "\"></span><div class=\"body\">"
             + "<div class=\"svc-head\"><div><h2>" + html.escape(name.title()) + "</h2>"
             "<p>" + html.escape(state) + "</p></div><div class=\"actions\">" + switch + button + "</div></div>"
+            + (f"<p class=\"hint\">{html.escape(limit_note)}</p>" if limit_note else "")
             + card_notice
             + consent
             + "</div></article>"

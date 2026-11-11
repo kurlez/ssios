@@ -598,7 +598,12 @@ class GoogleConnector:
                 extra = [part for part in granted.split() if part not in requested.split()]
                 if extra:
                     raise SsiosError("oauth_scope_widened", "token includes a scope that was not requested", 409)
-                missing = [part for part in requested.split() if part and part not in granted.split()]
+                optional = {"https://www.googleapis.com/auth/calendar.calendarlist.readonly"}
+                missing = [
+                    part
+                    for part in requested.split()
+                    if part and part not in granted.split() and part not in optional
+                ]
                 if missing:
                     from ssios.logsafe import log_upstream
 
@@ -708,11 +713,10 @@ class GoogleConnector:
             return base + "/drive/v3/about", {"fields": "user"}, "drive.about", needed
         list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
         events_scope = "https://www.googleapis.com/auth/calendar.events"
-        if list_scope in parts or events_scope not in parts:
-            needed = list_scope
+        if list_scope in parts:
             if local:
-                return f"{base}/identity/calendar-list", None, "calendar.list", needed
-            return base + "/calendar/v3/users/me/calendarList", {"maxResults": "100"}, "calendar.list", needed
+                return f"{base}/identity/calendar-list", None, "calendar.list", list_scope
+            return base + "/calendar/v3/users/me/calendarList", {"maxResults": "100"}, "calendar.list", list_scope
         if local:
             return f"{base}/identity/calendar-events", {"maxResults": "1"}, "calendar.events", events_scope
         return (
@@ -721,6 +725,18 @@ class GoogleConnector:
             "calendar.events",
             events_scope,
         )
+
+    def service_note(self, session: AccountSession, connector: str) -> str:
+        """A non-blocking note. Empty when the grant is complete."""
+        if connector != "calendar":
+            return ""
+        account_id = self._bind(session)
+        scope = self.store.get(account_id, "calendar-scope") or ""
+        if not scope:
+            return ""
+        if "https://www.googleapis.com/auth/calendar.calendarlist.readonly" in scope.split():
+            return ""
+        return "Calendar list access was not granted; only the primary calendar is available."
 
     def _revoke(self, account_id: str, refresh: str) -> bool:
         body = urllib.parse.urlencode(
