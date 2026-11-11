@@ -114,6 +114,12 @@ class McpHostTest(PlaneTest):
         )
         titles = [item["title"] for item in GoalStore(scope.home).open_goals()]
         self.assertEqual(titles, ["Call the harbor desk"])
+        session = ToolSession(self.plane, self.ada, "127.0.0.1")
+        for _ in range(6):
+            session.call("tasks.list", {})
+        with self.assertRaises(SsiosError) as caught:
+            session.call("tasks.list", {})
+        self.assertEqual(caught.exception.status, 429)
 
 
 def _post(path: Path, payload: dict) -> bytes:

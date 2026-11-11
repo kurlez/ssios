@@ -58,12 +58,15 @@ guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e3
 [agent.codex]
 # The provider name inside the guest config is fixed as ssios, not ollama. This field is only the model name.
 model = "qwen2.5-coder:7b"
-allow_models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
+allow_models = ["qwen2.5-coder:7b", "qwen2.5:7b", "llama3.1:8b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
 max_requests = 4
 max_request_bytes = 200000
 # Codex's system prompt plus tools is about 4098 tokens. Ollama's /v1/responses ignores request options and keeps the 4096 default.
 # The proxy uses native /api/chat and sends options.num_ctx. Installed models are not modified. A 7B model on a 24GB M4 uses 16384, with a maximum of 32768.
 num_ctx = 16384
+# One plan, then at most this many tool calls. The turn stops at the timeout.
+step_limit = 6
+turn_timeout_seconds = 180
 
 [limits]
 task_timeout_seconds = 30

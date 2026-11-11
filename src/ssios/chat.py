@@ -354,9 +354,19 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
 
     session = ToolSession(plane, scope.account, peer_ip)
     cancel = threading.Event()
+    finished = threading.Event()
     if not hasattr(plane, "_codex_cancel"):
         plane._codex_cancel = {}
     plane._codex_cancel[conversation_id] = cancel
+    limit = float(getattr(plane.settings, "codex_turn_timeout_seconds", 180) or 180)
+    stop_reason = {"why": ""}
+
+    def _watch() -> None:
+        if not finished.wait(limit):
+            stop_reason["why"] = "timeout"
+            cancel.set()
+
+    threading.Thread(target=_watch, daemon=True).start()
     request = ChatGuestRequest(
         account_id=scope.account_id,
         account_home=scope.home,
@@ -380,6 +390,7 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         except Exception as exc:
             box.put(("error", SsiosError("microvm_fail_closed", f"The guest stopped because of {exc.__class__.__name__}.", 503)))
         finally:
+            finished.set()
             box.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -397,7 +408,12 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         else:
             error = payload
     plane._codex_cancel.pop(conversation_id, None)
-    if cancel.is_set() or (isinstance(error, SsiosError) and error.code == "cancelled"):
+    if stop_reason["why"] == "timeout" or (cancel.is_set() and not (isinstance(error, SsiosError) and error.code == "cancelled")):
+        text = "The Codex turn reached its time limit."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    if isinstance(error, SsiosError) and error.code == "cancelled":
         text = "Cancelled. A pending approval that was already created stays pending."
         scope.chat().append(conversation_id, {"role": "assistant", "text": text})
         yield {"event": "outcome", "data": {"text": text}}

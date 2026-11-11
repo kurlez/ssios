@@ -65,6 +65,8 @@ class Settings:
     skills_vault_dir: str
     ui_bind: str
     ui_time_zone: str
+    codex_step_limit: int
+    codex_turn_timeout_seconds: float
     state_dir: Path
     config_path: Path | None
 
@@ -175,6 +177,10 @@ def load_settings(
     codex_num_ctx = int(codex.get("num_ctx", 16384))
     if not 8192 <= codex_num_ctx <= 32768:
         raise SsiosError("config_invalid", "agent.codex num_ctx must be from 8192 to 32768", 500)
+    codex_step_limit = int(codex.get("step_limit", 6))
+    codex_turn_timeout_seconds = float(codex.get("turn_timeout_seconds", 180))
+    if not 1 <= codex_step_limit <= 12 or not 5 <= codex_turn_timeout_seconds <= 600:
+        raise SsiosError("config_invalid", "codex step limit or turn timeout is out of range", 500)
     connectors = _section(data, "connectors")
     raw_enabled = connectors.get("enabled", [])
     if raw_enabled is None:
@@ -272,6 +278,8 @@ def load_settings(
         skills_vault_dir=skills_vault_dir,
         ui_bind=ui_bind,
         ui_time_zone=ui_time_zone,
+        codex_step_limit=codex_step_limit,
+        codex_turn_timeout_seconds=codex_turn_timeout_seconds,
         state_dir=state_path,
         config_path=config_path,
     )

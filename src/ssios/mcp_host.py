@@ -75,6 +75,9 @@ class ToolSession:
         self.results: list[dict] = []
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
+        limit = int(getattr(getattr(self.plane, "settings", None), "codex_step_limit", 6) or 6)
+        if len(self.results) >= limit:
+            raise SsiosError("mcp_tool_denied", "The step limit for this turn is reached.", 429)
         result = call_tool(self.plane, self.account, name, arguments or {}, self.peer_ip, len(self.results) + 1)
         self.results.append(result)
         return result

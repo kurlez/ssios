@@ -156,3 +156,32 @@ class CodexTurnTest(PlaneTest):
         thread.join(4)
         self.assertIn("Cancelled", box["result"][1])
         self.assertNotIn("should have stopped", box["result"][1])
+
+    def test_a_turn_stops_at_the_configured_time_limit(self) -> None:
+        import time
+        from dataclasses import replace
+
+        class _Slow:
+            orchestrator_ready = True
+
+            def run(self, plane, request, on_status):
+                del plane
+                on_status({"phase": "planning", "backend": "stub"})
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if request.cancel is not None and request.cancel.is_set():
+                        return {"text": "stopped", "isolated": True, "boot_ms": 1, "backend": "stub", "checks": {}}
+                    time.sleep(0.02)
+                return {"text": "too late", "isolated": True, "boot_ms": 1, "backend": "stub", "checks": {}}
+
+        self.plane.settings = replace(self.plane.settings, codex_turn_timeout_seconds=0.05)
+        self.plane.chat_guest = _Slow()
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(), "message": "今天天气怎么样"},
+            cookie=self.cookie,
+        )
+        self.assertEqual(status, 200, page)
+        self.assertIn("time limit", page)
+        self.assertNotIn("too late", page)
