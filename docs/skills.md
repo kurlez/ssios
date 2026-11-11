@@ -1,6 +1,6 @@
 # Web skills
 
-Web skills read the public internet on the computer that runs SSIOS. The guest stays offline. The model does not get a socket. The same host broker used for Google connectors performs every request.
+Web skills read the public internet on the computer that runs SSIOS. The guest stays offline. The model does not get a socket. The same host broker used for Google connectors performs every request. A page you are already reading can be sent from your browser; see [clipper.md](clipper.md).
 
 Skills are declarative files under `skills/<name>/`:
 

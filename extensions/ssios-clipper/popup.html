@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Send to SSIOS</title>
+<style>
+  body { font: 14px sans-serif; width: 280px; margin: 12px; }
+  label { display: block; margin: 8px 0; }
+  input { width: 100%; }
+  button { margin-top: 8px; }
+</style>
+<body>
+<h1>Send to SSIOS</h1>
+<label>SSIOS address <input id="base" placeholder="https://127.0.0.1:8443"></label>
+<label>Clip token <input id="token" type="password" autocomplete="off"></label>
+<button id="save" type="button">Save</button>
+<button id="send" type="button">Send this page</button>
+<p id="status"></p>
+<script src="popup.js"></script>
+</body>
+</html>

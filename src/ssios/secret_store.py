@@ -9,6 +9,7 @@ If ``keyring`` is missing or has no backend, the store refuses to open.
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from ssios.errors import SsiosError
@@ -71,6 +72,8 @@ class SecretStore(Protocol):
 
 
 def _accept(name: str, value: str) -> None:
+    if re.fullmatch(r"site-[0-9a-f]{16}", name) and isinstance(value, str) and 0 < len(value) <= 4000:
+        return
     if name not in SECRET_NAMES or not isinstance(value, str) or not value:
         raise SsiosError("secret_rejected", "secret name rejected", 400)
 

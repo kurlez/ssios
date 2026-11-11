@@ -34,6 +34,7 @@ class Page:
         content_type: str = "text/html; charset=utf-8",
         location: str | None = None,
         cache_control: str | None = None,
+        extra_headers: dict | None = None,
     ) -> None:
         self.status = status
         self.body = body
@@ -43,12 +44,15 @@ class Page:
         self.content_type = content_type
         self.location = location
         self.cache_control = cache_control
+        self.extra_headers = dict(extra_headers or {})
 
 
 def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
     parts = urlsplit(target)
     path = parts.path.rstrip("/") or "/ui"
     query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
+    if path == "/ui/clip":
+        return _browser_clip(plane, method, headers, body, peer_ip)
     rejected = _check_origin(plane, headers, method)
     if rejected is not None:
         return rejected
@@ -111,8 +115,16 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "POST" and path == "/ui/settings":
         _csrf(session, body)
         return _settings_post(plane, session, body)
+    if method == "GET" and path == "/ui/clipper":
+        return Page(200, _clipper_page(plane, session, ""))
+    if method == "POST" and path == "/ui/clipper":
+        _csrf(session, body)
+        return _clipper_post(plane, session, body)
     if method == "GET" and path == "/ui/vault":
         return Page(200, _vault_page(plane, session, ""))
+    if method == "POST" and path == "/ui/vault":
+        _csrf(session, body)
+        return _vault_paste(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/vault/note":
         return Page(200, _vault_note(plane, session, str(query.get("path") or "")))
     if method == "GET" and path == "/ui/vault/asset":
@@ -1031,7 +1043,14 @@ def _vault_page(plane, session: dict, notice: str) -> str:
         title = html.escape(item["title"])
         source = html.escape(item.get("source") or "")
         items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
-    body = notice + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
+    csrf = html.escape(str(session.get("csrf") or ""))
+    paste = (
+        f"<form method=\"post\" action=\"/ui/vault\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Source URL <input name=\"url\" placeholder=\"https://example.com/story\"></label>"
+        "<label>Pasted article <textarea name=\"content\" rows=\"6\"></textarea></label>"
+        "<button type=\"submit\">Clip pasted article</button></form>"
+    )
+    body = notice + paste + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
     return _page(session, "Notes", body)
 
 
@@ -1058,11 +1077,111 @@ def _vault_note(plane, session: dict, rel: str) -> str:
     return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
 
 
+def _vault_paste(plane, session: dict, body: dict, peer_ip: str) -> Page:
+    from ssios.clipper import clip_from_browser
+    from ssios.scope import AccountScope
+
+    url = str(body.get("url") or "")
+    content = str(body.get("content") or "")
+    result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    if result.get("status") == "saved":
+        return Page(200, _vault_page(plane, session, f"<p>Saved the clip to {html.escape(str(result.get('path') or ''))}.</p>"))
+    scope = AccountScope(plane, session["account"])
+    record = scope.approvals().get(str(result.get("approval_id") or ""))
+    note = "This page looks truncated or paywalled. " if result.get("truncated") else ""
+    return Page(200, _page(session, "Notes", f"<p>{note}Waiting for your approval. Nothing is written until you approve it.</p>" + _decision_form(session, record)))
+
+
 def _vault_asset(plane, session: dict, rel: str) -> Page:
     from ssios.vault import read_asset
 
     data, content_type = read_asset(plane.settings, session["account"]["id"], rel)
     return Page(200, data, content_type=content_type)
+
+
+_CLIP_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "content-type, x-ssios-clip-token",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+}
+
+
+def _browser_clip(plane, method: str, headers, body: dict, peer_ip: str) -> Page:
+    from ssios.clipper import account_for_token, clip_from_browser
+
+    if method == "OPTIONS":
+        return Page(204, "", content_type="text/plain; charset=utf-8", extra_headers=_CLIP_HEADERS)
+    if method != "POST":
+        raise SsiosError("method_not_allowed", "method rejected", 405)
+    token = ""
+    if headers is not None:
+        token = str(headers.get("X-SSIOS-Clip-Token") or "")
+    account_id = account_for_token(plane, token)
+    result = clip_from_browser(plane, account_id, body, peer_ip)
+    return Page(200, json.dumps(result), content_type="application/json; charset=utf-8", extra_headers=_CLIP_HEADERS)
+
+
+def _clipper_page(plane, session: dict, notice: str, token: str = "") -> str:
+    from ssios.clipper import token_status
+    from ssios.site_session import list_sessions
+
+    account_id = session["account"]["id"]
+    csrf = html.escape(str(session.get("csrf") or ""))
+    status = token_status(plane, account_id)
+    shown = f"<p><code>{html.escape(token)}</code></p><p>Copy this token now. It is not shown again.</p>" if token else ""
+    rows = []
+    for item in list_sessions(plane, account_id):
+        rows.append(
+            f"<li>{html.escape(item['domain'])} last used {html.escape(item['last_used'] or 'never')} "
+            f"expires {html.escape(item['expires'])} "
+            f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"domain\" value=\"{html.escape(item['domain'])}\">"
+            "<button name=\"op\" value=\"delete-site\" type=\"submit\">Delete</button></form></li>"
+        )
+    body = (
+        notice
+        + "<h2>Clip token</h2>"
+        + f"<p>Status: {html.escape(status)}. The browser sends this token in a header. The session cookie is not used.</p>"
+        + shown
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"issue\" type=\"submit\">Generate token</button> "
+        "<button name=\"op\" value=\"revoke\" type=\"submit\">Revoke</button></form>"
+        + "<p><a href=\"/ui/clipper\">Install notes are in docs/clipper.md</a></p>"
+        + "<h2>Site sessions</h2>"
+        + "<p>Off until you add a domain. The cookie stays in the OS secret store. SSIOS does not store the cookie in its files, and it does not store a password.</p>"
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Domain <input name=\"domain\" placeholder=\"nytimes.com\"></label>"
+        "<label>Cookie header <textarea name=\"cookie\" rows=\"3\"></textarea></label>"
+        "<button name=\"op\" value=\"save-site\" type=\"submit\">Save site session</button></form>"
+        + "<ul>" + ("".join(rows) or "<li>No site sessions.</li>") + "</ul>"
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"undo-clip\" type=\"submit\">Undo last auto clip</button></form>"
+    )
+    return _page(session, "Clipper", body)
+
+
+def _clipper_post(plane, session: dict, body: dict) -> Page:
+    from ssios.clipper import issue_token, revoke_token, undo_last_clip
+    from ssios.site_session import delete_session, save_session
+
+    account_id = session["account"]["id"]
+    op = str(body.get("op") or "")
+    if op == "issue":
+        token = issue_token(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "", token))
+    if op == "revoke":
+        revoke_token(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "<p>Token revoked.</p>"))
+    if op == "save-site":
+        save_session(plane, account_id, str(body.get("domain") or ""), str(body.get("cookie") or ""))
+        return Page(200, _clipper_page(plane, session, "<p>Site session saved. The cookie was not written to disk.</p>"))
+    if op == "delete-site":
+        delete_session(plane, account_id, str(body.get("domain") or ""))
+        return Page(200, _clipper_page(plane, session, "<p>Site session deleted.</p>"))
+    if op == "undo-clip":
+        undo_last_clip(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "<p>The last auto clip was removed.</p>"))
+    raise SsiosError("skill_denied", "clip action rejected", 400)
 
 
 def _settings(plane, session: dict) -> str:
@@ -1098,6 +1217,7 @@ def _settings(plane, session: dict) -> str:
         f"<input type=\"hidden\" name=\"auto_save\" value=\"{'off' if prefs.get('auto_save') else 'on'}\">"
         f"<button type=\"submit\">{'Turn auto-save off' if prefs.get('auto_save') else 'Turn auto-save on'}</button></form>"
         "<p>Auto-save is off by default. A clip is written to your vault only after you approve it.</p>"
+        "<p><a href=\"/ui/clipper\">Browser clipper</a></p>"
         f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         f"<label>Time zone <input name=\"time_zone\" value=\"{html.escape(str((plane.accounts.users.get(session['account']['id']) or {}).get('time_zone') or ''))}\" placeholder=\"America/Los_Angeles\"></label> "
         "<button type=\"submit\">Save time zone</button></form>"

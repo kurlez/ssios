@@ -77,6 +77,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def do_OPTIONS(self) -> None:
+        path = urlsplit(self.path).path.rstrip("/")
+        if path == "/ui/clip":
+            self.send_response(204)
+            self._cors_clip()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self._send(403, {"error": "cors_denied", "detail": "browser origins are rejected"})
 
     def log_message(self, fmt: str, *args) -> None:
@@ -194,10 +201,18 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
+        for key, value in (getattr(page, "extra_headers", None) or {}).items():
+            self.send_header(str(key), str(value))
         for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
             self.send_header("Set-Cookie", item)
         self.end_headers()
         self.wfile.write(data)
+
+    def _cors_clip(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type, x-ssios-clip-token")
+        self.send_header("Access-Control-Max-Age", "600")
 
     def _browser_failure(self, exc: SsiosError) -> Page:
         from ssios.chat import public_error

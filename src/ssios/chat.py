@@ -233,7 +233,7 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     if not isinstance(clip, dict):
         return
     prefs = plane.skills.account_prefs(scope.account_id)
-    if prefs.get("auto_save"):
+    if prefs.get("auto_save") and not clip.get("truncated"):
         saved = plane.skills.commit_clip(
             scope.account_id,
             clip["markdown"],
@@ -251,7 +251,10 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
             payload=clip["markdown"].encode("utf-8"),
             meta={"path": clip["relpath"], "title": clip["title"], "staging": clip["staging"], "expected_revision": "vault"},
         )
-        preview = "Save this clip to your vault.\n\n" + clip["title"] + "\n" + clip["relpath"] + "\nNothing is written until you approve it."
+        warning = ""
+        if clip.get("truncated"):
+            warning = "This page looks truncated or paywalled. Approve only if you still want to save the partial clip.\n"
+        preview = warning + "Save this clip to your vault.\n\n" + clip["title"] + "\n" + clip["relpath"] + "\nNothing is written until you approve it."
         scope.chat().append(conversation_id, {"role": "assistant", "text": preview, "approval_id": approval["id"]})
         yield _approval_event(approval, preview)
 
@@ -1328,7 +1331,7 @@ def failure_hint(code: str) -> str:
         "skill_ssrf": "That address is not a public web site. Nothing was fetched.",
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
-        "skill_upstream": "The site could not be read. Nothing was changed.",
+        "skill_upstream": "The site may block automated readers. Try a public or syndicated copy, or paste the text or HTML so it can be clipped.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
         "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",
         "connector_scope_missing": "Reconnect and grant the requested access. Nothing was invented.",
