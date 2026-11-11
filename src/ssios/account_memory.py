@@ -8,7 +8,9 @@ does not start unless that CLI is installed.
 
 from __future__ import annotations
 
+import json
 import re
+import secrets
 from datetime import datetime, timedelta
 
 from ssios.errors import SsiosError
@@ -74,6 +76,119 @@ def memory_context(scope, query: str = "") -> tuple[str, list[str]]:
                 break
     scope._last_memory_files = list(used)
     return "\n\n".join(parts)[:4000], used
+
+
+_STATEMENT = re.compile(
+    r"\b(my name is|i am called|i prefer|i like|i live in|i work at|i use)\b|我叫|我的名字是|我喜欢|我偏好|我住在",
+    re.IGNORECASE,
+)
+
+
+def collect_facts(message: str, llm=None) -> list[dict]:
+    """Regex facts plus a validated model extract. Only the user message is passed in."""
+    facts = explicit_facts(message)
+    seen = {(item["path"], item["key"]) for item in facts}
+    for item in model_facts(message, llm):
+        key = (item["path"], item["key"])
+        if key in seen:
+            continue
+        facts.append(item)
+        seen.add(key)
+    return facts
+
+
+def model_facts(message: str, llm) -> list[dict]:
+    """Structured extract. A value is kept only when the user explicitly stated it."""
+    text = " ".join(str(message or "").split())
+    if llm is None or not _STATEMENT.search(text):
+        return []
+    if getattr(llm, "provider", "") == "mock" and not getattr(llm, "fact_script", None):
+        return []
+    raw = _ask_facts(llm, text)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    items = data.get("facts") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return _validate_facts(text, items)
+
+
+def _ask_facts(llm, text: str) -> str:
+    import threading
+    import time
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "FACT-EXTRACT. Return JSON only: "
+                '{"facts":[{"path":"human.md or preferences.md","key":"short","value":"words from the user"}]}. '
+                "Include a fact only when this message explicitly states it. Otherwise return {\"facts\":[]}."
+            ),
+        },
+        {"role": "user", "content": text[:1000]},
+    ]
+    try:
+        return str(llm.complete_chat(messages, cancel_event=threading.Event(), deadline=time.monotonic() + 8))
+    except (SsiosError, OSError, TypeError, ValueError):
+        return ""
+
+
+def _validate_facts(message: str, items: list) -> list[dict]:
+    folded = message.casefold()
+    kept = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        key = str(item.get("key") or "")
+        value = " ".join(str(item.get("value") or "").split())
+        if path not in {"human.md", "preferences.md"}:
+            continue
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}", key):
+            continue
+        if not 2 <= len(value) <= 80 or value.casefold() not in folded:
+            continue
+        kept.append({"path": path, "key": key, "value": value})
+    return kept
+
+
+def snapshot_files(scope, paths: list[str]) -> list[dict]:
+    store = scope.memory()
+    project = scope.project_id()
+    return [{"path": path, "content": _read(store, project, path)} for path in paths]
+
+
+def push_undo(home, files: list[dict]) -> str:
+    data = read_json(home / "memory-undo.json", {"items": []})
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        items = []
+    undo_id = "memu-" + secrets.token_hex(4)
+    items.append({"id": undo_id, "files": files})
+    write_json(home / "memory-undo.json", {"items": items[-20:]})
+    return undo_id
+
+
+def take_undo(home, undo_id: str) -> list[dict] | None:
+    data = read_json(home / "memory-undo.json", {"items": []})
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return None
+    found = None
+    rest = []
+    for item in items:
+        if isinstance(item, dict) and item.get("id") == undo_id and found is None:
+            found = item
+        else:
+            rest.append(item)
+    if found is None:
+        return None
+    write_json(home / "memory-undo.json", {"items": rest})
+    files = found.get("files") if isinstance(found.get("files"), list) else []
+    return [item for item in files if isinstance(item, dict) and item.get("path")]
 
 
 def explicit_facts(message: str) -> list[dict]:

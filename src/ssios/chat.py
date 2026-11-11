@@ -421,7 +421,7 @@ def _offer_calendar(scope, conversation_id: str, item: dict, zone_name: str) -> 
 
 
 def _memory(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str = "127.0.0.1") -> Iterator[dict]:
-    from ssios.account_memory import explicit_facts, files_for_facts, note_document
+    from ssios.account_memory import files_for_facts, note_document
     from ssios.calendar_intent import account_zone
     from ssios.reminders import ReminderStore, capture_due, reminder_text, saved_line, wants_forget
 
@@ -446,7 +446,9 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str, peer
         yield {"event": "results", "data": {"text": line, "blocks": [_reminder_block(item, line)], "reply": ""}}
         plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="reminder.create", target=item["id"], result="ok")
         return
-    facts = explicit_facts(message)
+    from ssios.account_memory import collect_facts
+
+    facts = collect_facts(message, plane.llm)
     files = files_for_facts(scope, facts)
     if not files:
         files = [note_document(reminder_text(message), now)]
@@ -469,20 +471,24 @@ def _forget_is_not_here(scope, needle: str) -> list[dict]:
 
 def _propose_explicit(plane, scope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
     """Stage facts the user stated. Connector and web text never reach this function."""
-    from ssios.account_memory import explicit_facts, files_for_facts
+    from ssios.account_memory import collect_facts, files_for_facts
 
-    del plane
-    files = files_for_facts(scope, explicit_facts(message))
+    files = files_for_facts(scope, collect_facts(message, plane.llm))
     if not files:
         return
     yield from _propose_files(scope, conversation_id, files, peer_ip, forget=False)
 
 
 def _propose_files(scope, conversation_id: str, files: list[dict], peer_ip: str, *, forget: bool) -> Iterator[dict]:
+    from ssios.account_memory import write_mode
+
     if not files:
         text = "No matching memory file was found. Nothing was changed."
         scope.chat().append(conversation_id, {"role": "assistant", "text": text})
         yield {"event": "outcome", "data": {"text": text}}
+        return
+    if write_mode(scope.home) == "auto" and not forget:
+        yield from _auto_commit(scope, conversation_id, files, peer_ip)
         return
     store = scope.memory()
     proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
@@ -491,6 +497,103 @@ def _propose_files(scope, conversation_id: str, files: list[dict], peer_ip: str,
     scope.chat().append(conversation_id, {"role": "assistant", "text": "Memory is staged. It is not written until you approve it.", "approval_id": approval["id"]})
     yield _approval_event(approval, preview)
     del peer_ip, forget
+
+
+def _auto_commit(scope, conversation_id: str, files: list[dict], peer_ip: str) -> Iterator[dict]:
+    """Write immediately and keep the previous bytes so the account can undo."""
+    from ssios.account_memory import push_undo, snapshot_files
+
+    before = snapshot_files(scope, [str(item["path"]) for item in files])
+    store = scope.memory()
+    proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
+    approval = scope.create_memory_approval(proposal)
+    record = scope.approvals().get(approval["id"])
+    scope.decide(
+        approval["id"],
+        {
+            "decision": "approve",
+            "action": record["action"],
+            "payload_sha256": record["payload_sha256"],
+            "expected_revision": record["expected_revision"],
+            "bound_hash": record["bound_hash"],
+        },
+        peer_ip,
+    )
+    undo_id = push_undo(scope.home, before)
+    paths = ", ".join(str(item["path"]) for item in files)
+    text = "Saved to memory: " + paths + "."
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+    scope.plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="memory.auto", target=undo_id, result="ok")
+    yield {"event": "outcome", "data": {"text": text}}
+    yield {"event": "memory_undo", "data": {"id": undo_id, "paths": paths}}
+
+
+def apply_memory_change(scope, files: list[dict], peer_ip: str, *, forget_path: str = "") -> dict:
+    """Panel save or forget. Auto mode writes now. Approve mode returns a pending approval."""
+    from ssios.account_memory import push_undo, snapshot_files, write_mode
+
+    store = scope.memory()
+    head = store.head(scope.project_id())
+    if forget_path:
+        proposal = store.propose_forget(scope.project_id(), head, forget_path, task_id="chat")
+        paths = [forget_path]
+    else:
+        proposal = store.propose(scope.project_id(), head, files, task_id="chat")
+        paths = [str(item["path"]) for item in files]
+    approval = scope.create_memory_approval(proposal)
+    if write_mode(scope.home) != "auto":
+        return {"status": "pending", "approval": approval, "paths": paths}
+    before = snapshot_files(scope, paths)
+    record = scope.approvals().get(approval["id"])
+    scope.decide(
+        approval["id"],
+        {
+            "decision": "approve",
+            "action": record["action"],
+            "payload_sha256": record["payload_sha256"],
+            "expected_revision": record["expected_revision"],
+            "bound_hash": record["bound_hash"],
+        },
+        peer_ip,
+    )
+    undo_id = push_undo(scope.home, before)
+    scope.plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="memory.auto", target=undo_id, result="ok")
+    return {"status": "saved", "undo_id": undo_id, "paths": paths}
+
+
+def restore_memory(scope, undo_id: str, peer_ip: str) -> str:
+    from ssios.account_memory import take_undo
+
+    files = take_undo(scope.home, undo_id)
+    if files is None:
+        raise SsiosError("not_found", "memory undo not found", 404)
+    store = scope.memory()
+    project = scope.project_id()
+    restored = []
+    for item in files:
+        path = str(item.get("path") or "")
+        content = str(item.get("content") or "")
+        head = store.head(project)
+        if content:
+            proposal = store.propose(project, head, [{"path": path, "content": content}], task_id="chat")
+        else:
+            proposal = store.propose_forget(project, head, path, task_id="chat")
+        approval = scope.create_memory_approval(proposal)
+        record = scope.approvals().get(approval["id"])
+        scope.decide(
+            approval["id"],
+            {
+                "decision": "approve",
+                "action": record["action"],
+                "payload_sha256": record["payload_sha256"],
+                "expected_revision": record["expected_revision"],
+                "bound_hash": record["bound_hash"],
+            },
+            peer_ip,
+        )
+        restored.append(path)
+    scope.plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="memory.undo", target=undo_id, result="ok")
+    return ", ".join(restored)
 
 
 def _schedule(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:

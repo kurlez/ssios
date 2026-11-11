@@ -101,6 +101,9 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return _summary_post(plane, session, body)
     if method == "GET" and path == "/ui/memory":
         return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", ""), query.get("q", "")))
+    if method == "POST" and path == "/ui/memory":
+        _csrf(session, body)
+        return _memory_post(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/settings":
         return Page(200, _settings(plane, session))
     if method == "POST" and path == "/ui/settings":
@@ -909,7 +912,26 @@ def _memory(plane, session: dict, project_id: str, path: str, query_text: str = 
             f"<form method=\"get\" action=\"/ui/memory\"><label>Search <input name=\"q\" value=\"{safe_q}\"></label>"
             "<button type=\"submit\">Search</button></form>"
         )
-        return _page(session, "Memory", search + f"<ul>{links}</ul>{content}")
+        from ssios.account_memory import write_mode
+
+        mode = write_mode(scope.home)
+        mode_form = (
+            f"<form method=\"post\" action=\"/ui/memory\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session.get('csrf') or ''))}\">"
+            f"<label>Memory writes <select name=\"mode\"><option {'selected' if mode == 'approve' else ''}>approve</option>"
+            f"<option {'selected' if mode == 'auto' else ''}>auto</option></select></label>"
+            "<button name=\"op\" value=\"mode\" type=\"submit\">Save</button></form>"
+        )
+        editor = ""
+        if path and path in paths:
+            raw = str(doc.get("content") or "")
+            editor = (
+                f"<form method=\"post\" action=\"/ui/memory\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session.get('csrf') or ''))}\">"
+                f"<input type=\"hidden\" name=\"path\" value=\"{html.escape(path)}\">"
+                f"<label>Edit <textarea name=\"content\" rows=\"10\">{html.escape(raw)}</textarea></label>"
+                "<button name=\"op\" value=\"save\" type=\"submit\">Save</button> "
+                "<button name=\"op\" value=\"forget\" type=\"submit\">Forget</button></form>"
+            )
+        return _page(session, "Memory", mode_form + search + f"<ul>{links}</ul>{content}{editor}")
     paths = plane.memory.list_markdown(project_id) if not plane._uses_upstream() else plane.upstream.list_markdown(project_id)
     links = "".join(
         f"<li><a href=\"/ui/memory?project_id={html.escape(project_id)}&path={html.escape(item)}\">{html.escape(item)}</a></li>"
@@ -920,6 +942,42 @@ def _memory(plane, session: dict, project_id: str, path: str, query_text: str = 
         doc = plane.read_memory(_human(plane), project_id, path)
         content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>" + _history(plane, project_id, path)
     return _page(session, "Memory", f"<ul>{links}</ul>{content}")
+
+
+def _memory_post(plane, session, body: dict, peer_ip: str) -> Page:
+    from ssios.account_memory import set_write_mode
+    from ssios.chat import apply_memory_change, restore_memory
+    from ssios.memory_store import validate_document
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    if account.get("legacy_owner"):
+        raise SsiosError("forbidden", "use the account memory page", 403)
+    scope = AccountScope(plane, account)
+    op = str(body.get("op") or "")
+    if op == "mode":
+        set_write_mode(scope.home, str(body.get("mode") or "approve"))
+        return Page(200, _memory(plane, session, scope.project_id(), "", ""))
+    if op == "undo":
+        restore_memory(scope, str(body.get("id") or ""), peer_ip)
+        return Page(200, _memory(plane, session, scope.project_id(), "", ""))
+    path = str(body.get("path") or "")
+    known = scope.memory().list_markdown(scope.project_id())
+    if path not in known:
+        raise SsiosError("path_rejected", "memory path rejected", 400)
+    if op == "forget":
+        result = apply_memory_change(scope, [], peer_ip, forget_path=path)
+    elif op == "save":
+        content = str(body.get("content") or "")
+        validate_document(path, content)
+        result = apply_memory_change(scope, [{"path": path, "content": content}], peer_ip)
+    else:
+        raise SsiosError("memory_invalid", "memory action rejected", 400)
+    if result["status"] == "pending":
+        approval = scope.approvals().get(result["approval"]["id"])
+        form = "<h2>Approve this memory change</h2>" + _decision_form(session, approval)
+        return Page(200, _page(session, "Memory", form))
+    return Page(200, _memory(plane, session, scope.project_id(), path, ""))
 
 
 def _account_history(scope, project_id: str, path: str) -> str:

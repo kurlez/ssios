@@ -830,6 +830,15 @@ def _events_html(session, events: list[dict]) -> str:
             parts.append(_approval_card(session, data))
         elif name == "goal":
             parts.append(_goal_chip(session, data))
+        elif name == "memory_undo":
+            csrf = html.escape(str(session.get("csrf") or ""))
+            undo_id = html.escape(str(data.get("id") or ""))
+            paths = html.escape(str(data.get("paths") or ""))
+            parts.append(
+                f"<form method=\"post\" action=\"/ui/memory\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"op\" value=\"undo\"><input type=\"hidden\" name=\"id\" value=\"{undo_id}\">"
+                f"<button type=\"submit\">Undo memory save ({paths})</button></form>"
+            )
         elif name == "memory":
             names = ", ".join(str(item) for item in (data.get("files") or []) if item)
             if names:
