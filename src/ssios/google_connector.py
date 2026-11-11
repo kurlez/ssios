@@ -445,6 +445,7 @@ class GoogleConnector:
         self.store.delete(account_id, f"{connector}-refresh")
         self.store.delete(account_id, f"{connector}-scope")
         self.store.delete(account_id, f"{connector}-connected-at")
+        self.store.delete(account_id, f"{connector}-reconnect")
         if not any(self.store.get(account_id, f"{name}-refresh") for name in CONNECTORS):
             self.store.delete(account_id, "google-sub")
             self.store.delete(account_id, "connected-at")
@@ -628,9 +629,11 @@ class GoogleConnector:
         connectors = {}
         for name in CONNECTORS:
             linked = bool(self.store.get(account_id, f"{name}-refresh"))
+            reconnect = self.store.get(account_id, f"{name}-reconnect") == "1"
             connectors[name] = {
                 "connected": linked,
                 "connected_at": self.store.get(account_id, f"{name}-connected-at") if linked else None,
+                "needs_reconnect": bool(reconnect and not linked),
             }
         connected = any(item["connected"] for item in connectors.values())
         stamp = self.store.get(account_id, "connected-at") if connected else None
@@ -707,11 +710,17 @@ class GoogleConnector:
             self.store.put(account_id, f"{connector}-refresh", refresh)
             self.store.put(account_id, f"{connector}-scope", scope)
             self.store.put(account_id, f"{connector}-connected-at", stamp)
+            self.store.delete(account_id, f"{connector}-reconnect")
             stored = True
         finally:
             if not stored:
                 self._revoke(account_id, refresh)
             del access
+
+    def _mark_reconnect(self, account_id: str, service: str) -> None:
+        """Drop a refresh token Google rejected. The client id stays."""
+        self.store.delete(account_id, f"{service}-refresh")
+        self.store.put(account_id, f"{service}-reconnect", "1")
 
     def _require_client(self, account_id: str) -> None:
         if not self.store.get(account_id, "client-id") or not self.store.get(account_id, "client-secret"):
@@ -854,7 +863,15 @@ class GoogleConnector:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raw = exc.read()
-            self._raise_oauth(account_id, service, "token", exc.code, raw, "")
+            self._raise_oauth(
+                account_id,
+                service,
+                "token",
+                exc.code,
+                raw,
+                "",
+                refresh=form.get("grant_type") == "refresh_token",
+            )
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             from ssios.logsafe import log_upstream
 
@@ -874,22 +891,47 @@ class GoogleConnector:
         scopes: str,
         *,
         optional: bool = False,
+        refresh: bool = False,
     ) -> None:
         from ssios.logsafe import log_upstream
 
         error, description, reasons = _oauth_fields(raw)
+        reason_name = next((item for item in reasons if item), "")
         logged = error
         for reason in reasons:
             if reason in {"SERVICE_DISABLED", "accessNotConfigured", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}:
                 logged = reason
                 break
-        log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=logged)
+        log_upstream(
+            account_id=account_id,
+            service=service,
+            endpoint=endpoint,
+            status=status,
+            error=logged or "none",
+            reason=reason_name,
+        )
         safe = _safe_oauth_description(description)
         if _api_disabled(error, description, reasons):
             api_name, link = _API_ENABLE.get(service, ("Google API", "https://console.cloud.google.com/apis/library"))
             raise SsiosError(
                 "connector_api_disabled",
                 f"Enable the {api_name} in the Cloud project. {link} Error code: connector_api_disabled.",
+                403,
+            )
+        if error == "invalid_grant" and refresh:
+            self._mark_reconnect(account_id, service)
+            label = {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar"}.get(service, "Google")
+            raise SsiosError("connector_needs_reconnect", f"{label} needs reconnecting.", 401)
+        if (
+            status == 403
+            and error == "PERMISSION_DENIED"
+            and not _insufficient_scope(error, description, reasons)
+        ):
+            label = {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar"}.get(service, "Google")
+            raise SsiosError(
+                "connector_scope_missing",
+                f"Google denied permission for {label}. Open Connections and grant the requested access. "
+                "Error code: connector_scope_missing.",
                 403,
             )
         if _insufficient_scope(error, description, reasons):
@@ -1153,7 +1195,7 @@ class GoogleConnector:
                 files = [item for item in payload.get("files") or [] if isinstance(item, dict)]
         log_read(account_id=account_id, service="drive", endpoint="drive.list", status=status, query=shape, count=len(files))
         if status >= 400:
-            raise SsiosError("connector_upstream", f"google status {status}", 502)
+            self._raise_oauth(account_id, "drive", "drive.list", status, raw, "")
         return files
 
     def _drive_read(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
@@ -1219,7 +1261,7 @@ class GoogleConnector:
             count=len(messages),
         )
         if status >= 400:
-            raise SsiosError("connector_upstream", f"google status {status}", 502)
+            self._raise_oauth(account_id, "gmail", "gmail.list", status, raw, "")
         lines = []
         for item in messages[: limits["max_items"]]:
             header = self._gmail_metadata(account_id, str(item.get("id")), access)
@@ -1244,7 +1286,7 @@ class GoogleConnector:
                 header = _mail_header(payload)
         log_read(account_id=account_id, service="gmail", endpoint="gmail.metadata", status=status, query="format:metadata", count=1 if status < 400 else 0)
         if status >= 400:
-            raise SsiosError("connector_upstream", f"google status {status}", 502)
+            self._raise_oauth(account_id, "gmail", "gmail.metadata", status, raw, "")
         return header
 
     def _gmail_get(self, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:

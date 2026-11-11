@@ -65,6 +65,8 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
             yield from _vm(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "skill":
             yield from _skill(plane, scope, record["id"], message, peer_ip)
+        elif decision.route == "account":
+            yield from _account_facts(scope, record["id"], message)
         else:
             raise SsiosError("chat_rejected", "route rejected", 400)
     except SsiosError as exc:
@@ -229,24 +231,53 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
     yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
 
 
+def _account_facts(scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
+    """Saved facts are not invented. A later memory store replaces this sentence."""
+    folded = message.casefold()
+    if any(cue in message for cue in ("待办", "提醒")) or re.search(r"\b(tasks|reminders)\b", folded):
+        text = "No open reminders were read. Nothing was invented."
+    else:
+        text = "No saved facts were read. Nothing was invented."
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "account", "reason": "No model.", "source": "policy"}})
+    yield {"event": "outcome", "data": {"text": text}}
+
+
+def _service_label(tool: str) -> str:
+    return {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar"}.get(tool.split(".", 1)[0], "Google")
+
+
+def _connector_failure(scope, conversation_id: str, tool: str, exc: SsiosError) -> Iterator[dict]:
+    """Deterministic error. The model is not asked to describe mail, files, or events."""
+    if exc.code == "connector_needs_reconnect":
+        detail = english_connector_error(exc)
+    else:
+        detail = f"{_service_label(tool)} returned an error: {english_connector_error(exc)}"
+    yield remember_failure(scope, conversation_id, exc.code, detail, exc.status)
+
+
 def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, follow_vm: bool = False, peer_ip: str = "127.0.0.1", user_message: str = "") -> Iterator[dict]:
     from ssios.google_connector import session_for_account
 
     _now, zone_name = host_clock(scope.plane, scope.account)
     del _now
     own = session_for_account(scope.account)
-    result = scope.plane.google.read_now(
-        own,
-        project_id=scope.project_id(),
-        tool=tool,
-        arguments=arguments,
-        limits=limits,
-        peer_ip=peer_ip,
-    )
+    try:
+        result = scope.plane.google.read_now(
+            own,
+            project_id=scope.project_id(),
+            tool=tool,
+            arguments=arguments,
+            limits=limits,
+            peer_ip=peer_ip,
+        )
+    except SsiosError as exc:
+        yield from _connector_failure(scope, conversation_id, tool, exc)
+        return
     blocks = read_blocks(result["tool"], result["arguments"], result["text"], zone_name)
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
+    count = _result_count(blocks)
     reply = ""
-    if not followup and not follow_vm:
+    if count and not followup and not follow_vm:
         reply = _grounded_reply(scope.plane, user_message, summary, blocks, scope.account)
     stored = {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}}
     if reply:
@@ -304,22 +335,67 @@ def read_blocks(tool: str, arguments: dict, text: str, zone_name: str) -> list[d
     return [{"kind": "note", "header": tool, "summary": "Done.", "events": []}]
 
 
+def _result_count(blocks: list[dict]) -> int:
+    total = 0
+    for block in blocks:
+        for item in block.get("events") or []:
+            if isinstance(item, dict):
+                total += 1
+    return total
+
+
+def _result_blob(blocks: list[dict]) -> str:
+    parts = []
+    for block in blocks:
+        parts.append(str(block.get("summary") or ""))
+        parts.append(str(block.get("header") or ""))
+        for item in block.get("events") or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("title", "meta", "when", "location", "description", "badge"):
+                parts.append(str(item.get(key) or ""))
+    return "\n".join(parts).casefold()
+
+
+def _mentions_are_in_results(reply: str, blocks: list[dict]) -> bool:
+    """Drop a summary that names a sender, subject, or date the results do not contain."""
+    blob = _result_blob(blocks)
+    for email in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", reply):
+        if email.casefold() not in blob:
+            return False
+    for year in re.findall(r"\b(?:19|20)\d{2}\b", reply):
+        if year not in blob:
+            return False
+    months = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    for month in re.findall(rf"\b(?:{months})\b", reply, flags=re.IGNORECASE):
+        if month.casefold() not in blob and month[:3].casefold() not in blob:
+            return False
+    for quoted in re.findall(r"[\"“]([^\"”]{2,80})[\"”]", reply):
+        if quoted.casefold() not in blob:
+            return False
+    for name in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", reply):
+        if name.casefold() not in blob:
+            return False
+    return True
+
+
 def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], account: dict | None = None) -> str:
     """One sentence in the user's language. The cards stay the source of the count."""
     lines = []
-    count = 0
+    count = _result_count(blocks)
+    if count == 0:
+        return ""
     for block in blocks:
         for item in block.get("events") or []:
             if not isinstance(item, dict):
                 continue
-            count += 1
             bits = [str(item.get("title") or ""), str(item.get("when") or ""), str(item.get("location") or ""), str(item.get("meta") or "")]
             lines.append(" | ".join(bit for bit in bits if bit))
     facts = clock_block(plane, account) + "\nGROUNDED-READ\ncount=" + str(count) + "\n" + summary + "\n" + "\n".join(lines[:20])
     messages = [
         {
             "role": "system",
-            "content": facts + "\nAnswer in the user's language. Use only these facts. Do not invent events.",
+            "content": facts + "\nAnswer in the user's language. Use only these facts. Do not invent events, senders, or dates.",
         },
         {"role": "user", "content": message or summary},
     ]
@@ -328,7 +404,7 @@ def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], accou
     except (SsiosError, FlowInterrupt, TimeoutError, OSError):
         return ""
     reply = " ".join(str(text or "").split())
-    if not reply or not _reply_fits(reply, count):
+    if not reply or not _reply_fits(reply, count) or not _mentions_are_in_results(reply, blocks):
         return ""
     return reply[:500]
 
@@ -350,7 +426,8 @@ def _mail_blocks(arguments: dict, text: str) -> list[dict]:
     if "is:unread" in query:
         header = "Unread, " + header
     if not messages:
-        return [{"kind": "mail", "header": header, "summary": f"{header} — no messages", "events": []}]
+        query = " ".join(query.split()) or "in:inbox"
+        return [{"kind": "mail", "header": header, "summary": f"No messages matched {query}", "events": []}]
     if str(arguments.get("view") or "") == "senders":
         senders = _sender_rows(messages)
         summary = _count_line(header, len(senders), "sender")
@@ -730,7 +807,13 @@ def failure_hint(code: str) -> str:
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
         "skill_upstream": "The site could not be read. Nothing was changed.",
+        "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
+        "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",
+        "connector_scope_missing": "Reconnect and grant the requested access. Nothing was invented.",
+        "connector_not_connected": "Open Connections and connect that service. Nothing was invented.",
     }
+    if code.startswith("connector_") or code.startswith("oauth_"):
+        return "Open Connections. Nothing was invented."
     return hints.get(code, 'Run ssios vm-diagnose --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml".')
 
 

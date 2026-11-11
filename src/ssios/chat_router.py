@@ -107,6 +107,8 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
     if forced == "force_direct":
         if services:
             return _decision("connector", "override_direct", "You chose a direct answer. Cloud data is read on this machine. A calendar change still waits for approval.", services)
+        if _saved_facts(message):
+            return _decision("account", "override_direct", "You chose a direct answer. Saved facts are not invented.", ())
         if _REMEMBER.search(message):
             return _decision("memory", "override_direct", "You chose not to use the guest. A memory write still waits for your approval.", ())
         return _decision("direct", "override_direct", "You chose a direct answer. No tools will run.", ())
@@ -121,6 +123,14 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
         return _decision("connector", "rule_connector", _cloud_reason(services), services)
     if _REMEMBER.search(message):
         return _decision("memory", "rule_memory", "The message asks to save memory. It is not written until you approve it.", ())
+    saved = _saved_facts(message)
+    if saved:
+        return _decision(
+            "account",
+            "rule_account",
+            "The message asks for saved facts on this computer. The local model will not invent them.",
+            (),
+        )
     if _clear_task(message):
         return _decision("vm", "rule_vm", "The message asks to run code or change a workspace, so it goes to the guest.", ())
     if _is_question(message):
@@ -154,12 +164,28 @@ def _taskish(message: str) -> bool:
     return any(cue in message for cue in ("文件", "代码", "工作区", "脚本", "终端"))
 
 
+def _saved_facts(message: str) -> str:
+    """Questions about memory or reminders. Empty when the message is not one of those."""
+    folded = message.casefold()
+    if any(cue in message for cue in ("我记住了什么", "我记得什么", "我的记忆")) or re.search(
+        r"\b(what do you remember|show my memory|my memory)\b", folded
+    ):
+        return "memory"
+    if any(cue in message for cue in ("我的待办", "有什么待办", "待办事项")) or re.search(
+        r"\b(my tasks|my reminders|open tasks|open reminders)\b", folded
+    ):
+        return "tasks"
+    return ""
+
+
 def _services(message: str) -> tuple[str, ...]:
     folded = message.casefold()
     if _DEFINITION.search(message) and "my" not in folded and "inbox" not in folded and "unread" not in folded:
         return ()
     found = []
-    if any(word in folded for word in ("gmail", "inbox", "e-mail", "email", "unread")) or any(word in message for word in ("邮箱", "发件人", "收件箱")):
+    if any(word in folded for word in ("gmail", "inbox", "e-mail", "email", "unread")) or any(
+        word in message for word in ("邮箱", "邮件", "发件人", "收件箱", "寄件人")
+    ):
         found.append("gmail")
     if any(word in folded for word in ("google drive", "my drive", "drive file")) or any(word in message for word in ("云端硬盘", "网盘", "根目录")) or re.search(r"\bdrive\b", folded):
         found.append("drive")

@@ -1144,11 +1144,12 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
     for name in ("gmail", "drive", "calendar"):
         item = connectors.get(name) if isinstance(connectors.get(name), dict) else {}
         connected = bool(item.get("connected"))
+        reconnect = bool(item.get("needs_reconnect"))
         any_linked = any_linked or connected
         gate = plane.google.service_gate(account["id"], name)
         if gate == "on":
             any_on = True
-        state = "Connected" if connected else "Not connected"
+        state = "Needs reconnect" if reconnect else "Connected" if connected else "Not connected"
         card_notice = notice if focus == name else ""
         try:
             limit_note = plane.google.service_note(own, name)
@@ -1173,7 +1174,13 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
                 "<button name=\"op\" value=\"disable\" type=\"submit\">Turn off</button></form>"
             )
         consent = ""
-        if connected:
+        if reconnect and gate == "on" and ready:
+            button = (
+                f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
+                f"<button class=\"primary\" name=\"op\" value=\"connect\" type=\"submit\">Reconnect {name}</button></form>"
+            )
+        elif connected:
             button = (
                 f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
                 f"<input type=\"hidden\" name=\"service\" value=\"{name}\">"
@@ -1194,7 +1201,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
                 consent_url = ""
             if consent_url or remote:
                 consent = _consent_box(name, csrf, consent_url, remote)
-        dot = "dot on" if connected else "dot"
+        dot = "dot warn" if reconnect else "dot on" if connected else "dot"
         cards.append(
             "<article class=\"svc\"><span class=\"" + dot + "\"></span><div class=\"body\">"
             + "<div class=\"svc-head\"><div><h2>" + html.escape(name.title()) + "</h2>"

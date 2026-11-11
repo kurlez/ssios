@@ -538,6 +538,7 @@ class HouseholdTest(PlaneTest):
         _CalendarApi.drive_folders = None
         _CalendarApi.mail_messages = None
         _CalendarApi.mail_by_id = None
+        _CalendarApi.gmail_error = None
         self.google_http = ThreadingHTTPServer(("127.0.0.1", 0), _CalendarApi)
         self.addCleanup(self.google_http.server_close)
         thread = threading.Thread(target=self.google_http.serve_forever, daemon=True)
@@ -1611,6 +1612,65 @@ class HouseholdTest(PlaneTest):
         self.assertIn("根目录", unclear)
         self.assertNotIn("connector_grant_denied", unclear)
         self.assertNotIn("vm-diagnose", unclear)
+
+    def test_failed_or_empty_gmail_never_invents_mail(self) -> None:
+        from ssios.chat import _mentions_are_in_results
+
+        blocks = [{"events": [{"title": "Harbor notes", "meta": "Harbor Bot <harbor@example.com>", "when": "Nov 10, 2026"}]}]
+        self.assertFalse(_mentions_are_in_results("Jane Doe jane@example.com wrote Project Q1 2023", blocks))
+        self.assertTrue(_mentions_are_in_results("Harbor Bot sent Harbor notes", blocks))
+        self._install_and_connect(self._ada_id(), "gmail", "code-a")
+        calls = []
+        real = self.plane.llm.complete_chat
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            return "No changes are made. Jane Doe <jane@example.com> sent Project Q1 2023 on January 1, 2023."
+
+        self.plane.llm.complete_chat = wrapped
+        _CalendarApi.gmail_error = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Google Gmail API has not been used in project 1 before or it is disabled.",
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{"reason": "accessNotConfigured"}],
+                }
+            },
+        }
+        status, failed, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "查一下我的邮件"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 403, failed)
+        self.assertIn("Route: connector", failed)
+        self.assertIn("Gmail returned an error", failed)
+        self.assertIn("Gmail API", failed)
+        self.assertIn("connector_api_disabled", failed)
+        self.assertNotIn("Jane Doe", failed)
+        self.assertNotIn("jane@example.com", failed)
+        self.assertNotIn("2023", failed)
+        self.assertNotIn("No changes are made", failed)
+        self.assertEqual(calls, [])
+        _CalendarApi.gmail_error = None
+        _CalendarApi.mail_messages = []
+        empty = self._send(self.ada, "check my inbox")
+        self.assertIn("No messages matched in:inbox", empty)
+        self.assertNotIn("Jane Doe", empty)
+        self.assertNotIn("example.com", empty)
+        self.assertEqual(calls, [])
+        _CalendarApi.mail_messages = [{"id": "msg-1"}]
+        _CalendarApi.mail_by_id = None
+        listed = self._send(self.ada, "check my inbox")
+        self.assertIn("Fixture subject", listed)
+        self.assertIn("Harbor Bot", listed)
+        self.assertNotIn("Jane Doe", listed)
+        self.assertNotIn("2023", listed)
+        self.assertEqual(len(calls), 1)
+        self.plane.llm.complete_chat = real
 
     def test_natural_language_calendar_examples_need_approval(self) -> None:
         from ssios.errors import SsiosError

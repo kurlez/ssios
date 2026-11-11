@@ -54,6 +54,7 @@ class _Google(BaseHTTPRequestHandler):
     drive_folders: list | None = None
     mail_messages: list | None = None
     mail_by_id: dict | None = None
+    gmail_error: dict | None = None
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
@@ -172,6 +173,9 @@ class _Google(BaseHTTPRequestHandler):
             parent = "folder-other" if file_id == "file-outside" else "folder-1"
             payload = {"id": file_id, "name": "notes.txt", "mimeType": mime, "parents": [parent]}
         elif path == "/gmail/v1/users/me/messages":
+            if isinstance(self.gmail_error, dict):
+                self._json(self.gmail_error.get("body") or {}, int(self.gmail_error.get("status") or 403))
+                return
             payload = {"messages": self.mail_messages if self.mail_messages is not None else [{"id": "msg-1"}]}
         elif path == "/calendar/v3/users/me/calendarList":
             payload = {"items": [{"id": "cal-1", "summary": "Fixture calendar", "accessRole": "owner"}]}
@@ -240,6 +244,7 @@ class ConnectorTest(PlaneTest):
         _Google.drive_folders = None
         _Google.mail_messages = None
         _Google.mail_by_id = None
+        _Google.gmail_error = None
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
         thread = threading.Thread(target=self.server_google.serve_forever, daemon=True)
@@ -299,7 +304,8 @@ class ConnectorTest(PlaneTest):
         self.assertEqual(set(status), {"service", "connected", "connected_at", "connectors"})
         self.assertEqual(set(status["connectors"]), {"drive", "gmail", "calendar"})
         for item in status["connectors"].values():
-            self.assertEqual(set(item), {"connected", "connected_at"})
+            self.assertEqual(set(item), {"connected", "connected_at", "needs_reconnect"})
+            self.assertFalse(item["needs_reconnect"])
         self.assertTrue(status["connectors"]["drive"]["connected"])
         self.assertFalse(status["connectors"]["gmail"]["connected"])
         self.assertFalse(status["connectors"]["calendar"]["connected"])
@@ -314,7 +320,7 @@ class ConnectorTest(PlaneTest):
         self.assertEqual(self.store.get("ada", "drive-refresh"), self.refresh_a)
         admin_view = self.connector.admin_connection_status("ada")
         self.assertEqual(set(admin_view), {"service", "connected", "connected_at", "connectors"})
-        self.assertEqual(set(admin_view["connectors"]["drive"]), {"connected", "connected_at"})
+        self.assertEqual(set(admin_view["connectors"]["drive"]), {"connected", "connected_at", "needs_reconnect"})
         self.assertNotIn(self.refresh_a, json.dumps(admin_view))
         with self.assertRaises(SsiosError) as caught:
             self.connector.status(self.admin)
@@ -1331,7 +1337,7 @@ class ConnectorTest(PlaneTest):
         from ssios.chat import read_blocks
 
         blocks = read_blocks("gmail.search", {"q": "in:inbox", "view": "senders"}, result["text"], "UTC")
-        self.assertEqual(blocks[0]["summary"], "Inbox, latest 50 — no messages")
+        self.assertEqual(blocks[0]["summary"], "No messages matched in:inbox")
         self.assertEqual(blocks[0]["events"], [])
         with self.assertRaises(SsiosError) as caught:
             self.connector.read_now(
@@ -1344,6 +1350,57 @@ class ConnectorTest(PlaneTest):
         self.assertEqual(caught.exception.code, "drive_grant_limited")
         self.assertIn("Connections", caught.exception.detail)
         self.assertNotIn("folder:FOLDER_ID", caught.exception.detail)
+
+    def test_refresh_invalid_grant_asks_for_reconnect_and_disabled_api_names_the_reason(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "calendar", "code-a")
+        self._consent(self.ada, "gmail", "code-a")
+        _Google.token_reply = {"status": 400, "body": {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}}
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="calendar.list_events",
+                arguments={"calendar_id": "primary", "time_min": "2026-11-10T00:00:00Z", "time_max": "2026-11-11T00:00:00Z"},
+                limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+            )
+        self.assertEqual(caught.exception.code, "connector_needs_reconnect")
+        self.assertEqual(caught.exception.detail, "Calendar needs reconnecting.")
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        status = self.connector.status(self.ada)
+        self.assertTrue(status["connectors"]["calendar"]["needs_reconnect"])
+        self.assertFalse(status["connectors"]["calendar"]["connected"])
+        _Google.token_reply = None
+        _Google.gmail_error = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Access Not Configured.",
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{"reason": "accessNotConfigured"}],
+                }
+            },
+        }
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.read_now(
+                    self.ada,
+                    project_id="local-summary",
+                    tool="gmail.search",
+                    arguments={"q": "in:inbox"},
+                    limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+                )
+        self.assertEqual(caught.exception.code, "connector_api_disabled")
+        self.assertIn("Gmail API", caught.exception.detail)
+        self.assertIn("https://console.cloud.google.com/apis/library/gmail.googleapis.com", caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("reason=accessNotConfigured", log)
+        self.assertNotIn("Access Not Configured", log)
 
     def test_drive_root_name_and_ambiguous_folder_use_the_fake_api(self) -> None:
         self.connector.install_client(self.ada, "client-ada", self.secret)

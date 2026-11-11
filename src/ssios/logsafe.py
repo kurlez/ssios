@@ -89,18 +89,24 @@ def gmail_query_shape(query: str) -> str:
     return ",".join(kept) or "in:inbox"
 
 
-def log_upstream(*, account_id: str, service: str, endpoint: str, status: int, error: str) -> None:
-    """One triage line. No codes, tokens, secrets, or URLs."""
+def log_upstream(*, account_id: str, service: str, endpoint: str, status: int, error: str, reason: str = "") -> None:
+    """One triage line. No codes, tokens, secrets, message bodies, or URLs.
+
+    ``error`` is the OAuth error or the Google status. ``reason`` is the
+    ErrorInfo reason field, such as SERVICE_DISABLED or accessNotConfigured.
+    """
     account = re.sub(r"[^A-Za-z0-9_-]", "", str(account_id))[:64]
     service_name = re.sub(r"[^a-z]", "", str(service))[:16]
     endpoint_name = re.sub(r"[^a-z.]", "", str(endpoint))[:32]
     error_name = re.sub(r"[^A-Za-z0-9_-]", "", str(error or ""))[:40] or "none"
+    reason_name = re.sub(r"[^A-Za-z0-9_-]", "", str(reason or ""))[:48] or "none"
     sys.stderr.write(
         "ssios.ui connector"
         f" account={account}"
         f" service={service_name}"
         f" endpoint={endpoint_name}"
         f" status={int(status)}"
-        f" error={error_name}\n"
+        f" error={error_name}"
+        f" reason={reason_name}\n"
     )
     sys.stderr.flush()

@@ -36,6 +36,9 @@ SECRET_NAMES = (
     "drive-connected-at",
     "gmail-connected-at",
     "calendar-connected-at",
+    "gmail-reconnect",
+    "drive-reconnect",
+    "calendar-reconnect",
     "google-sub",
     "connected-at",
 )

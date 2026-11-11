@@ -923,6 +923,7 @@ a.button.primary { background: var(--accent); }
 .manage summary { padding: 8px 0; }
 .dot { width: 8px; height: 8px; border-radius: 99px; background: #737373; }
 .dot.on { background: #15803d; }
+.dot.warn { background: #b45309; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); }
 td, th { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--line); }
 body.sidebar-closed .sidebar { display: none; }
