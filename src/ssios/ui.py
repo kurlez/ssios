@@ -1260,14 +1260,14 @@ APP_CSS = """
 :root {
   color-scheme: light dark;
   --bg: #fafafa; --ink: #171717; --muted: #525252; --panel: #ffffff; --line: #e7e7e7;
-  --user: #ececec; --accent: #1d4ed8; --on-accent: #ffffff;
+  --user: #dbe7ff; --accent: #1d4ed8; --on-accent: #ffffff; --hover: #f3f4f6; --ok-dot: #15803d;
   --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #166534; --warn: #92400e; --warn-bg: #fef3c7; --ok-bg: #dcfce7;
   --code: #f4f4f5;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0f0f10; --ink: #f5f5f5; --muted: #a3a3a3; --panel: #171717; --line: #2a2a2a;
-    --user: #2a2a2e; --accent: #93c5fd; --on-accent: #0f0f10;
+    --user: #1e3a5f; --accent: #93c5fd; --on-accent: #0f0f10; --hover: #222226; --ok-dot: #4ade80;
     --danger: #fecaca; --danger-bg: #3f1515; --ok: #bbf7d0; --warn: #fde68a; --warn-bg: #3f2e12; --ok-bg: #14301f;
     --code: #1c1c1f;
   }
@@ -1317,14 +1317,23 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .workspace { flex: 1; min-height: 0; display: flex; }
 .thread-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
 .thread-head h1 { margin: 0; font-size: 1rem; }
-.info { width: 300px; flex: none; border-left: 1px solid var(--line); overflow: auto; padding: 16px; background: var(--bg); }
-.who { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
-.tabs button { border-radius: 999px; }
-.tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
-.routines, .activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.routines li, .activity li { display: flex; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
-.quote, .quote-bar { border-left: 3px solid var(--line); margin: 0 0 6px; padding: 4px 8px; color: var(--muted); font-size: 13px; }
+.info { width: 320px; flex: none; border-left: 1px solid var(--line); overflow: auto; padding: 16px; background: var(--bg); }
+.who { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+.who .avatar { width: 44px; height: 44px; font-size: 18px; }
+.presence { display: flex; align-items: center; gap: 6px; color: var(--ok); font-size: 13px; margin: 0; }
+.model-chip { display: inline-block; margin: 0 0 12px; font-size: 12px; color: var(--muted); background: var(--hover); border-radius: 999px; padding: 2px 8px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 16px; padding: 3px; background: var(--hover); border-radius: 12px; }
+.tabs button { flex: 1; border: 0; border-radius: 9px; background: transparent; font-size: 12px; display: inline-flex; gap: 4px; align-items: center; justify-content: center; padding: 6px 4px; }
+.tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.routines, .activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.routines li { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.routines li p, .activity li p { color: var(--muted); font-size: 13px; margin: 0; }
+.activity li { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: start; background: transparent; border: 0; padding: 8px 0; }
+.activity time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.day-group { margin-top: 8px; }
+.day-group summary { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.quote, .quote-bar { border-left: 3px solid var(--accent); margin: 0 0 6px; padding: 2px 8px; color: var(--muted); font-size: 13px; }
+.rail .new-chat { display: grid; margin: 0; width: 44px; border: 0; padding: 4px; }
 .thumb { display: block; max-width: 180px; border-radius: 12px; margin-top: 6px; }
 .day { align-self: center; color: var(--muted); font-size: 12px; }
 .attach input { width: 1px; height: 1px; opacity: 0; position: absolute; }
@@ -1332,8 +1341,12 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
 .brand { font-weight: 650; color: var(--ink); text-decoration: none; }
 .new-chat { display: block; margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
+.rail .new-chat { display: grid; margin: 0; width: 44px; min-height: 36px; border: 0; padding: 4px; text-align: center; }
 .convs { flex: 1; overflow: auto; min-height: 0; }
-.convs h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 12px 4px; }
+.sidebar h2, .convs h2 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 16px 8px 4px; }
+.sidebar .pin, .sidebar .conv a { border-radius: 10px; }
+.sidebar .pin:hover, .sidebar .conv:hover, .sidebar .pin:focus-within, .sidebar .conv:focus-within { background: var(--hover); }
+.sidebar .pin.active, .sidebar .conv.active { background: var(--user); }
 .convs ul { margin: 0; padding: 0; list-style: none; }
 .conv { display: flex; align-items: center; gap: 4px; border-radius: 12px; }
 .conv a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; padding: 8px 12px; }
@@ -1358,10 +1371,11 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow: auto; min-height: 0; }
-.column { max-width: 760px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
-.msg { display: flex; gap: 8px; }
+.column { max-width: 720px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
+.msg { display: flex; gap: 8px; align-items: flex-end; }
 .msg.user { justify-content: flex-end; }
-.msg.user .bubble { max-width: 75%; background: var(--user); border-radius: 16px; padding: 8px 12px; }
+.msg.user .bubble { max-width: min(75%, 520px); background: var(--user); border-radius: 18px 18px 6px 18px; padding: 10px 14px; }
+.msg.assistant .body { min-width: 0; flex: 1; max-width: min(100%, 560px); background: var(--panel); border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; padding: 10px 14px; }
 .msg .body { min-width: 0; flex: 1; }
 .tools { display: flex; gap: 8px; align-items: center; }
 .copy, .stamp { opacity: 0; font-size: 12px; color: var(--muted); background: transparent; border: 0; padding: 0; }
@@ -1373,14 +1387,15 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .empty { text-align: center; margin: auto; padding: 48px 16px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .chip { border-radius: 999px; }
-.composer { padding: 8px 16px 16px; }
-.composer-box { max-width: 760px; margin: 0 auto; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); padding: 8px 8px 8px 16px; box-shadow: 0 8px 24px rgba(0,0,0,.04); display: grid; gap: 8px; }
+.composer { padding: 8px 16px 20px; }
+.composer-box { max-width: 720px; margin: 0 auto; border: 1px solid var(--line); border-radius: 28px; background: var(--panel); padding: 8px 8px 8px 16px; box-shadow: 0 10px 30px rgba(0,0,0,.08); display: grid; gap: 4px; }
 .composer-box textarea { border: 0; resize: none; min-height: 24px; max-height: 160px; padding: 8px 0; background: transparent; width: 100%; outline: none; }
-.composer-bar { display: flex; justify-content: space-between; align-items: center; }
-.route-chip select { border: 0; background: transparent; padding: 4px 8px; }
-.send { width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; padding: 0; }
+.composer-bar { display: flex; align-items: center; gap: 8px; }
+.composer-bar .send { margin-left: auto; }
+.route-chip select { border: 0; background: var(--hover); border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+.send, #mic, .attach { width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; }
 .send:disabled { opacity: .4; }
-.hint { max-width: 760px; margin: 8px auto 0; color: var(--muted); font-size: 12px; }
+.hint { max-width: 720px; margin: 8px auto 0; color: var(--muted); font-size: 12px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
 .card.danger { border-color: var(--danger); background: var(--danger-bg); }
 .card header, .card .actions { display: flex; align-items: center; gap: 8px; }
@@ -1589,25 +1604,53 @@ def _login_page(code: str) -> str:
     )
 
 
+def icon(name: str) -> str:
+    """A small inline icon. The link or button carries the accessible name."""
+    paths = {
+        "chat": '<path d="M5 6h14v9H8l-3 3z"/>',
+        "search": '<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>',
+        "notes": '<path d="M7 4h8l4 4v12H7z"/><path d="M15 4v4h4"/>',
+        "files": '<path d="M4 7h6l2 2h8v9H4z"/>',
+        "memory": '<path d="M12 4a5 5 0 0 1 5 5c0 4-5 11-5 11S7 13 7 9a5 5 0 0 1 5-5z"/>',
+        "tasks": '<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M8 12l2.5 2.5L16 9"/>',
+        "link": '<path d="M10 13a4 4 0 0 0 6 0l2-2a4 4 0 0 0-6-6l-1 1"/><path d="M14 11a4 4 0 0 0-6 0l-2 2a4 4 0 0 0 6 6l1-1"/>',
+        "plus": '<path d="M12 5v14M5 12h14"/>',
+        "settings": '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/>',
+        "logout": '<path d="M9 6H6v12h3"/><path d="M10 12h9M16 8l4 4-4 4"/>',
+        "admin": '<path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"/>',
+        "bell": '<path d="M6 16V11a6 6 0 1 1 12 0v5l1 2H5z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+        "repeat": '<path d="M7 7h9l-2-2M17 17H8l2 2"/><path d="M17 7v4M7 17v-4"/>',
+        "check": '<circle cx="12" cy="12" r="8"/><path d="M8 12l2.5 2.5L16 9"/>',
+        "mic": '<rect x="9" y="4" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
+        "paperclip": '<path d="M8 12l6-6a3 3 0 0 1 4 4l-7 7a4 4 0 0 1-6-6l7-7"/>',
+    }
+    body = paths.get(name, paths["chat"])
+    return (
+        '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" '
+        'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+        + body + "</svg>"
+    )
+
+
 def _rail(session: dict) -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     account = session.get("account") if isinstance(session.get("account"), dict) else {}
-    admin = "<a href=\"/ui/admin\" title=\"Admin\" aria-label=\"Admin\">A</a>" if account.get("role") == "admin" else ""
+    admin = f'<a href="/ui/admin" title="Admin" aria-label="Admin">{icon("admin")}</a>' if account.get("role") == "admin" else ""
     return (
-        "<nav class=\"rail\" aria-label=\"Sections\">"
-        "<a href=\"/ui/chat\" title=\"Chat\" aria-label=\"Chat\">C</a>"
-        "<a href=\"#thread-search\" title=\"Search\" aria-label=\"Search\">S</a>"
-        "<a href=\"/ui/vault\" title=\"Notes\" aria-label=\"Notes\">N</a>"
-        "<a href=\"/ui/files\" title=\"Files\" aria-label=\"Files\">F</a>"
-        "<a href=\"/ui/memory?project_id=local-summary\" title=\"Memory\" aria-label=\"Memory\">M</a>"
-        "<a href=\"/ui/tasks\" title=\"Tasks\" aria-label=\"Tasks\">T</a>"
-        "<a href=\"/ui/connections\" title=\"Connections\" aria-label=\"Connections\">K</a>"
-        "<a class=\"new-chat\" href=\"/ui/chat\" title=\"New chat\" aria-label=\"New chat\"><span class=\"sr\">New chat</span>+</a>"
-        "<span class=\"rail-gap\"></span>"
-        "<a href=\"/ui/settings\" title=\"Settings\" aria-label=\"Settings\">Set</a>"
+        '<nav class="rail" aria-label="Sections">'
+        f'<a href="/ui/chat" title="Chat" aria-label="Chat">{icon("chat")}</a>'
+        f'<a href="#thread-search" title="Search" aria-label="Search">{icon("search")}</a>'
+        f'<a href="/ui/vault" title="Notes" aria-label="Notes">{icon("notes")}</a>'
+        f'<a href="/ui/files" title="Files" aria-label="Files">{icon("files")}</a>'
+        f'<a href="/ui/memory?project_id=local-summary" title="Memory" aria-label="Memory">{icon("memory")}</a>'
+        f'<a href="/ui/tasks" title="Tasks" aria-label="Tasks">{icon("tasks")}</a>'
+        f'<a href="/ui/connections" title="Connections" aria-label="Connections">{icon("link")}</a>'
+        f'<a class="new-chat" href="/ui/chat" title="New chat" aria-label="New chat"><span class="sr">New chat</span>{icon("plus")}</a>'
+        '<span class="rail-gap"></span>'
+        f'<a href="/ui/settings" title="Settings" aria-label="Settings">{icon("settings")}</a>'
         + admin
-        + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<button type=\"submit\" title=\"Sign out\" aria-label=\"Sign out\">Out</button></form>"
+        + f'<form method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<button type="submit" title="Sign out" aria-label="Sign out">{icon("logout")}</button></form>'
         "</nav>"
     )
 

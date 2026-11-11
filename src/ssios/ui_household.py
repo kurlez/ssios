@@ -1481,18 +1481,19 @@ def _chat_delete(plane, session, body) -> "Page":
     return Page(303, "", location="/ui/chat")
 
 
-def _conversation_nav(items: list[dict], csrf: str) -> str:
+def _conversation_nav(items: list[dict], csrf: str, active: str = "") -> str:
     ordered = sorted(items, key=lambda item: float(item.get("created_at") or item.get("updated_at") or 0))
     main = ordered[0] if ordered else None
     rest = list(reversed(ordered[1:])) if main else []
     main_html = "<a class=\"pin\" href=\"/ui/chat\">Main chat</a>"
     if main:
+        pin_class = "pin active" if str(main["id"]) == active else "pin"
         main_html = (
-            "<a class=\"pin\" data-title=\"" + html.escape(str(main.get("title") or "Main chat"), quote=True) + "\" href=\"/ui/chat?conversation="
+            f"<a class=\"{pin_class}\" data-title=\"" + html.escape(str(main.get("title") or "Main chat"), quote=True) + "\" href=\"/ui/chat?conversation="
             + html.escape(str(main["id"])) + "\">Main chat</a>"
-            + _conv_row(main, csrf)
+            + _conv_row(main, csrf, active)
         )
-    rows = "".join(_conv_row(item, csrf) for item in rest) or "<li class=\"muted\">No side chats.</li>"
+    rows = "".join(_conv_row(item, csrf, active) for item in rest) or "<li class=\"muted\">No side chats.</li>"
     return (
         "<section><h2>Main</h2>" + main_html + "</section>"
         "<section><h2>Channels</h2><p class=\"muted\">No channels yet.</p></section>"
@@ -1501,11 +1502,12 @@ def _conversation_nav(items: list[dict], csrf: str) -> str:
     )
 
 
-def _conv_row(item: dict, csrf: str) -> str:
+def _conv_row(item: dict, csrf: str, active: str = "") -> str:
     conv_id = html.escape(str(item["id"]))
     title = html.escape(str(item["title"]))
+    klass = "conv active" if str(item.get("id") or "") == active else "conv"
     return (
-        "<li class=\"conv\" data-title=\"" + html.escape(str(item.get("title") or ""), quote=True) + "\">"
+        f"<li class=\"{klass}\" data-title=\"" + html.escape(str(item.get("title") or ""), quote=True) + "\">"
         "<a href=\"/ui/chat?conversation=" + conv_id + "\">" + title + "</a>"
         "<details class=\"kebab\"><summary aria-label=\"Rename or delete\">⋯</summary>"
         f"<form method=\"post\" action=\"/ui/chat/rename\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -1517,32 +1519,65 @@ def _conv_row(item: dict, csrf: str) -> str:
     )
 
 
+def _friendly_when(stamp: str, now) -> str:
+    """A local phrase such as 'Tomorrow 9:00 AM' or 'Nov 12, 9:00 AM'."""
+    from datetime import datetime, timedelta
+
+    try:
+        due = datetime.fromisoformat(stamp)
+    except ValueError:
+        return ""
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=now.tzinfo)
+    due = due.astimezone(now.tzinfo)
+    hour = due.hour % 12 or 12
+    clock = f"{hour}:{due.minute:02d} {'AM' if due.hour < 12 else 'PM'}"
+    if due.date() == now.date():
+        day = "Today"
+    elif due.date() == now.date() + timedelta(days=1):
+        day = "Tomorrow"
+    else:
+        day = due.strftime("%b") + f" {due.day}"
+    return f"{day} {clock}" if day in {"Today", "Tomorrow"} else f"{day}, {clock}"
+
+
+def _clock_only(stamp: str, now) -> str:
+    phrase = _friendly_when(stamp, now)
+    if phrase.startswith("Today "):
+        return phrase[6:]
+    return phrase
+
+
 def _info_pane(plane, session, state: dict) -> str:
     from ssios.activity import activity_timeline
     from ssios.reminders import ReminderStore
 
     account = session["account"]
     scope = AccountScope(plane, account)
+    from ssios.calendar_intent import host_clock
+    from ssios.ui import icon
+
     model = html.escape(str(getattr(plane.settings, "ollama_model", "") or "local"))
-    route = ""
-    for message in reversed(state.get("messages") or []):
-        if message.get("route"):
-            route = str(message.get("route") or "")
-            break
-    status = "Connected"
-    if route:
-        status += " · " + route
+    now, _zone = host_clock(plane, account)
     reminders = ReminderStore(scope.home).open_items()
     scheduled = [item for item in reminders if item.get("repeat") or item.get("due")]
     count = len(scheduled)
     rows = []
     for item in sorted(scheduled, key=lambda row: str(row.get("due") or ""))[:8]:
         repeat = str(item.get("repeat") or "")
-        label = "Daily" if repeat == "daily" else "Weekly" if repeat.startswith("weekly:") else "Once"
+        kind = "repeat" if repeat else "check"
+        if repeat == "daily":
+            label = "Daily"
+        elif repeat.startswith("weekly:"):
+            label = "Weekly"
+        else:
+            label = "Once"
+            kind = "bell" if not repeat else kind
+        when = _friendly_when(str(item.get("due") or ""), now)
         rows.append(
-            "<li><span class=\"cal\" aria-hidden=\"true\">◷</span><div><strong>"
+            "<li><span class=\"kind\" aria-hidden=\"true\">" + icon(kind) + "</span><div><strong>"
             + html.escape(str(item.get("text") or "Reminder"))
-            + "</strong><p>" + html.escape(label) + " · " + html.escape(str(item.get("due") or "")) + "</p></div></li>"
+            + "</strong><p>" + html.escape(label + (" · " + when if when else "")) + "</p></div></li>"
         )
     noun = "scheduled task" if count == 1 else "scheduled tasks"
     overview = (
@@ -1550,13 +1585,22 @@ def _info_pane(plane, session, state: dict) -> str:
         + ("".join(rows) or "<li>No scheduled tasks.</li>")
         + "</ul><p><a href=\"/ui/tasks\">View all</a></p>"
     )
-    timeline = activity_timeline(plane, account["id"])
+    from datetime import datetime
+
+    wall = datetime.now(now.tzinfo)
+    timeline = activity_timeline(plane, account["id"], wall)
     blocks = []
     for key, heading in (("today", "Today"), ("yesterday", "Yesterday")):
         lines = []
         for item in timeline[key]:
-            lines.append("<li><strong>" + html.escape(item["title"]) + "</strong><p>" + html.escape(item["detail"]) + "</p></li>")
-        blocks.append("<h3>" + heading + "</h3><ul class=\"activity\">" + ("".join(lines) or "<li>Nothing recorded.</li>") + "</ul>")
+            mark = "bell" if "Reminder" in item["title"] else "notes" if "clip" in item["title"].casefold() or "memory" in item["title"].casefold() else "link"
+            lines.append(
+                "<li><span class=\"kind\" aria-hidden=\"true\">" + icon(mark) + "</span><div><strong>"
+                + html.escape(item["title"]) + "</strong><p>" + html.escape(item["detail"]) + "</p></div><time>"
+                + html.escape(_clock_only(item.get("at") or "", wall)) + "</time></li>"
+            )
+        if lines:
+            blocks.append("<details class=\"day-group\" open><summary>" + heading + "</summary><ul class=\"activity\">" + "".join(lines) + "</ul></details>")
     pending = scope.list_pending()
     approval_rows = []
     for item in pending[:8]:
@@ -1588,11 +1632,12 @@ def _info_pane(plane, session, state: dict) -> str:
     return (
         "<aside id=\"info-pane\" class=\"info\" aria-label=\"Account details\">"
         "<div class=\"who\"><span class=\"avatar\" aria-hidden=\"true\">S</span><div><strong>SSIOS</strong>"
-        f"<p class=\"status\">{html.escape(status)} · {model}</p></div></div>"
+        "<p class=\"presence\"><span class=\"dot on\" aria-hidden=\"true\"></span> Connected</p></div></div>"
+        f"<p class=\"model-chip\">{model}</p>"
         "<div class=\"tabs\" role=\"tablist\">"
-        "<button type=\"button\" role=\"tab\" id=\"tab-overview\" aria-selected=\"true\" aria-controls=\"panel-overview\">Overview</button>"
-        "<button type=\"button\" role=\"tab\" id=\"tab-approvals\" aria-selected=\"false\" aria-controls=\"panel-approvals\">Approvals</button>"
-        "<button type=\"button\" role=\"tab\" id=\"tab-files\" aria-selected=\"false\" aria-controls=\"panel-files\">Files</button>"
+        f"<button type=\"button\" role=\"tab\" id=\"tab-overview\" aria-selected=\"true\" aria-controls=\"panel-overview\">{icon('tasks')} Overview</button>"
+        f"<button type=\"button\" role=\"tab\" id=\"tab-approvals\" aria-selected=\"false\" aria-controls=\"panel-approvals\">{icon('admin')} Approvals</button>"
+        f"<button type=\"button\" role=\"tab\" id=\"tab-files\" aria-selected=\"false\" aria-controls=\"panel-files\">{icon('files')} Files</button>"
         "</div>"
         "<div id=\"panel-overview\" role=\"tabpanel\" aria-labelledby=\"tab-overview\">" + overview + "".join(blocks) + "</div>"
         "<div id=\"panel-approvals\" role=\"tabpanel\" aria-labelledby=\"tab-approvals\" hidden>" + approvals + "</div>"
@@ -1603,6 +1648,8 @@ def _info_pane(plane, session, state: dict) -> str:
 
 def _chat_page(plane, session, conversation_id: str) -> str:
     from ssios.ui import _page
+
+    from ssios.ui import icon
 
     scope = AccountScope(plane, session["account"])
     csrf = html.escape(str(session.get("csrf") or ""))
@@ -1645,8 +1692,8 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "<p id=\"file-note\" class=\"hint\"></p>"
         "<textarea name=\"message\" rows=\"1\" aria-label=\"Message\" placeholder=\"Message SSIOS…\" required></textarea>"
         "<div class=\"composer-bar\">"
-        "<label class=\"attach\" aria-label=\"Attach an image\">+<input name=\"image\" type=\"file\" accept=\"image/png,image/jpeg,image/gif,image/webp\"></label>"
-        "<button type=\"button\" id=\"mic\" aria-label=\"Dictate\">Mic</button>"
+        "<label class=\"attach\" aria-label=\"Attach an image\">" + icon("paperclip") + "<input name=\"image\" type=\"file\" accept=\"image/png,image/jpeg,image/gif,image/webp\"></label>"
+        "<button type=\"button\" id=\"mic\" aria-label=\"Dictate\">" + icon("mic") + "</button>"
         "<label class=\"route-chip\"><select name=\"override\" aria-label=\"Route\">"
         "<option value=\"auto\">Auto</option><option value=\"force_direct\">Local</option>"
         "<option value=\"force_vm\">VM</option></select></label>"
@@ -1663,7 +1710,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         + "<script src=\"" + CHAT_PATH + "\"></script>"
         + "<noscript><p>The form still sends the message when the script does not run.</p></noscript>"
     )
-    return _page(session, "Chat", body, chat=True, conversations=_conversation_nav(conversations, csrf))
+    return _page(session, "Chat", body, chat=True, conversations=_conversation_nav(conversations, csrf, state["conversation"]))
 
 
 def _connection_view(plane, account: dict) -> dict:

@@ -117,6 +117,11 @@ class WorkspaceUiTest(unittest.TestCase):
         page = self._get(self.case.base, "/ui/chat", self.cookie)[1]
         self.assertIn("1 scheduled task", page)
         self.assertIn("Daily", page)
+        self.assertIn("Daily · Today 9:00 AM", page)
+        self.assertNotIn("T09:00:00", page)
+        self.assertIn("<svg", page)
+        self.assertIn('aria-label="Chat"', page)
+        self.assertNotIn(">C</a>", page)
         self.assertIn("water the desk plant", page)
         self.assertIn("View all", page)
 
