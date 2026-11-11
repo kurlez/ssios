@@ -897,8 +897,16 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
 
     account = session["account"]
     own = session_for_account(account)
-    status = plane.google.status(own)
-    client = plane.google.client_public(own)
+    try:
+        status = plane.google.status(own)
+        client = plane.google.client_public(own)
+    except SsiosError as exc:
+        from ssios.chat import public_error
+
+        status = {"connectors": {}}
+        client = {"ready": False, "client_id_tail": ""}
+        if not notice:
+            notice = f"<p class=\"notice\">{html.escape(public_error(exc))}</p>"
     connectors = status.get("connectors") if isinstance(status.get("connectors"), dict) else {}
     csrf = html.escape(str(session.get("csrf") or ""))
     ready = bool(client.get("ready"))
@@ -960,7 +968,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
     tail = html.escape(str(client.get("client_id_tail") or ""))
     if ready:
         client_card = (
-            "<article class=\"card\"><h2>Google OAuth client</h2><p>Set up. Client id ends in " + tail + ".</p>"
+            "<article class=\"card\"><h2>Google OAuth client</h2>" + notice + "<p>Set up. Client id ends in " + tail + ".</p>"
             "<p><a href=\"/ui/connections/help\">Google Cloud steps</a></p>"
             f"<form method=\"post\" action=\"/ui/connections\" enctype=\"multipart/form-data\">"
             f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -974,7 +982,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
         )
     else:
         client_card = (
-            "<article class=\"card\"><h2>Google OAuth client</h2><p>Not set up.</p>"
+            "<article class=\"card\"><h2>Google OAuth client</h2>" + notice + "<p>Not set up.</p>"
             "<p><a href=\"/ui/connections/help\">Google Cloud steps</a></p>"
             f"<form method=\"post\" action=\"/ui/connections\" enctype=\"multipart/form-data\">"
             f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -994,7 +1002,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
             "<label>Redirected 127.0.0.1 address <input name=\"redirect_url\"></label>"
             "<button name=\"op\" value=\"finish\" type=\"submit\">Finish consent</button></form>"
         )
-    return _page(session, "Connections", notice + steps + client_card + note + "<div class=\"svc-grid\">" + "".join(cards) + "</div>")
+    return _page(session, "Connections", steps + client_card + note + "<div class=\"svc-grid\">" + "".join(cards) + "</div>")
 
 
 def _connection_action(plane, own, service: str, op: str, redirect_url: str, body: dict) -> dict:
@@ -1046,9 +1054,9 @@ def _connections_post(plane, session, body, peer_ip):
     try:
         result = _connection_action(plane, own, service, op, str(body.get("redirect_url") or ""), body)
     except SsiosError as exc:
-        from ssios.chat import english_connector_error
+        from ssios.chat import public_error
 
-        return Page(exc.status, _connections_page(plane, session, f"<p>{html.escape(english_connector_error(exc))}</p>", peer_ip))
+        return Page(exc.status, _connections_page(plane, session, f"<p class=\"notice\">{html.escape(public_error(exc))}</p>", peer_ip))
     if op == "connect":
         plane.security_audit.write(actor=account_id, ip=peer_ip, action="connector.connect", target=service, result="ok")
     elif op == "disconnect":

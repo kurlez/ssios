@@ -229,7 +229,18 @@ class GoogleConnector:
         verifier = secrets.token_urlsafe(64)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("utf-8")).digest()).rstrip(b"=").decode("ascii")
         state = secrets.token_urlsafe(24)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Callback)
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Callback)
+        except OSError as exc:
+            from ssios.logsafe import log_failure
+
+            log_failure(exc)
+            raise SsiosError(
+                "oauth_listener_failed",
+                "SSIOS could not listen on 127.0.0.1 for the Google redirect. "
+                "Error code: oauth_listener_failed. Hint: run ./scripts/ssios logs.",
+                500,
+            ) from exc
         httpd.timeout = 0.2
         port = int(httpd.server_address[1])
         redirect = f"http://127.0.0.1:{port}/oauth/callback"

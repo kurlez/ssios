@@ -42,6 +42,9 @@ class WrapperTest(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("hdiutil", text)
         self.assertNotIn("diskutil", text)
+        self.assertIn("nohup", text)
+        self.assertIn("-25308", text)
+        self.assertIn("does not call setsid", text)
         self.assertIn(".venv/", (ROOT / ".gitignore").read_text(encoding="utf-8"))
 
     def test_refuses_legacy_state_directories(self) -> None:

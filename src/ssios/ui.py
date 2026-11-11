@@ -792,6 +792,7 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .steps .spin::before { content: "\\25CC  "; }
 .error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
 .error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
+.notice { margin: 0 0 12px; padding: 8px 12px; border-radius: 12px; background: var(--warn-bg); color: var(--warn); }
 .setup-steps { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: var(--muted); }
 .setup-steps .done { color: var(--ink); font-weight: 600; }
 .help { list-style: decimal; padding-left: 1.25rem; }

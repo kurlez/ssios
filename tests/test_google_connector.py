@@ -794,6 +794,76 @@ class ConnectorTest(PlaneTest):
         self.assertFalse(self.connector.admin_connection_status("ada")["connectors"]["calendar"]["connected"])
         self.assertEqual(self.store.get("bea", "client-secret"), "client-secret-bea")
 
+    def test_keychain_errors_use_stable_codes_and_the_probe_deletes_its_item(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from ssios.secret_store import KeyringSecretStore, probe_keychain
+
+        class MemoryModule:
+            def __init__(self) -> None:
+                self.items: dict[tuple[str, str], str] = {}
+                self.deleted = False
+
+            def get_keyring(self):
+                return self
+
+            def set_password(self, service, username, password):
+                self.items[(service, username)] = password
+
+            def get_password(self, service, username):
+                return self.items.get((service, username))
+
+            def delete_password(self, service, username):
+                self.deleted = True
+                self.items.pop((service, username), None)
+
+        module = MemoryModule()
+        probed = probe_keychain(module)
+        self.assertTrue(probed["ok"], probed)
+        self.assertEqual(probed["code"], "ok")
+        self.assertTrue(module.deleted)
+        self.assertEqual(module.items, {})
+        self.assertNotIn("ssios-probe", json.dumps(probed))
+
+        class Locked(MemoryModule):
+            def set_password(self, service, username, password):
+                raise RuntimeError(f"Can't store password on keychain: (-25308, 'Unknown Error') {password}")
+
+        locked = Locked()
+        result = probe_keychain(locked)
+        self.assertEqual(result["code"], "keychain_locked")
+        self.assertIn("unlock-keychain", result["detail"])
+        self.assertTrue(locked.deleted)
+        self.assertNotIn("ssios-probe", result["detail"])
+
+        secret = "GOCSPX-should-not-leak"
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                KeyringSecretStore(Locked()).put("ada", "client-secret", secret)
+        self.assertEqual(caught.exception.code, "keychain_locked")
+        self.assertIn("Error code: keychain_locked", caught.exception.detail)
+        self.assertNotIn(secret, caught.exception.detail)
+        self.assertNotIn(secret, stderr.getvalue())
+        self.assertIn("class=RuntimeError", stderr.getvalue())
+        self.assertIn("-25308", stderr.getvalue())
+
+        class Other:
+            def set_password(self, service, username, password):
+                raise RuntimeError("backend unavailable")
+
+            def get_password(self, service, username):
+                raise RuntimeError("backend unavailable")
+
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as other:
+                KeyringSecretStore(Other()).get("ada", "client-id")
+        self.assertEqual(other.exception.code, "keychain_error")
+        self.assertNotIn("backend unavailable", other.exception.detail)
+        self.assertIn("class=RuntimeError", stderr.getvalue())
+
     def _propose(self, tool: str, arguments: dict) -> dict:
         return self.connector.propose_fetch(
             self.ada,

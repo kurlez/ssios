@@ -12,7 +12,10 @@ usage() {
 Usage: ./scripts/ssios <command> [args]
 
   setup      Create .venv, install runtime dependencies, and copy a sample config if needed
-  start      Run the UI in the background and print its URL
+  start      Run the UI in the background and print its URL.
+             Uses nohup, not setsid and not launchd, so the process stays in
+             this login session. macOS still will not show a Keychain prompt.
+             Unlock the login keychain from a local GUI session before Connect.
   stop       Stop the UI that this script started
   restart    Stop, then start
   status     Show whether the UI is running
@@ -263,6 +266,10 @@ wait_for_url() {
 }
 
 cmd_start() {
+  # nohup ignores SIGHUP and leaves the process in this login session.
+  # It does not call setsid and it does not install a launchd agent.
+  # A locked keychain, or a start from SSH, returns errSecInteractionNotAllowed
+  # (-25308) because this process cannot show the Keychain dialog.
   local stale
   set +e
   clear_stale

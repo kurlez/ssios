@@ -40,7 +40,7 @@ git checkout cursor/ssios-chat-ui-2e2e
 ./scripts/ssios setup
 ```
 
-`setup` creates `.venv` with the checkout's Python, installs `keyring` there, and copies the sample config only when `$SSIOS_STATE/ollama.toml` is missing or empty. `keyring` talks to the macOS Keychain in-process. If it is missing, connect fails with `secure_store_unavailable`. Secrets are not passed to the `security` command.
+`setup` creates `.venv` with the checkout's Python, installs `keyring` there, and copies the sample config only when `$SSIOS_STATE/ollama.toml` is missing or empty. `keyring` talks to the macOS Keychain in-process. If it is missing, connect fails with `secure_store_unavailable`. Secrets are not passed to the `security` command. `diagnose` also probes the keychain with a throwaway item named `probe` under the service `ssios.keychain.probe`, then deletes it. A locked keychain, or a start that cannot show UI, reports `keychain_locked` (`-25308`). Unlock the login keychain from Terminal.app on the Mac: `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 
 ## Admin and local UI
 
@@ -62,7 +62,7 @@ After the config edits above, prepare the pinned Codex binary and the aarch64 ke
 ./scripts/ssios vm-prepare
 ```
 
-Then start the UI. `start` returns after printing the URL. `status`, `logs`, `restart`, and `stop` use the pid file under `$SSIOS_STATE/run/`.
+Then start the UI from Terminal.app on the Mac, not over SSH. `start` returns after printing the URL. It backgrounds the UI with `nohup`. It does not call `setsid` and it does not use launchd, so the process stays in that login session, but macOS will not show a Keychain prompt for it. Unlock the login keychain before saving a Google client. `status`, `logs`, `restart`, and `stop` use the pid file under `$SSIOS_STATE/run/`. `logs` includes the error class and a traceback when a request fails, with secret values removed.
 
 ```bash
 ./scripts/ssios start

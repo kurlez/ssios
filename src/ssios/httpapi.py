@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import ssl
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -113,9 +113,11 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send(status, payload)
         except SsiosError as exc:
             self._send(exc.status, {"error": exc.code, "detail": exc.detail})
-        except Exception:
-            traceback.print_exc()
-            self._send(500, {"error": "internal", "detail": "internal error"})
+        except Exception as exc:
+            from ssios.logsafe import INTERNAL_HINT, log_failure
+
+            log_failure(exc)
+            self._send(500, {"error": "internal", "detail": INTERNAL_HINT})
 
     def _route(self, token: str) -> tuple[int, dict]:
         plane = self.server.plane
@@ -165,14 +167,20 @@ class AppHandler(BaseHTTPRequestHandler):
             page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
         except SsiosError as exc:
             if _ui_wants_html(self.headers):
-                from ssios.chat import english_connector_error
-                from ssios.ui import browser_error_page
-
-                page = browser_error_page(english_connector_error(exc), exc.status)
+                page = self._browser_failure(exc)
             else:
                 raise
+        except Exception as exc:
+            if not _ui_wants_html(self.headers):
+                raise
+            from ssios.logsafe import INTERNAL_HINT, log_failure
+
+            log_failure(exc)
+            page = self._browser_failure(SsiosError("internal", INTERNAL_HINT, 500))
         if not isinstance(page, Page):
-            raise SsiosError("internal", "internal error", 500)
+            from ssios.logsafe import INTERNAL_HINT
+
+            raise SsiosError("internal", INTERNAL_HINT, 500)
         if page.stream is not None:
             self._stream(page)
             return
@@ -190,6 +198,27 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", item)
         self.end_headers()
         self.wfile.write(data)
+
+    def _browser_failure(self, exc: SsiosError) -> Page:
+        from ssios.chat import public_error
+        from ssios.ui import browser_error_page
+
+        detail = public_error(exc)
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path == "/ui/connections":
+            try:
+                from ssios.ui import _session
+                from ssios.ui_household import _connections_page
+
+                session = _session(self.server.plane, self.headers)
+                if session is not None:
+                    notice = f"<p class=\"notice\">{html.escape(detail)}</p>"
+                    return Page(exc.status, _connections_page(self.server.plane, session, notice, self.client_address[0]))
+            except Exception as nested:
+                from ssios.logsafe import log_failure
+
+                log_failure(nested)
+        return browser_error_page(detail, exc.status)
 
     def _stream(self, page: Page) -> None:
         self.send_response(page.status)

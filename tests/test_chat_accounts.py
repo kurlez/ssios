@@ -1038,6 +1038,153 @@ class HouseholdTest(PlaneTest):
         self.assertIn("oauth.client.remove", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
         self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))
 
+    def test_desktop_json_connects_and_keychain_errors_stay_on_the_card(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from ssios.secret_store import KeyringSecretStore
+
+        secret = "GOCSPX-desktop-secret-value"
+        client_id = "1234567890-abc.apps.googleusercontent.com"
+        uploaded = json.dumps(
+            {
+                "installed": {
+                    "client_id": client_id,
+                    "project_id": "ssios-local",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                    "client_secret": secret,
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        )
+        boundary = "----ssiosdesktop"
+        raw = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\n{self._csrf(self.ada)}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\ninstall-client\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"client_file\"; filename=\"client_secret_desktop.json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{uploaded}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        request = urllib.request.Request(
+            self.base + "/ui/connections",
+            data=raw,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Cookie": self.ada, "Accept": "text/html"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            page = response.read().decode()
+        self.assertIn("ends in", page)
+        self.assertNotIn(secret, page)
+        self.assertEqual(self.store.get(self._ada_id(), "client-secret"), secret)
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(secret.encode(), path.read_bytes())
+        for service in ("gmail", "drive", "calendar"):
+            status, connected, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": self._csrf(self.ada), "op": "connect", "service": service},
+                cookie=self.ada,
+                extra={"Accept": "text/html"},
+            )
+            self.assertEqual(status, 200, connected)
+            self.assertIn("127.0.0.1", connected)
+            self.assertIn(client_id, connected)
+            self.assertNotIn(secret, connected)
+            self.assertNotIn("internal error", connected)
+        web = json.dumps({"web": {"client_id": "web-client-id", "client_secret": secret}})
+        web_raw = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\n{self._csrf(self.ada)}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\ninstall-client\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"client_file\"; filename=\"client_secret_web.json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{web}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        web_request = urllib.request.Request(
+            self.base + "/ui/connections",
+            data=web_raw,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Cookie": self.ada, "Accept": "text/html"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(web_request, timeout=5) as response:
+                web_status, web_page = response.status, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            web_status, web_page = exc.code, exc.read().decode()
+        self.assertEqual(web_status, 400, web_page)
+        self.assertIn("Desktop client", web_page)
+        self.assertIn("Google OAuth client", web_page)
+        self.assertNotIn(secret, web_page)
+
+        class Locked:
+            def set_password(self, service, username, password):
+                raise RuntimeError("Can't store password on keychain: (-25308, 'Unknown Error')")
+
+            def get_password(self, service, username):
+                raise RuntimeError("Can't get password on keychain: (-25308, 'Unknown Error')")
+
+            def delete_password(self, service, username):
+                raise RuntimeError("Can't delete password on keychain: (-25308, 'Unknown Error')")
+
+        self.plane.google.store = KeyringSecretStore(Locked())
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            status, locked, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": self._csrf(self.ada), "op": "install-client", "client_id": client_id, "client_secret": secret},
+                cookie=self.ada,
+                extra={"Accept": "text/html"},
+            )
+        self.assertEqual(status, 503, locked)
+        self.assertIn("keychain_locked", locked)
+        self.assertIn("unlock-keychain", locked)
+        self.assertIn("Google OAuth client", locked)
+        self.assertNotIn(secret, locked)
+        self.assertNotIn("internal error", locked)
+        logged = stderr.getvalue()
+        self.assertIn("class=RuntimeError", logged)
+        self.assertIn("-25308", logged)
+        self.assertNotIn(secret, logged)
+        self.plane.google.store = self.store
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("boom " + secret)
+
+        self.plane.google.connect = boom
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            status, broken, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": self._csrf(self.ada), "op": "connect", "service": "gmail"},
+                cookie=self.ada,
+                extra={"Accept": "text/html"},
+            )
+        self.assertEqual(status, 500, broken)
+        self.assertIn("Error code: internal", broken)
+        self.assertIn("Google OAuth client", broken)
+        self.assertNotIn(secret, broken)
+        self.assertNotIn("internal error", broken)
+        self.assertIn("class=RuntimeError", stderr.getvalue())
+        self.assertNotIn(secret, stderr.getvalue())
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            status, raw, _cookie = _form(
+                self.base,
+                "/ui/connections",
+                {"csrf": self._csrf(self.ada), "op": "connect", "service": "drive"},
+                cookie=self.ada,
+            )
+        self.assertEqual(status, 500, raw)
+        self.assertIn('"error": "internal"', raw)
+        self.assertIn("Error code: internal", raw)
+        self.assertNotIn('"detail": "internal error"', raw)
+        self.assertNotIn(secret, raw)
+        self.assertNotIn(secret, stderr.getvalue())
+
     def test_calendar_connections_approvals_and_errors(self) -> None:
         from ssios.chat import english_connector_error
         from ssios.errors import SsiosError

@@ -298,6 +298,15 @@ def english_connector_error(exc: SsiosError) -> str:
     return mapped.get(exc.code, exc.detail)
 
 
+def public_error(exc: SsiosError) -> str:
+    """A sentence a browser can show. It includes the stable code and no secret."""
+    text = english_connector_error(exc)
+    code = f"Error code: {exc.code}"
+    if code not in text:
+        text = f"{text} {code}."
+    return text
+
+
 def failure_hint(code: str) -> str:
     hints = {
         "codex_not_prepared": "The Codex binary for this state directory is missing. Run ssios vm-prepare, then ssios vm-diagnose.",

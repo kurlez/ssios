@@ -12,8 +12,18 @@ from __future__ import annotations
 from typing import Protocol
 
 from ssios.errors import SsiosError
+from ssios.logsafe import log_failure
 
 SERVICE_PREFIX = "ssios.google."
+_PROBE_SERVICE = "ssios.keychain.probe"
+_PROBE_NAME = "probe"
+_PROBE_VALUE = "ssios-probe"
+_KEYCHAIN_HINT = (
+    "The macOS login keychain refused this process (error -25308, interaction not allowed). "
+    "Unlock it with `security unlock-keychain ~/Library/Keychains/login.keychain-db`, "
+    "or run SSIOS from a local GUI login session. "
+    "Error code: keychain_locked."
+)
 SECRET_NAMES = (
     "client-id",
     "client-secret",
@@ -86,17 +96,48 @@ class MemorySecretStore:
             self.data.pop(key, None)
 
 
+def _locked(exc: BaseException) -> bool:
+    text = f"{exc.__class__.__name__} {exc}"
+    if "-25308" in text or "errSecInteractionNotAllowed" in text or "InteractionNotAllowed" in text:
+        return True
+    lowered = text.lower()
+    return "interaction not allowed" in lowered or "keychain locked" in lowered
+
+
+def _raise_store(exc: BaseException, action: str) -> None:
+    """Map a keyring failure to a stable code. The secret value is not part of the message."""
+    log_failure(exc)
+    if _locked(exc):
+        raise SsiosError("keychain_locked", _KEYCHAIN_HINT, 503) from exc
+    raise SsiosError(
+        "keychain_error",
+        f"The OS secret store could not {action} ({exc.__class__.__name__}). "
+        "Error code: keychain_error. Hint: run ./scripts/ssios diagnose.",
+        503,
+    ) from exc
+
+
 class KeyringSecretStore:
     def __init__(self, module) -> None:
         self._keyring = module
 
     def put(self, account_id: str, name: str, value: str) -> None:
         _accept(name, value)
-        self._keyring.set_password(service_name(account_id), name, value)
+        try:
+            self._keyring.set_password(service_name(account_id), name, value)
+        except SsiosError:
+            raise
+        except Exception as exc:
+            _raise_store(exc, "store a secret")
 
     def get(self, account_id: str, name: str) -> str | None:
         _accept(name, "x")
-        return self._keyring.get_password(service_name(account_id), name)
+        try:
+            return self._keyring.get_password(service_name(account_id), name)
+        except SsiosError:
+            raise
+        except Exception as exc:
+            _raise_store(exc, "read a secret")
 
     def delete(self, account_id: str, name: str) -> None:
         _accept(name, "x")
@@ -110,7 +151,11 @@ class KeyringSecretStore:
     def _delete(self, service: str, name: str) -> None:
         try:
             self._keyring.delete_password(service, name)
-        except Exception:
+        except SsiosError:
+            raise
+        except Exception as exc:
+            if _locked(exc):
+                _raise_store(exc, "delete a secret")
             return
 
 
@@ -124,3 +169,43 @@ def open_secret_store() -> SecretStore:
     if backend.__class__.__name__ == "FailKeyring":
         raise SsiosError("secure_store_unavailable", _INSTALL, 500)
     return KeyringSecretStore(keyring)
+
+
+def probe_keychain(module=None) -> dict:
+    """Write, read, and delete one non-secret item. Nothing is written to a file."""
+    if module is None:
+        try:
+            import keyring
+        except ImportError:
+            return {"ok": False, "code": "secure_store_unavailable", "detail": _INSTALL}
+        module = keyring
+    backend = module.get_keyring()
+    if backend.__class__.__name__ == "FailKeyring":
+        return {"ok": False, "code": "secure_store_unavailable", "detail": _INSTALL}
+    try:
+        module.set_password(_PROBE_SERVICE, _PROBE_NAME, _PROBE_VALUE)
+        found = module.get_password(_PROBE_SERVICE, _PROBE_NAME)
+        if found != _PROBE_VALUE:
+            return {
+                "ok": False,
+                "code": "keychain_error",
+                "detail": "The keychain probe could not read the test item back. Error code: keychain_error.",
+            }
+        return {"ok": True, "code": "ok", "detail": "The keychain accepted a probe item and it was deleted."}
+    except Exception as exc:
+        if _locked(exc):
+            return {"ok": False, "code": "keychain_locked", "detail": _KEYCHAIN_HINT}
+        log_failure(exc)
+        return {
+            "ok": False,
+            "code": "keychain_error",
+            "detail": (
+                f"The keychain probe failed ({exc.__class__.__name__}). "
+                "Error code: keychain_error. Hint: run ./scripts/ssios diagnose."
+            ),
+        }
+    finally:
+        try:
+            module.delete_password(_PROBE_SERVICE, _PROBE_NAME)
+        except Exception:
+            pass

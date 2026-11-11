@@ -119,10 +119,13 @@ def main(argv: list[str] | None = None) -> int:
             settings = replace(settings, ui_bind="0.0.0.0")
         if getattr(args, "check", False):
             from ssios.chat_guest import chat_guest_report
+            from ssios.secret_store import probe_keychain
 
             report = chat_guest_report(settings)
+            report["keychain"] = probe_keychain()
             print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
-            return 0 if report.get("ok") else 1
+            ready = bool(report.get("ok")) and bool(report["keychain"].get("ok"))
+            return 0 if ready else 1
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
