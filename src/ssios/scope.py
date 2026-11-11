@@ -170,6 +170,10 @@ class AccountScope:
                 str(record["payload_sha256"]),
             )
             return {"action": action, "revision": revision, "meta": {}}
+        if action == "mcp.write":
+            from ssios.mcp_host import apply_write
+
+            return apply_write(self, record)
         raise SsiosError("approval_invalid", "action rejected", 400)
 
     def _audit(self, peer_ip: str, action: str, target: str, result: str) -> None:

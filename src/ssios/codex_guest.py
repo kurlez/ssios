@@ -682,6 +682,18 @@ def _probe_context(root: str, model: str, num_ctx: int, timeout: float) -> int |
     return int(num_ctx)
 
 
+def _json_response(status: int, payload: dict) -> bytes:
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 429: "Too Many Requests"}.get(status, "Error")
+    header = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        f"Content-Length: {len(raw)}\r\n"
+        "Connection: close\r\n\r\n"
+    )
+    return header.encode("ascii") + raw
+
+
 def error_response(status: int, reason: str) -> bytes:
     body = json.dumps({"error": reason}).encode("utf-8")
     header = (
@@ -729,6 +741,7 @@ class ResponsesProxy:
         max_output_tokens: int = 1024,
         listen_path: Path | None = None,
         num_ctx: int = 16384,
+        tool_handler=None,
     ) -> None:
         self.socket_path = socket_path
         self.listen_path = listen_path or Path(str(socket_path) + f"_{VSOCK_PORT}")
@@ -746,6 +759,8 @@ class ResponsesProxy:
         self.connected = 0
         self.rejected = False
         self.upstream_failure: dict | None = None
+        self.tool_handler = tool_handler
+        self.tool_calls = 0
         self._thread: threading.Thread | None = None
         self._server: socket.socket | None = None
 
@@ -813,6 +828,13 @@ class ResponsesProxy:
             self.rejected = True
             self._log(redact_text(str(exc), []), "rejected")
             conn.sendall(error_response(400, "bad_request"))
+            return
+        path = ""
+        parts = request_line.split(" ")
+        if len(parts) >= 2:
+            path = parts[1].split("?", 1)[0]
+        if path == "/mcp/tools/call":
+            self._mcp(conn, headers, body)
             return
         if isinstance(self.upstream_failure, dict) and self.upstream_failure.get("fatal"):
             conn.sendall(error_response(502, "upstream_error"))
@@ -913,6 +935,44 @@ class ResponsesProxy:
             "Connection: close\r\n\r\n"
         )
         conn.sendall(header.encode("ascii") + rendered)
+
+    def _mcp(self, conn: socket.socket, headers: dict, body: bytes) -> None:
+        """Tool call from the guest. The Authorization header is dropped here."""
+        del headers
+        from ssios.mcp_host import TOOL_NAMES
+        from ssios.vmguest import redact_text
+
+        if self.tool_handler is None:
+            conn.sendall(_json_response(404, {"error": "mcp_unavailable"}))
+            return
+        if self.tool_calls >= 6:
+            conn.sendall(_json_response(429, {"error": "tool_rounds"}))
+            return
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            conn.sendall(_json_response(400, {"error": "bad_request"}))
+            return
+        if not isinstance(payload, dict):
+            conn.sendall(_json_response(400, {"error": "bad_request"}))
+            return
+        name = str(payload.get("name") or "")
+        arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        if name not in TOOL_NAMES:
+            self._log("", "mcp_tool_denied", len(body), "")
+            conn.sendall(_json_response(403, {"error": "mcp_tool_denied", "tool": name}))
+            return
+        self.tool_calls += 1
+        try:
+            result = self.tool_handler(name, arguments)
+        except SsiosError as exc:
+            conn.sendall(_json_response(exc.status, {"error": exc.code, "detail": redact_text(exc.detail, [])}))
+            return
+        if isinstance(result, dict) and "text" in result:
+            result = dict(result)
+            result["text"] = redact_text(str(result.get("text") or ""), [])
+        self._log(name, "mcp_ok", 0, "")
+        conn.sendall(_json_response(200, result if isinstance(result, dict) else {"status": "ok"}))
 
     def _note_upstream(
         self,
