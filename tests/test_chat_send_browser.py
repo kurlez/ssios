@@ -303,3 +303,65 @@ class ChatSendBrowserTest(unittest.TestCase):
         self._type_and_send("See the desk photo")
         self.page.wait("document.body.innerText.includes('See the desk photo') && document.body.innerText.includes('Synthetic local answer')")
         self.assertEqual(self.page.errors, [])
+
+    def test_clipboard_items_attach_images_and_text_paste_still_works(self) -> None:
+        from ssios.files import FileLibrary
+
+        self._open("/ui/chat")
+        payload = json.dumps(list(PNG))
+        text_paste = self.page.eval(
+            "var box = document.querySelector('textarea[name=message]');"
+            "box.value = 'keep this';"
+            "var data = {files: [], items: [{kind: 'string', type: 'text/plain', getAsFile: function () { return null; }}]};"
+            "var paste = new Event('paste', {bubbles: true, cancelable: true});"
+            "Object.defineProperty(paste, 'clipboardData', {value: data});"
+            "box.dispatchEvent(paste);"
+            "JSON.stringify({prevented: paste.defaultPrevented, value: box.value, thumbs: document.querySelectorAll('#paste-preview img').length})"
+        )
+        text_state = json.loads(text_paste)
+        self.assertFalse(text_state["prevented"])
+        self.assertEqual(text_state["value"], "keep this")
+        self.assertEqual(text_state["thumbs"], 0)
+        pasted = self.page.eval(
+            "var bytes = new Uint8Array(" + payload + ");"
+            "function imageFile(name) { return new File([bytes], name, {type: 'image/png'}); }"
+            "function pasteItems(files) {"
+            "  var items = files.map(function (file) { return {kind: 'file', type: 'image/png', getAsFile: function () { return file; }}; });"
+            "  var data = {files: [], items: items};"
+            "  var paste = new Event('paste', {bubbles: true, cancelable: true});"
+            "  Object.defineProperty(paste, 'clipboardData', {value: data});"
+            "  document.querySelector('textarea[name=message]').dispatchEvent(paste);"
+            "}"
+            "pasteItems([imageFile('shot.png'), imageFile('browser.png')]);"
+            "JSON.stringify({prevented: true, thumbs: document.querySelectorAll('#paste-preview img').length, removes: document.querySelectorAll('.paste-x').length, note: (document.getElementById('file-note') || {}).textContent || ''})"
+        )
+        state = json.loads(pasted)
+        self.assertEqual(state["thumbs"], 2)
+        self.assertEqual(state["removes"], 2)
+        self.assertIn("2 file ready", state["note"])
+        self._shot("clipboard-preview-1280.png")
+        self.page.eval("document.querySelector('.paste-x').click(); true")
+        left = self.page.eval("document.querySelectorAll('#paste-preview img').length")
+        self.assertEqual(left, 1)
+        self.page.eval(
+            "var box = document.querySelector('textarea[name=message]');"
+            "box.value = 'Pasted screenshot';"
+            "box.dispatchEvent(new Event('input', {bubbles: true}));"
+            "document.querySelector('button.send').click(); true"
+        )
+        self.page.wait("document.body.innerText.includes('Pasted screenshot') && document.querySelectorAll('.msg.user .thumb').length >= 1")
+        self.page.eval("document.querySelector('.msg.user .thumb').click(); true")
+        self.page.wait("document.getElementById('image-lightbox') && !document.getElementById('image-lightbox').hidden")
+        self.assertEqual(self.page.errors, [])
+        self._shot("clipboard-sent-1280.png")
+        rows = FileLibrary(self.case.plane).list(self.ada["id"], role="image")
+        self.assertTrue(rows)
+        self.assertTrue(all(item["url"].startswith("/ui/files/file-") for item in rows))
+
+    def _shot(self, name: str) -> None:
+        import base64
+
+        result = self.page.call("Page.captureScreenshot", {"format": "png"})
+        target = Path("/opt/cursor/artifacts") / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(result["data"]))

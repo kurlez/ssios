@@ -78,22 +78,90 @@ CHAT_JS = r"""
   }
   function takeFiles(list) {
     Array.prototype.forEach.call(list || [], function (file) {
-      if (file && pending.length < 6) pending.push(file);
+      if (!file || pending.length >= 6) return;
+      var key = (file.name || "") + ":" + file.size + ":" + (file.lastModified || 0);
+      var duplicate = pending.some(function (item) {
+        return (item.name || "") + ":" + item.size + ":" + (item.lastModified || 0) === key;
+      });
+      if (!duplicate) pending.push(file);
     });
-    if (note) note.textContent = pending.length ? String(pending.length) + " file ready to send." : "";
+    showPreviews();
     syncSend();
+  }
+  function showPreviews() {
+    var strip = document.getElementById("paste-preview");
+    if (strip) {
+      Array.prototype.forEach.call(strip.querySelectorAll("img"), function (img) {
+        if (String(img.src || "").indexOf("blob:") === 0) URL.revokeObjectURL(img.src);
+      });
+      strip.textContent = "";
+      pending.forEach(function (file, index) {
+        var fig = document.createElement("figure");
+        fig.className = "paste-thumb";
+        var type = file.type || "";
+        if (type.indexOf("image/") === 0) {
+          var img = document.createElement("img");
+          img.alt = file.name || "Pasted image";
+          img.src = URL.createObjectURL(file);
+          fig.appendChild(img);
+        } else {
+          var label = document.createElement("span");
+          label.textContent = file.name || "File";
+          fig.appendChild(label);
+        }
+        var remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "paste-x";
+        remove.setAttribute("aria-label", "Remove image");
+        remove.textContent = "\u00d7";
+        remove.addEventListener("click", function () {
+          pending.splice(index, 1);
+          showPreviews();
+          syncSend();
+        });
+        fig.appendChild(remove);
+        strip.appendChild(fig);
+      });
+    }
+    if (note) note.textContent = pending.length ? String(pending.length) + " file ready to send." : "";
+  }
+  function clipboardImages(data) {
+    var found = [];
+    var items = data && data.items;
+    if (items && items.length) {
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var type = (item && item.type) || "";
+        if (type.indexOf("image/") === 0 && item.getAsFile) {
+          var image = item.getAsFile();
+          if (image) found.push(image);
+        }
+      }
+    }
+    if (data && data.files && data.files.length) {
+      Array.prototype.forEach.call(data.files, function (file) { if (file) found.push(file); });
+    }
+    return found;
   }
   form.addEventListener("dragover", function (event) { event.preventDefault(); });
   form.addEventListener("drop", function (event) {
     event.preventDefault();
     takeFiles(event.dataTransfer && event.dataTransfer.files);
   });
+  var picker = form.querySelector("input[name=image]");
+  if (picker) {
+    picker.addEventListener("change", function () {
+      takeFiles(picker.files);
+      picker.value = "";
+    });
+  }
   box.addEventListener("paste", function (event) {
-    var files = event.clipboardData && event.clipboardData.files;
-    if (files && files.length) {
-      event.preventDefault();
-      takeFiles(files);
-    }
+    var data = event.clipboardData;
+    if (!data) return;
+    var images = clipboardImages(data);
+    if (!images.length) return;
+    event.preventDefault();
+    takeFiles(images);
   });
   form.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -105,7 +173,8 @@ CHAT_JS = r"""
     text = box.value;
     column.classList.add("has-messages");
     if (empty) empty.hidden = true;
-    renderMessage({role: "user", text: text, at: Date.now() / 1000});
+    var localImages = pending.filter(function (file) { return String(file.type || "").indexOf("image/") === 0; }).map(function (file) { return URL.createObjectURL(file); });
+    renderMessage({role: "user", text: text, at: Date.now() / 1000, image: localImages[0] || "", images: localImages});
     var answer = renderMessage({role: "assistant", text: "", at: Date.now() / 1000});
     var typing = document.createElement("p");
     typing.className = "typing";
@@ -117,7 +186,7 @@ CHAT_JS = r"""
     var useFile = pending.length || (file && file.files && file.files.length);
     if (!useFile) params.delete("image");
     pending = [];
-    if (note) note.textContent = "";
+    showPreviews();
     turnFailed = false;
     box.value = "";
     grow();
@@ -202,6 +271,26 @@ CHAT_JS = r"""
     box.style.height = Math.min(box.scrollHeight, 160) + "px";
   }
 
+  function enlarge(src) {
+    var box = document.getElementById("image-lightbox");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "image-lightbox";
+      box.className = "lightbox";
+      box.hidden = true;
+      box.tabIndex = -1;
+      var big = document.createElement("img");
+      big.alt = "Enlarged image";
+      box.appendChild(big);
+      box.addEventListener("click", function () { box.hidden = true; });
+      document.addEventListener("keydown", function (keyEvent) {
+        if (keyEvent.key === "Escape") box.hidden = true;
+      });
+      document.body.appendChild(box);
+    }
+    box.querySelector("img").src = src;
+    box.hidden = false;
+  }
   function renderMessage(message) {
     var role = message.role === "user" ? "user" : "assistant";
     markDay(message.at);
@@ -219,13 +308,21 @@ CHAT_JS = r"""
         bubble.appendChild(quoted);
       }
       bubble.appendChild(document.createTextNode(message.text || ""));
-      if (message.image) {
+      var pictures = message.images || (message.image ? [message.image] : []);
+      pictures.forEach(function (src) {
+        if (!src) return;
         var thumb = document.createElement("img");
         thumb.className = "thumb";
         thumb.alt = "Attached image";
-        thumb.src = message.image;
+        thumb.src = src;
+        thumb.tabIndex = 0;
+        function open() { enlarge(src); }
+        thumb.addEventListener("click", open);
+        thumb.addEventListener("keydown", function (keyEvent) {
+          if (keyEvent.key === "Enter" || keyEvent.key === " ") { keyEvent.preventDefault(); open(); }
+        });
         bubble.appendChild(thumb);
-      }
+      });
       wrap.appendChild(bubble);
       content = bubble;
     } else {
@@ -1436,11 +1533,11 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
             files.append({"id": row["id"], "name": row["name"], "url": row["url"], "role": row["role"]})
         if files:
             item["files"] = files
-            if not item.get("image"):
-                for row in files:
-                    if row["role"] == "image":
-                        item["image"] = row["url"]
-                        break
+            images = [row["url"] for row in files if row["role"] == "image"]
+            if images:
+                item["images"] = images
+                if not item.get("image"):
+                    item["image"] = images[0]
         if message.get("error_code"):
             item["error_code"] = str(message.get("error_code"))
         checks = message.get("checks")
@@ -1764,7 +1861,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"conversation\" value=\"{conv}\">"
         "<input type=\"hidden\" name=\"quote\" value=\"\">"
         "<p id=\"quote-bar\" class=\"quote-bar\" hidden></p>"
-        "<p id=\"file-note\" class=\"hint\"></p>"
+        "<p id=\"file-note\" class=\"hint\"></p><div id=\"paste-preview\" class=\"paste-preview\"></div>"
         "<textarea name=\"message\" rows=\"1\" aria-label=\"Message\" placeholder=\"Message SSIOS…\" required></textarea>"
         "<div class=\"composer-bar\">"
         "<label class=\"attach\" aria-label=\"Attach an image\">" + icon("paperclip") + "<input name=\"image\" type=\"file\" accept=\"image/png,image/jpeg,image/gif,image/webp\"></label>"

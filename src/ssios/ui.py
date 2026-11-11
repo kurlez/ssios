@@ -1334,7 +1334,14 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .day-group summary { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .quote, .quote-bar { border-left: 3px solid var(--accent); margin: 0 0 6px; padding: 2px 8px; color: var(--muted); font-size: 13px; }
 .rail .new-chat { display: grid; margin: 0; width: 44px; border: 0; padding: 4px; }
-.thumb { display: block; max-width: 180px; border-radius: 12px; margin-top: 6px; }
+.thumb { display: block; max-width: 180px; border-radius: 12px; margin-top: 6px; cursor: pointer; }
+.paste-preview { display: flex; flex-wrap: wrap; gap: 8px; }
+.paste-thumb { position: relative; margin: 0; }
+.paste-thumb img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
+.paste-x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border: 0; border-radius: 999px; background: var(--ink); color: var(--bg); line-height: 20px; padding: 0; cursor: pointer; }
+.lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 30; }
+.lightbox[hidden] { display: none; }
+.lightbox img { max-width: 90vw; max-height: 90vh; }
 .day { align-self: center; color: var(--muted); font-size: 12px; }
 .attach input { width: 1px; height: 1px; opacity: 0; position: absolute; }
 .attach { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
