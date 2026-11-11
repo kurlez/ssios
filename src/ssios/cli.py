@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -156,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(build_runtime(settings).doctor(), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "vm-diagnose":
+        from ssios.chat_guest import vm_diagnose
+
+        report = vm_diagnose(settings)
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        return 0 if report.get("prerequisites", {}).get("ok") else 1
     if args.command == "gc":
         return run_gc(settings, dry_run=args.dry_run)
     if args.command == "diagnose":

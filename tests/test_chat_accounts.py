@@ -1162,6 +1162,65 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Deleted event ev0123456789abcf", done)
         self.assertEqual(len([item for item in _CalendarApi.writes if item["method"] == "DELETE"]), 1)
 
+    def test_vm_failure_is_saved_in_the_bubble_and_diagnose_is_redacted(self) -> None:
+        from ssios.chat_guest import vm_diagnose
+        from ssios.chat_store import ChatStore
+        from ssios.errors import SsiosError
+
+        class MissingBinary:
+            def run(self, plane, request, on_status):
+                raise SsiosError("codex_not_prepared", "pinned Codex binary is missing; run ssios vm-prepare on the host", 503)
+
+        self.plane.chat_guest = MissingBinary()
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "edit readme.md"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 503, page)
+        self.assertIn("Error code: codex_not_prepared", page)
+        self.assertIn("ssios vm-diagnose", page)
+        conv = page.split('class="conversation">', 1)[1].split("<", 1)[0]
+        home = self.plane.accounts.home(self._ada_id())
+        stored = json.dumps(ChatStore(home).get(conv))
+        self.assertIn("Error code: codex_not_prepared", stored)
+        reloaded = self._open("/ui/chat?conversation=" + conv, self.ada, "text/html")[2].decode()
+        self.assertIn("Error code: codex_not_prepared", reloaded)
+        tasks = json.loads((home / "tasks.json").read_text(encoding="utf-8"))["tasks"]
+        self.assertTrue(any(item.get("error_code") == "codex_not_prepared" for item in tasks.values()))
+
+        class Boom:
+            def run(self, plane, request, on_status):
+                raise RuntimeError("guest-0123456789abcdef secret-bubble")
+
+        self.plane.chat_guest = Boom()
+        status, crashed, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(self.ada), "message": "edit a file in the workspace"},
+            cookie=self.ada,
+        )
+        self.assertEqual(status, 503, crashed)
+        self.assertIn("Error code: chat_failed", crashed)
+        self.assertIn("RuntimeError", crashed)
+        self.assertNotIn("secret-bubble", crashed)
+        self.assertNotIn("guest-0123456789abcdef", crashed)
+
+        guest = home / "workspace" / "tasks" / "task-0011223344556677" / "guest"
+        guest.mkdir(parents=True)
+        (guest / "serial.log").write_text("prompt guest-0123456789abcdef\nRuntimeError: disk full\n", encoding="utf-8")
+        (home / "tasks.json").write_text(
+            json.dumps({"tasks": {"task-0011223344556677": {"id": "task-0011223344556677", "status": "failed", "error_code": "codex_not_prepared", "error_detail": "guest-0123456789abcdef missing"}}}),
+            encoding="utf-8",
+        )
+        report = json.dumps(vm_diagnose(self.plane.settings))
+        self.assertIn("codex_not_prepared", report)
+        self.assertIn("RuntimeError: disk full", report)
+        self.assertNotIn("guest-0123456789abcdef", report)
+        self.assertIn("serial.log", report)
+        self.assertNotIn("secret-bubble", report)
+
     def test_chat_history_sidebar_and_sanitized_markdown(self) -> None:
         first = self._send(self.ada, "What is a microVM?")
         self.assertIn("Route: direct", first)

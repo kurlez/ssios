@@ -21,6 +21,7 @@ CHAT_JS = r"""
   var dataNode = document.getElementById("chat-data");
   if (!form || !column) return;
   var csrf = (form.querySelector("input[name=csrf]") || {}).value || "";
+  var turnFailed = false;
   var state = {};
   try { state = JSON.parse(dataNode ? dataNode.textContent || "{}" : "{}"); } catch (err) { state = {}; }
   (state.messages || []).forEach(renderMessage);
@@ -56,6 +57,7 @@ CHAT_JS = r"""
     typing.textContent = "Assistant is writing";
     answer.appendChild(typing);
     var params = new URLSearchParams(new FormData(form));
+    turnFailed = false;
     box.value = "";
     grow();
     fetch(form.action, {
@@ -75,7 +77,13 @@ CHAT_JS = r"""
       var raw = "";
       function pump() {
         return reader.read().then(function (chunk) {
-          if (chunk.done) { typing.remove(); renderMarkdown(answer, raw); return; }
+          if (chunk.done) {
+            typing.remove();
+            if (!turnFailed && !String(raw || "").trim() && !answer.querySelector("pre, ul, p, a")) {
+              answer.textContent = ["The turn ended with no answer.", "", "Error code: chat_empty", "Hint: Reload the chat. If it is still empty, run ssios vm-diagnose."].join("\n");
+            } else if (!turnFailed) renderMarkdown(answer, raw);
+            return;
+          }
           buffer += decoder.decode(chunk.value, {stream: true});
           var parts = buffer.split("\n\n");
           buffer = parts.pop();
@@ -86,7 +94,7 @@ CHAT_JS = r"""
       return pump();
     }).catch(function () {
       typing.remove();
-      answer.textContent = "The stream stopped.";
+      if (!answer.textContent) answer.textContent = ["The stream stopped.", "", "Error code: chat_failed", "Hint: Reload the chat. If it is still empty, run ssios vm-diagnose."].join("\n");
     });
   });
 
@@ -206,7 +214,10 @@ CHAT_JS = r"""
       column.appendChild(badge);
     }
     if (name === "approval") addApproval({id: payload.id, status: "pending", actionable: true, preview: payload.preview || "", destructive: !!payload.destructive, action: payload.action, payload_sha256: payload.payload_sha256, expected_revision: payload.expected_revision, bound_hash: payload.bound_hash});
-    if (name === "error") answer.textContent = payload.detail || "The turn failed.";
+    if (name === "error") {
+      turnFailed = true;
+      answer.textContent = payload.detail || "The turn failed.";
+    }
     if (name === "conversation" && payload.id) {
       var hidden = form.querySelector("input[name=conversation]");
       if (hidden) hidden.value = payload.id;
@@ -362,7 +373,11 @@ def _send(plane, session, body, peer_ip, headers):
         from ssios.chat import english_connector_error
 
         return Page(exc.status, _page(session, "Chat", f"<p>{html.escape(english_connector_error(exc))}</p>"))
-    return Page(200, _page(session, "Chat", _events_html(session, events)))
+    status = 200
+    for event in events:
+        if event.get("event") == "error":
+            status = int(event.get("data", {}).get("status") or 500)
+    return Page(status, _page(session, "Chat", _events_html(session, events)))
 
 
 def _sse(plane, account, text, override, peer_ip, conversation):
@@ -370,9 +385,18 @@ def _sse(plane, account, text, override, peer_ip, conversation):
         for event in iter_turn(plane, account, text, override, peer_ip, conversation):
             yield _frame(event)
     except SsiosError as exc:
-        from ssios.chat import english_connector_error
+        from ssios.chat import english_connector_error, failure_hint
 
-        yield _frame({"event": "error", "data": {"detail": english_connector_error(exc)}})
+        detail = english_connector_error(exc)
+        hint = failure_hint(exc.code)
+        text = f"{detail}\n\nError code: {exc.code}\nHint: {hint}"
+        yield _frame({"event": "error", "data": {"code": exc.code, "detail": text, "hint": hint}})
+    except Exception as exc:
+        from ssios.chat import failure_hint
+
+        code = "chat_failed"
+        text = f"The turn stopped because of {exc.__class__.__name__}.\n\nError code: {code}\nHint: {failure_hint(code)}"
+        yield _frame({"event": "error", "data": {"code": code, "detail": text, "hint": failure_hint(code)}})
 
 
 def _frame(event: dict) -> str:

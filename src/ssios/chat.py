@@ -49,18 +49,25 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     store.append(record["id"], {"role": "user", "text": message, "route": decision.public()})
     yield {"event": "conversation", "data": {"id": record["id"]}}
     yield {"event": "route", "data": decision.public()}
-    if decision.route == "direct":
-        yield from _direct(plane, scope, record["id"], decision)
-    elif decision.route == "memory":
-        yield from _memory(plane, scope, record["id"], message)
-    elif decision.route == "connector":
-        yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=False)
-    elif decision.route == "connector_vm":
-        yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=True)
-    elif decision.route == "vm":
-        yield from _vm(plane, scope, record["id"], message, peer_ip)
-    else:
-        raise SsiosError("chat_rejected", "route rejected", 400)
+    try:
+        if decision.route == "direct":
+            yield from _direct(plane, scope, record["id"], decision)
+        elif decision.route == "memory":
+            yield from _memory(plane, scope, record["id"], message)
+        elif decision.route == "connector":
+            yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=False)
+        elif decision.route == "connector_vm":
+            yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=True)
+        elif decision.route == "vm":
+            yield from _vm(plane, scope, record["id"], message, peer_ip)
+        else:
+            raise SsiosError("chat_rejected", "route rejected", 400)
+    except SsiosError as exc:
+        yield remember_failure(scope, record["id"], exc.code, english_connector_error(exc), exc.status)
+        return
+    except Exception as exc:
+        yield remember_failure(scope, record["id"], "chat_failed", f"The turn stopped because of {exc.__class__.__name__}.", 500)
+        return
     yield {"event": "done", "data": {"ok": True}}
 
 
@@ -291,6 +298,31 @@ def english_connector_error(exc: SsiosError) -> str:
     return mapped.get(exc.code, exc.detail)
 
 
+def failure_hint(code: str) -> str:
+    hints = {
+        "codex_not_prepared": "The Codex binary for this state directory is missing. Run ssios vm-prepare, then ssios vm-diagnose.",
+        "macos_vz_not_prepared": "The kernel or initramfs for this state directory is missing. Run ssios vm-prepare, then ssios vm-diagnose.",
+        "guest_vsock_unavailable": "vfkit started, but the guest never connected. ssios vm-diagnose prints the guest log path.",
+        "timeout": "The guest ran longer than task_timeout_seconds. ssios vm-diagnose shows the configured limit.",
+        "llm_unavailable": "Ollama did not answer. ssios vm-diagnose checks whether it is reachable.",
+        "model_output_invalid": "The guest finished without an answer. ssios vm-diagnose shows the latest task error.",
+        "model_output_empty": "The local model returned no text.",
+        "chat_empty": "The stream ended before any answer was saved. Reload the chat, then run ssios vm-diagnose.",
+    }
+    return hints.get(code, 'Run ssios vm-diagnose --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml".')
+
+
+def remember_failure(scope: AccountScope, conversation_id: str, code: str, detail: str, status: int = 500) -> dict:
+    """Save the failure in the account chat so a reload does not show an empty bubble."""
+    hint = failure_hint(code)
+    text = f"{str(detail or 'The turn failed.').strip()}\n\nError code: {code}\nHint: {hint}"
+    try:
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text, "error_code": code})
+    except SsiosError:
+        pass
+    return {"event": "error", "data": {"code": code, "detail": text, "hint": hint, "status": int(status or 500)}}
+
+
 def outcome_line(text: str) -> str:
     body = text.split("\n", 1)[-1].strip() if "UNTRUSTED EXTERNAL CONTENT" in text else text.strip()
     for verb, label in (("created ", "Created"), ("updated ", "Updated"), ("deleted ", "Deleted")):
@@ -315,11 +347,27 @@ def _vm(plane, scope: AccountScope, conversation_id: str, prompt: str, peer_ip: 
             else:
                 yield {"event": "status", "data": payload}
         elif kind == "error":
-            error = str(payload)
+            error = payload
         elif kind == "result":
             result = payload
     if error or not isinstance(result, dict):
-        scope.save_task({"id": task_id, "status": "failed", "backend": "", "isolated": False, "boot_ms": None})
+        if isinstance(error, dict):
+            code = str(error.get("code") or "microvm_fail_closed")
+            detail = str(error.get("detail") or "the guest did not run")
+        else:
+            code = "microvm_fail_closed"
+            detail = str(error or "the guest did not run")
+        scope.save_task(
+            {
+                "id": task_id,
+                "status": "failed",
+                "backend": "",
+                "isolated": False,
+                "boot_ms": None,
+                "error_code": code,
+                "error_detail": detail[:500],
+            }
+        )
         plane.security_audit.write(
             actor=scope.account_id,
             ip=peer_ip or "127.0.0.1",
@@ -328,7 +376,7 @@ def _vm(plane, scope: AccountScope, conversation_id: str, prompt: str, peer_ip: 
             result="failed",
             extra={"isolated": "false"},
         )
-        raise SsiosError("microvm_fail_closed", error or "the guest did not run", 503)
+        raise SsiosError(code, detail, 503)
     checks = result.get("checks") if isinstance(result.get("checks"), dict) else {}
     scope.save_task(
         {
@@ -374,9 +422,9 @@ def _pump(func) -> Iterator[tuple[str, object]]:
         try:
             box.put(("result", func(on_status)))
         except SsiosError as exc:
-            box.put(("error", exc.detail))
+            box.put(("error", {"code": exc.code, "detail": exc.detail}))
         except Exception as exc:
-            box.put(("error", exc.__class__.__name__))
+            box.put(("error", {"code": "chat_failed", "detail": f"The guest stopped because of {exc.__class__.__name__}."}))
         finally:
             box.put(None)
 

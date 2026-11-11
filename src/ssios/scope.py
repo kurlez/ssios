@@ -173,7 +173,10 @@ class AccountScope:
 
     def save_task(self, task: dict) -> None:
         tasks = self.tasks()
-        tasks[str(task["id"])] = {key: task.get(key) for key in ("id", "status", "backend", "isolated", "boot_ms", "created_at")}
+        tasks[str(task["id"])] = {
+            key: task.get(key)
+            for key in ("id", "status", "backend", "isolated", "boot_ms", "created_at", "error_code", "error_detail")
+        }
         write_json(self.home / "tasks.json", {"tasks": tasks})
 
 

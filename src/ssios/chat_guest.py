@@ -43,7 +43,9 @@ class ProductionChatGuest:
         checks = read_checks(root)
         on_status({"phase": "isolation", "backend": backend, "checks": checks})
         if not _checks_pass(checks) or not outcome.isolated:
-            raise SsiosError("microvm_fail_closed", "the guest did not pass the isolation checks", 503)
+            code = outcome.error_code or "microvm_fail_closed"
+            detail = (outcome.detail or "the guest did not pass the isolation checks").strip()
+            raise SsiosError(code, detail[:500], 503)
         text = (outcome.text or "").strip()
         if not text:
             raise SsiosError("model_output_invalid", "guest returned no result", 502)
@@ -239,6 +241,165 @@ def _boot(plane, request: ChatGuestRequest, root: Path, backend: str):
     if not initramfs.is_file():
         build_codex_initramfs(initramfs)
     return _boot_codex(runtime, session, "", cancel, deadline, initramfs, _upstream(plane))
+
+
+def vm_diagnose(settings) -> dict:
+    """Redacted guest summary. Paths and presence only, plus one exception line. No tokens."""
+    import urllib.error
+    import urllib.request
+
+    state = Path(settings.state_dir)
+    kernel = state / "cache" / "macos-vz" / "Image-arm64"
+    initramfs = state / "cache" / "macos-vz" / "codex-initrd.img"
+    codex = _codex_binary(state)
+    vfkit = _which(getattr(settings, "vfkit_bin", "") or "vfkit")
+    report = chat_guest_report(settings)
+    ollama = _ollama_probe(getattr(settings, "ollama_base_url", ""), urllib.request, urllib.error)
+    latest = _latest_guest_error(state)
+    return {
+        "ok": bool(report.get("ok")) and ollama.get("reachable") is not False,
+        "backend": settings.runtime_backend,
+        "agent": settings.runtime_agent,
+        "memory_mb": settings.memory_mb,
+        "task_timeout_seconds": settings.task_timeout_seconds,
+        "ollama_model": settings.ollama_model,
+        "codex_model": settings.codex_model,
+        "ollama": ollama,
+        "files": {
+            "vfkit": {"present": bool(vfkit), "path": vfkit or ""},
+            "kernel": _file_fact(kernel),
+            "initramfs": _file_fact(initramfs),
+            "codex": _file_fact(codex) if codex else {"present": False, "path": "", "bytes": 0},
+        },
+        "prerequisites": {"ok": report.get("ok"), "detail": _redact(str(report.get("detail") or ""))},
+        "last_vm_task": latest,
+        "logs": {
+            "ui": "The ssios ui process prints to the terminal that started it. listen.url in the state directory has the address only.",
+            "tasks": "accounts/<id>/tasks.json holds the last error_code and error_detail for that account.",
+            "guest": "accounts/<id>/workspace/tasks/<task-id>/guest/serial.log is the vfkit console. proxy.log is beside it. This report does not print those files.",
+        },
+    }
+
+
+def _codex_binary(state: Path) -> Path | None:
+    root = state / "cache" / "codex"
+    if not root.is_dir():
+        return None
+    found = sorted(path for path in root.glob("*/*") if path.is_file() and not path.is_symlink() and path.suffix != ".tar.gz")
+    return found[0] if found else None
+
+
+def _which(name: str) -> str:
+    import shutil
+
+    return shutil.which(name) or ""
+
+
+def _file_fact(path: Path) -> dict:
+    present = path.is_file() and not path.is_symlink()
+    return {"present": present, "path": str(path), "bytes": path.stat().st_size if present else 0}
+
+
+def _ollama_probe(base: str, request_mod, error_mod) -> dict:
+    url = str(base or "").rstrip("/")
+    if not url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
+        return {"reachable": False, "detail": "ollama URL is not a loopback address, so it was not contacted"}
+    try:
+        with request_mod.urlopen(url + "/api/tags", timeout=3) as response:
+            raw = response.read(65536)
+    except error_mod.HTTPError as exc:
+        exc.read()
+        return {"reachable": False, "detail": f"ollama http {exc.code}"}
+    except (error_mod.URLError, TimeoutError, OSError):
+        return {"reachable": False, "detail": "ollama is unreachable"}
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"reachable": True, "detail": "ollama answered, but the model list was not readable"}
+    names = []
+    if isinstance(body, dict):
+        for item in body.get("models") or []:
+            if isinstance(item, dict) and item.get("name"):
+                names.append(str(item["name"])[:80])
+    return {"reachable": True, "models": names[:20], "detail": "ollama answered /api/tags"}
+
+
+def _latest_guest_error(state: Path) -> dict:
+    newest: tuple[float, Path] | None = None
+    if state.is_dir():
+        for path in state.glob("accounts/*/workspace/tasks/*/guest"):
+            if not path.is_dir():
+                continue
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, path)
+    task_errors = _task_errors(state)
+    if newest is None and not task_errors:
+        return {"found": False}
+    guest = newest[1] if newest else None
+    line = ""
+    if guest is not None:
+        chunks = []
+        for relative in ("serial.log", "scratch/codex.err"):
+            file = guest / relative
+            if file.is_file() and not file.is_symlink() and file.stat().st_size <= 200000:
+                chunks.append(file.read_text(encoding="utf-8", errors="replace")[-4000:])
+        for row in chunks:
+            for candidate in reversed(row.splitlines()):
+                stripped = candidate.strip()
+                if stripped and ("Error" in stripped or "Exception" in stripped or stripped.startswith("error")):
+                    line = stripped
+                    break
+            if line:
+                break
+    chosen = task_errors[0] if task_errors else {}
+    return {
+        "found": True,
+        "task_id": guest.parent.name if guest is not None else chosen.get("task_id", ""),
+        "error_code": chosen.get("error_code") or "",
+        "error_detail": _redact(str(chosen.get("error_detail") or "")),
+        "exception_line": _redact(line),
+        "serial_log": str(guest / "serial.log") if guest is not None else "",
+        "proxy_log": str(guest / "proxy.log") if guest is not None else "",
+    }
+
+
+def _task_errors(state: Path) -> list[dict]:
+    rows = []
+    if not state.is_dir():
+        return rows
+    for path in state.glob("accounts/*/tasks.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        tasks = data.get("tasks") if isinstance(data, dict) else {}
+        if not isinstance(tasks, dict):
+            continue
+        for task_id, task in tasks.items():
+            if not isinstance(task, dict):
+                continue
+            if task.get("status") == "failed" or task.get("error_code") or task.get("error_detail"):
+                rows.append(
+                    {
+                        "task_id": str(task_id),
+                        "error_code": str(task.get("error_code") or ""),
+                        "error_detail": str(task.get("error_detail") or ""),
+                    }
+                )
+    return rows
+
+
+def _redact(text: str) -> str:
+    import re
+
+    cleaned = re.sub(r"(?i)bearer\s+\S+", "bearer [redacted]", text)
+    cleaned = re.sub(r"(?i)\bguest-[0-9a-f]{8,}\b", "guest-[redacted]", cleaned)
+    cleaned = re.sub(r"\b[0-9a-f]{24,}\b", "[redacted]", cleaned)
+    return cleaned[:240]
 
 
 def _upstream(plane) -> str | None:
