@@ -79,6 +79,7 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     except Exception as exc:
         yield remember_failure(scope, record["id"], "chat_failed", f"The turn stopped because of {exc.__class__.__name__}.", 500)
         return
+    yield from _track_goals(plane, scope, record["id"], message, peer_ip)
     yield {"event": "done", "data": {"ok": True}}
 
 
@@ -113,6 +114,33 @@ def continue_after_fetch(plane, account: dict, applied: dict, peer_ip: str) -> I
     else:
         yield from _direct(plane, scope, conversation_id, None, cloud_text=text)
     yield {"event": "done", "data": {"ok": True}}
+
+
+def _track_goals(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    """Goals come from the user message. Tool bodies are not read."""
+    from ssios.goals import apply_turn, turn_evidence
+
+    record = scope.chat().get(conversation_id)
+    messages = record.get("messages") or []
+    message_id = ""
+    for item in reversed(messages):
+        if item.get("role") == "user":
+            message_id = str(item.get("id") or "")
+            break
+    evidence, reason = turn_evidence(record)
+    now, _zone = host_clock(plane, scope.account)
+    chips = apply_turn(
+        scope,
+        conversation_id,
+        message_id,
+        message,
+        evidence=evidence,
+        evidence_reason=reason,
+        now=now,
+        peer_ip=peer_ip,
+    )
+    for chip in chips:
+        yield {"event": "goal", "data": chip}
 
 
 def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:

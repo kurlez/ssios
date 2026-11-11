@@ -151,6 +151,7 @@ The suite uses a fake Ollama client and a fake guest. It does not call Google an
 ## Docs
 
 - [Chat, accounts, and the home-network UI](docs/chat-ui.md)
+- [Goals and tasks](docs/tasks.md)
 - [Mac end-to-end test](docs/mac-e2e-test.md)
 - [Gmail, Drive, and Calendar](docs/google-connector.md)
 - [vfkit guest](docs/macos-vz.md)

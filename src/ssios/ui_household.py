@@ -828,6 +828,8 @@ def _events_html(session, events: list[dict]) -> str:
                 technical.append("<p>" + html.escape(full) + "</p>")
         elif name == "approval":
             parts.append(_approval_card(session, data))
+        elif name == "goal":
+            parts.append(_goal_chip(session, data))
         elif name == "memory":
             names = ", ".join(str(item) for item in (data.get("files") or []) if item)
             if names:
@@ -892,6 +894,29 @@ def _linkify(text: str) -> str:
         else:
             out.append(html.escape(piece))
     return "".join(out)
+
+
+def _goal_chip(session, data: dict) -> str:
+    kind = str(data.get("kind") or "")
+    title = html.escape(str(data.get("title") or ""))
+    label = {"added": "Added goal", "completed": "Completed", "suggested": "Suggested goal"}.get(kind, "Goal")
+    csrf = html.escape(str(session.get("csrf") or ""))
+    goal_id = html.escape(str(data.get("id") or ""))
+    form = ""
+    if kind in {"added", "completed"} and data.get("id"):
+        form = (
+            f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"op\" value=\"undo\"><input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
+            "<button type=\"submit\">Undo</button></form>"
+        )
+    elif kind == "suggested":
+        safe_title = html.escape(str(data.get("title") or ""), quote=True)
+        form = (
+            f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"op\" value=\"add\"><input type=\"hidden\" name=\"title\" value=\"{safe_title}\">"
+            "<button type=\"submit\">Add</button></form>"
+        )
+    return f"<p class=\"outcome\">{label}: {title}</p>" + form
 
 
 def _approval_card(session, data: dict) -> str:

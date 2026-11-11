@@ -78,7 +78,10 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "GET" and path == "/ui":
         return Page(200, _dashboard(plane, session))
     if method == "GET" and path == "/ui/tasks":
-        return Page(200, _tasks(plane, session))
+        return Page(200, _tasks(plane, session, query.get("status", "open")))
+    if method == "POST" and path == "/ui/tasks":
+        _csrf(session, body)
+        return _tasks_post(plane, session, body, peer_ip)
     if method == "GET" and path.startswith("/ui/tasks/"):
         return Page(200, _task(plane, session, path.rsplit("/", 1)[-1]))
     if method == "GET" and path == "/ui/approvals":
@@ -362,22 +365,109 @@ def _account(session: dict) -> dict:
     return account
 
 
-def _tasks(plane, session: dict) -> str:
+def _tasks(plane, session: dict, status_filter: str = "open") -> str:
+    from ssios.goals import GoalStore, goal_mode
     from ssios.scope import AccountScope
 
     account = _account(session)
     scope = AccountScope(plane, account)
+    chosen = status_filter if status_filter in {"open", "done", "dropped", "in_progress", "all"} else "open"
+    goals = GoalStore(scope.home).all()
+    if chosen == "open":
+        shown = [goal for goal in goals if goal.get("status") in {"open", "in_progress"}]
+    elif chosen == "all":
+        shown = goals
+    else:
+        shown = [goal for goal in goals if goal.get("status") == chosen]
+    csrf = html.escape(str(session.get("csrf") or ""))
+    filters = " ".join(
+        f"<a href=\"/ui/tasks?status={name}\">{name}</a>" for name in ("open", "done", "dropped", "all")
+    )
     rows = []
+    for goal in shown:
+        title = html.escape(str(goal.get("title") or ""))
+        goal_id = html.escape(str(goal.get("id") or ""))
+        source = goal.get("source") if isinstance(goal.get("source"), dict) else {}
+        conversation = html.escape(str(source.get("conversation_id") or ""))
+        link = f"<a href=\"/ui/chat?conversation={conversation}\">Source</a>" if conversation else ""
+        evidence = goal.get("evidence") if isinstance(goal.get("evidence"), dict) else {}
+        reason = html.escape(str(evidence.get("reason") or ""))
+        buttons = (
+            f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
+            "<button name=\"op\" value=\"complete\" type=\"submit\">Complete</button>"
+            "<button name=\"op\" value=\"drop\" type=\"submit\">Drop</button>"
+            "<button name=\"op\" value=\"undo\" type=\"submit\">Undo</button></form>"
+        )
+        rows.append(f"<li><strong>{title}</strong> {html.escape(str(goal.get('status') or ''))} {link} {reason} {buttons}</li>")
+    mode = html.escape(goal_mode(scope.home))
+    mode_form = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Goal updates <select name=\"mode\"><option {'selected' if mode=='auto' else ''}>auto</option>"
+        f"<option {'selected' if mode=='suggest' else ''}>suggest</option>"
+        f"<option {'selected' if mode=='off' else ''}>off</option></select></label>"
+        "<button name=\"op\" value=\"mode\" type=\"submit\">Save</button></form>"
+    )
+    add = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Title <input name=\"title\" maxlength=\"80\"></label>"
+        "<label>Description <input name=\"description\" maxlength=\"240\"></label>"
+        "<button name=\"op\" value=\"add\" type=\"submit\">Add goal</button></form>"
+    )
+    guest = []
     if account.get("legacy_owner"):
         for task in plane.tasks.values():
-            rows.append(
+            guest.append(
                 f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
             )
     for task in scope.tasks().values():
-        rows.append(
+        guest.append(
             f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
         )
-    return _page(session, "Tasks", "<ul>" + "".join(rows) + "</ul>")
+    body = (
+        f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
+        + "<ul>" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
+        + "<h2>Guest tasks</h2><ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
+    )
+    return _page(session, "Tasks", body)
+
+
+def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
+    from ssios.calendar_intent import host_clock
+    from ssios.goals import manual_goal, set_goal_mode, undo_goal
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    op = str(body.get("op") or "")
+    now, _zone = host_clock(plane, account)
+    if op == "mode":
+        set_goal_mode(scope.home, str(body.get("mode") or "auto"))
+    elif op == "undo":
+        undo_goal(scope, str(body.get("id") or ""), now, peer_ip)
+    elif op == "add":
+        manual_goal(scope, title=str(body.get("title") or ""), description=str(body.get("description") or ""), status="open", goal_id="", now=now, peer_ip=peer_ip)
+    elif op in {"complete", "drop", "edit"}:
+        status = {"complete": "done", "drop": "dropped", "edit": str(body.get("status") or "open")}[op]
+        manual_goal(
+            scope,
+            title=str(body.get("title") or "") or _goal_title(scope, str(body.get("id") or "")),
+            description=str(body.get("description") or ""),
+            status=status,
+            goal_id=str(body.get("id") or ""),
+            now=now,
+            peer_ip=peer_ip,
+        )
+    else:
+        raise SsiosError("goal_invalid", "goal action rejected", 400)
+    return Page(200, _tasks(plane, session, "open"))
+
+
+def _goal_title(scope, goal_id: str) -> str:
+    from ssios.goals import GoalStore
+
+    goal = GoalStore(scope.home).get(goal_id) or {}
+    return str(goal.get("title") or "")
 
 
 def _task(plane, session: dict, task_id: str) -> str:
@@ -971,6 +1061,8 @@ button.danger, .card.danger button.primary { background: var(--danger); color: #
 }
 label { display: grid; gap: 4px; }
 form { display: grid; gap: 12px; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.goal-actions button { width: auto; }
 pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .app { height: 100%; display: flex; min-height: 0; }
 .sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
@@ -1178,6 +1270,7 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         "<a href=\"/ui/connections\">Connections</a>"
         "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
         "<a href=\"/ui/vault\">Notes</a>"
+        "<a href=\"/ui/tasks\">Tasks</a>"
         "<a href=\"/ui/settings\">Settings</a>"
         + admin
         + "<p class=\"menu-label\">More</p>"

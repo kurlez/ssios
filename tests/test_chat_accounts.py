@@ -1749,6 +1749,17 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("Chase", tomorrow)
         self.assertIn("Calendar is not connected.", tomorrow)
 
+    def test_explicit_goal_shows_a_chip_and_the_tasks_page(self) -> None:
+        page = self._send(self.ada, "please call the harbor desk")
+        self.assertIn("Added goal: call the harbor desk", page)
+        self.assertIn(">Undo</button>", page)
+        _status, tasks = _get(self.base, "/ui/tasks", self.ada)
+        self.assertIn("call the harbor desk", tasks)
+        self.assertIn("Source", tasks)
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("goal.create", audit)
+        self.assertNotIn("harbor desk", audit)
+
     def test_natural_language_calendar_examples_need_approval(self) -> None:
         from ssios.errors import SsiosError
 
