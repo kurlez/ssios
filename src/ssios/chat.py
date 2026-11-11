@@ -1276,17 +1276,18 @@ def _sized(plane, limits: dict, arguments: dict) -> dict:
     explicit = arguments.get("limit")
     asked = int(explicit or limits.get("max_items") or 5)
     asked = max(1, min(asked, 100))
-    # One call lists the inbox. Each message needs its own call after that.
-    room = max(1, int(plane.settings.connector_max_calls) - 1)
-    used = min(asked, room)
     if explicit is not None:
         arguments["requested"] = int(explicit)
-        if used < int(explicit):
-            arguments["limit"] = used
-            arguments["shortfall"] = f"The call budget allowed {used} of {int(explicit)}."
-    sized = {**limits, "max_items": used, "max_calls": min(int(plane.settings.connector_max_calls), used + 1)}
+        if asked < int(explicit):
+            arguments["limit"] = asked
+            arguments["shortfall"] = f"The maximum is {asked}."
+    # One list plus one get per item. 100 items is the cap, so this turn may use 101 HTTP calls.
+    # connector_max_calls still limits how many reads the account can start.
+    per_turn = min(101, asked + 1)
+    configured = max(1, int(plane.settings.connector_max_calls))
+    sized = {**limits, "max_items": asked, "max_calls": max(configured, per_turn)}
     if arguments.get("view") == "report":
-        sized["max_bytes"] = min(int(plane.settings.connector_max_bytes), max(int(limits.get("max_bytes") or 4096), used * 2000))
+        sized["max_bytes"] = min(int(plane.settings.connector_max_bytes), max(int(limits.get("max_bytes") or 4096), asked * 2000))
     return sized
 
 

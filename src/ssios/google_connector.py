@@ -484,7 +484,7 @@ class GoogleConnector:
             arguments = prepare_calendar(tool, arguments, limits)
         self._enabled(account_id, tool)
         self._connected_scope(account_id, tool, limits)
-        if self._calls.get(account_id, 0) >= int(limits["max_calls"]):
+        if self._calls.get(account_id, 0) >= _session_call_ceiling(self.plane.settings, limits):
             raise SsiosError("connector_budget", "connector call budget is exhausted", 429)
         access = self._access_token(account_id, tool.split(".", 1)[0])
         try:
@@ -512,7 +512,7 @@ class GoogleConnector:
             arguments = prepare_calendar(tool, arguments, limits)
         self._enabled(account_id, tool)
         self._connected_scope(account_id, tool, limits)
-        if self._calls.get(account_id, 0) >= int(limits["max_calls"]):
+        if self._calls.get(account_id, 0) >= _session_call_ceiling(self.plane.settings, limits):
             raise SsiosError("connector_budget", "connector call budget is exhausted", 429)
         material = {
             "account_id": account_id,
@@ -1264,7 +1264,8 @@ class GoogleConnector:
             self._raise_oauth(account_id, "gmail", "gmail.list", status, raw, "")
         lines = []
         full = str(arguments.get("view") or "") == "report"
-        for item in messages[: limits["max_items"]]:
+        # The list used one call. Each message uses one more, up to 100.
+        for item in messages[: min(int(limits["max_items"]), 100)]:
             header = self._gmail_metadata(account_id, str(item.get("id")), access, full=full)
             lines.append(_mail_line(header))
         return _bounded("\n".join(lines), limits)
@@ -1413,6 +1414,13 @@ def _event_line(event: dict) -> str:
     return human + event_snapshot_suffix(event)
 
 
+def _session_call_ceiling(settings, limits: dict) -> int:
+    """How many reads this account may start. A single mail list does not spend one call per message."""
+    granted = int(limits["max_calls"])
+    configured = int(settings.connector_max_calls)
+    return max(1, min(granted, configured))
+
+
 def _normalize_limits(limits: dict, settings) -> dict:
     def strings(key: str) -> list[str]:
         value = limits.get(key) or []
@@ -1430,7 +1438,8 @@ def _normalize_limits(limits: dict, settings) -> dict:
         raise SsiosError("connector_grant_denied", "grant rejected", 400) from exc
     if not 1 <= max_items <= 100 or not 1 <= max_bytes <= int(settings.connector_max_bytes):
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
-    if not 1 <= max_calls <= int(settings.connector_max_calls):
+    # A mail turn budgets one list plus one get per item. The session counter still uses connector_max_calls.
+    if not 1 <= max_calls <= 101:
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
     return {
         "folder_ids": strings("folder_ids"),

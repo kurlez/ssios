@@ -59,7 +59,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 Mean of the 28 rows above: **90 / 100** (2523 / 28).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 250 ran, 243 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 251 ran, 244 passed, 7 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 

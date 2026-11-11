@@ -145,7 +145,7 @@ class ReportIntentTest(unittest.TestCase):
         self.assertGreater(deadline_seconds({"target": {"unit": "chars", "n": 400}}, 5), deadline_seconds({"target": {"unit": "chars", "n": 400}}, 1))
         self.assertGreater(deadline_seconds({"target": {"unit": "chars", "n": 1000}}, 1), 20)
 
-    def test_a_twenty_message_ask_says_when_the_budget_returns_fewer(self) -> None:
+    def test_twenty_requested_returns_twenty(self) -> None:
         from ssios.chat import _mail_blocks, _sized
 
         class _Settings:
@@ -158,16 +158,15 @@ class ReportIntentTest(unittest.TestCase):
         arguments = {"q": "in:inbox", "limit": 20, "view": "report"}
         limits = _sized(_Plane(), {"max_items": 50, "max_bytes": 48000}, arguments)
         self.assertEqual(arguments["requested"], 20)
-        self.assertEqual(limits["max_items"], 19)
-        self.assertIn("19 of 20", arguments["shortfall"])
+        self.assertEqual(limits["max_items"], 20)
+        self.assertEqual(limits["max_calls"], 21)
+        self.assertNotIn("shortfall", arguments)
         rows = "\n".join(
             f"Note || mail-header {{\"from\":\"Ada\",\"subject\":\"Desk {index}\",\"date\":\"Nov 10\",\"snippet\":\"plan\"}}"
-            for index in range(19)
+            for index in range(20)
         )
         blocks = _mail_blocks(arguments, rows)
-        self.assertIn("19 of 20", blocks[0]["summary"])
-        self.assertIn("Inbox, latest 20", blocks[0]["summary"])
-        self.assertNotIn("latest 19", blocks[0]["summary"])
+        self.assertEqual(blocks[0]["summary"], "20 messages. Inbox, latest 20")
 
     def test_a_failed_call_is_recorded_and_a_stream_is_kept(self) -> None:
         import json

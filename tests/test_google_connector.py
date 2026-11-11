@@ -1322,6 +1322,49 @@ class ConnectorTest(PlaneTest):
         self.assertNotIn("Harbor notes", audit)
         self.assertNotIn("ada@example.com", audit)
 
+    def test_twenty_requested_fetches_twenty_messages(self) -> None:
+        from dataclasses import replace
+
+        from ssios.chat import _mail_blocks, _sized
+
+        self.plane.settings = replace(self.plane.settings, connector_max_calls=20)
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "gmail", "code-a")
+        _Google.mail_messages = [{"id": f"m-{index}"} for index in range(20)]
+        _Google.mail_by_id = {
+            f"m-{index}": [
+                {"name": "From", "value": "Ada"},
+                {"name": "Subject", "value": f"Desk {index}"},
+                {"name": "Date", "value": "Nov 10"},
+            ]
+            for index in range(20)
+        }
+        arguments = {"q": "in:inbox", "limit": 20}
+        limits = _sized(self.plane, {"max_items": 50, "max_bytes": 4000, "max_calls": 20}, arguments)
+        self.assertEqual(limits["max_items"], 20)
+        self.assertEqual(limits["max_calls"], 21)
+        result = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="gmail.search",
+            arguments=arguments,
+            limits=limits,
+        )
+        blocks = _mail_blocks(arguments, result["text"])
+        self.assertEqual(len(blocks[0]["events"]), 20)
+        self.assertEqual(blocks[0]["summary"], "20 messages. Inbox, latest 20")
+        fetched = [item for item in _Google.seen if item["path"].startswith("/gmail/v1/users/me/messages/")]
+        self.assertEqual(len(fetched), 20)
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="gmail.search",
+                arguments={"q": "in:inbox"},
+                limits={"max_items": 1, "max_bytes": 500, "max_calls": 1},
+            )
+        self.assertEqual(caught.exception.code, "connector_budget")
+
     def test_empty_inbox_is_deterministic_and_a_folder_grant_is_explained(self) -> None:
         self.connector.install_client(self.ada, "client-ada", self.secret)
         self._consent(self.ada, "gmail", "code-a")
