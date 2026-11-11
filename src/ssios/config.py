@@ -54,6 +54,11 @@ class Settings:
     connectors_enabled: tuple[str, ...]
     connector_max_calls: int
     connector_max_bytes: int
+    skills_enabled: bool
+    skills_allow_domains: tuple[str, ...]
+    skills_deny_domains: tuple[str, ...]
+    skills_timeout_seconds: float
+    skills_max_bytes: int
     ui_bind: str
     ui_time_zone: str
     state_dir: Path
@@ -179,6 +184,14 @@ def load_settings(
     connector_max_bytes = int(connectors.get("max_bytes", 200000))
     if not 1 <= connector_max_calls <= 100 or not 1 <= connector_max_bytes <= 2000000:
         raise SsiosError("config_invalid", "connector budget is out of range", 500)
+    skills = _section(data, "skills")
+    skills_enabled = bool(skills.get("enabled", False))
+    skills_allow_domains = _host_list(skills.get("allow_domains", []))
+    skills_deny_domains = _host_list(skills.get("deny_domains", []))
+    skills_timeout_seconds = float(skills.get("timeout_seconds", 8))
+    skills_max_bytes = int(skills.get("max_bytes", 200000))
+    if not 1 <= skills_timeout_seconds <= 30 or not 1024 <= skills_max_bytes <= 2000000:
+        raise SsiosError("config_invalid", "skills budget is out of range", 500)
     ui = _section(data, "ui")
     ui_bind = str(ui.get("bind", "127.0.0.1"))
     if ui_bind == "localhost":
@@ -243,11 +256,31 @@ def load_settings(
         connectors_enabled=connectors_enabled,
         connector_max_calls=connector_max_calls,
         connector_max_bytes=connector_max_bytes,
+        skills_enabled=skills_enabled,
+        skills_allow_domains=skills_allow_domains,
+        skills_deny_domains=skills_deny_domains,
+        skills_timeout_seconds=skills_timeout_seconds,
+        skills_max_bytes=skills_max_bytes,
         ui_bind=ui_bind,
         ui_time_zone=ui_time_zone,
         state_dir=state_path,
         config_path=config_path,
     )
+
+
+def _host_list(value) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise SsiosError("config_invalid", "skill domains must be a list of host names", 500)
+    hosts = []
+    for item in value:
+        host = str(item or "").strip().lower().rstrip(".")
+        if host:
+            hosts.append(host)
+    return tuple(hosts)
 
 
 def lan_enabled(settings) -> bool:

@@ -82,8 +82,22 @@ def _admin_page(plane, session, notice: str) -> str:
             + "<details class=\"kebab\"><summary>Actions</summary>" + _admin_forms(csrf, account) + "</details></td></tr>"
         )
     chain = plane.security_audit.verify()
+    policy = plane.skills.policy()
+    state = "on" if policy["enabled"] else "off"
+    deny = ", ".join(policy["deny"]) or "(none)"
+    allow = ", ".join(policy["allow"]) or "(any public host the skill allows)"
+    skills = (
+        "<h2>Web skills</h2>"
+        f"<p>Global switch: {html.escape(state)}. Reads use GET on this computer. The guest stays offline. "
+        "web_search is not bundled.</p>"
+        f"<p>Allow: {html.escape(allow)}. Deny: {html.escape(deny)}.</p>"
+        f"<form method=\"post\" action=\"/ui/admin/skills\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"enabled\" value=\"on\" type=\"submit\">Turn skills on</button> "
+        "<button name=\"enabled\" value=\"off\" type=\"submit\">Turn skills off</button></form>"
+    )
     body = (
         notice
+        + skills
         + "<p>Chain: " + html.escape(str(chain.get("detail"))) + "</p>"
         + "<table><tr><th>Username</th><th>Role</th><th>Status</th><th>Connections</th><th>Actions</th></tr>"
         + "".join(rows) + "</table>"

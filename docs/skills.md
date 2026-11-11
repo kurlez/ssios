@@ -1,0 +1,29 @@
+# Web skills
+
+Web skills read the public internet on the computer that runs SSIOS. The guest stays offline. The model does not get a socket. The same host broker used for Google connectors performs every request.
+
+Skills are declarative files under `skills/<name>/`:
+
+- `SKILL.md` describes the skill and gives Chinese and English examples.
+- `manifest.toml` names the skill, the allowed HTTP methods, the allowed domains, the tools, and the size and time limits.
+
+Two skills are on when an admin enables web skills:
+
+- `weather` calls the keyless Open-Meteo geocoding and forecast APIs. Units are metric. A city in the message wins. Otherwise SSIOS uses the default city saved in Settings.
+- `web_fetch` fetches one `http` or `https` URL from the message with `GET`. It removes scripts and shows the title, the site, a short extract, and a link.
+
+`web_search` is present and disabled. There is no keyless search provider in this build, and SSIOS does not call a cloud model to search. A future provider implements `search(query)` and returns public `https` URLs. Those URLs still pass through this broker.
+
+## Policy
+
+`[skills] enabled` in the config starts off. An admin can turn skills on or off from the admin page. That switch is stored in the state directory, not in the git repository. Each account can turn `weather` or `web_fetch` off in Settings and can save a default city.
+
+`allow_domains` restricts every skill to those hosts when the list is not empty. `deny_domains` always blocks those hosts. Weather can only call `api.open-meteo.com` and `geocoding-api.open-meteo.com`.
+
+Only `GET` is implemented. A request body, cookies, and an `Authorization` header are not sent. SSIOS resolves the name and refuses loopback, private, link-local, and carrier-grade NAT addresses. It checks again after each redirect. The audit line stores the host, the HTTP status, and the byte count. It does not store the page or the city.
+
+Fetched text is labeled untrusted. It is not parsed as a tool call, and it cannot approve a connector write or start the guest.
+
+## Chat
+
+`What's the weather in Seattle?` and `今天天气怎么样` render a weather card. A message that contains an `https://` address renders an article card. The guest is not started.

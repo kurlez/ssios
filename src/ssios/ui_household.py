@@ -287,7 +287,7 @@ CHAT_JS = r"""
   }
 
   function pill(route, reason) {
-    var names = {direct: "Local", vm: "VM", connector_vm: "VM", connector: "Google", memory: "Memory"};
+    var names = {direct: "Local", vm: "VM", connector_vm: "VM", connector: "Google", memory: "Memory", skill: "Web"};
     var button = document.createElement("button");
     button.type = "button";
     button.className = "pill";
@@ -673,6 +673,19 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
     if path == "/ui/admin" and method == "GET":
         _admin(account)
         return Page(200, _admin_page(plane, session, ""))
+    if path == "/ui/admin/skills" and method == "POST":
+        _admin(account)
+        _csrf(session, body)
+        enabled = str(body.get("enabled") or "") == "on"
+        plane.skills.set_enabled(enabled)
+        plane.security_audit.write(
+            actor=account["id"],
+            ip=peer_ip or "127.0.0.1",
+            action="skill.policy",
+            target="skills",
+            result="on" if enabled else "off",
+        )
+        return Page(200, _admin_page(plane, session, "Web skills are on." if enabled else "Web skills are off."))
     if path == "/ui/admin/audit" and method == "GET":
         _admin(account)
         return Page(200, _audit_page(plane, session, query, admin=True))

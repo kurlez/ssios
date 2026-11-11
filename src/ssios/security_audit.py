@@ -31,6 +31,9 @@ _ALLOWED_EXTRA = {
     "role",
     "phase",
     "reason_code",
+    "host",
+    "http_status",
+    "byte_count",
 }
 
 

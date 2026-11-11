@@ -60,6 +60,8 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
             yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=True, peer_ip=peer_ip)
         elif decision.route == "vm":
             yield from _vm(plane, scope, record["id"], message, peer_ip)
+        elif decision.route == "skill":
+            yield from _skill(plane, scope, record["id"], message, peer_ip)
         else:
             raise SsiosError("chat_rejected", "route rejected", 400)
     except SsiosError as exc:
@@ -126,6 +128,23 @@ def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDec
             "route": decision.public() if decision else {"route": "direct", "reason": "Local answer after an approved read.", "source": "rule"},
         },
     )
+
+
+def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    result = plane.skills.run(scope.account_id, message, peer_ip=peer_ip)
+    blocks = result["blocks"]
+    summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
+    reply = _grounded_reply(plane, message, summary, blocks)
+    stored = {
+        "role": "assistant",
+        "text": summary,
+        "results": blocks,
+        "route": {"route": "skill", "reason": "Public web read on this computer.", "source": "policy"},
+    }
+    if reply:
+        stored["reply"] = reply
+    scope.chat().append(conversation_id, stored)
+    yield {"event": "results", "data": {"text": summary, "blocks": blocks, "reply": reply}}
 
 
 def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
@@ -661,6 +680,11 @@ def failure_hint(code: str) -> str:
         "drive_grant_limited": "Open Connections and check Drive. Ask for an allowed folder by name. A raw folder id is not required.",
         "calendar_intent_invalid": "Say the day in ordinary words, such as tomorrow, this week, or 明天. Nothing was read. The guest is not involved.",
         "calendar_intent_unclear": "Include a clock time, such as 3pm or 下午三点. Nothing was changed.",
+        "skill_disabled": "An admin turns web skills on from the admin page. The guest is not used.",
+        "skill_ssrf": "That address is not a public web site. Nothing was fetched.",
+        "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
+        "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
+        "skill_upstream": "The site could not be read. Nothing was changed.",
     }
     return hints.get(code, 'Run ssios vm-diagnose --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml".')
 

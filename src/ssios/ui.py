@@ -98,6 +98,9 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", "")))
     if method == "GET" and path == "/ui/settings":
         return Page(200, _settings(plane, session))
+    if method == "POST" and path == "/ui/settings":
+        _csrf(session, body)
+        return _settings_post(plane, session, body)
     if method == "POST" and path == "/ui/logout":
         _csrf(session, body)
         _drop_session(plane, session["id"])
@@ -681,7 +684,41 @@ def _settings(plane, session: dict) -> str:
         "memory": status.get("memory", {}).get("mode"),
         "model": status.get("llm", {}).get("model"),
     }
-    return _page(session, "Settings", f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
+    policy = plane.skills.policy()
+    prefs = plane.skills.account_prefs(session["account"]["id"])
+    csrf = html.escape(str(session["csrf"]))
+    location = html.escape(str(prefs.get("location") or ""))
+    switches = []
+    for name in ("weather", "web_fetch"):
+        on = name in prefs.get("enabled", [])
+        verb = "disable" if on else "enable"
+        label = "On" if on else "Off"
+        switches.append(
+            f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"skill\" value=\"{name}\">"
+            f"<span>{name}: {label}</span> <button name=\"op\" value=\"{verb}\" type=\"submit\">{verb.title()}</button></form>"
+        )
+    ceiling = "Web skills are on." if policy["enabled"] else "Web skills are off until an admin turns them on."
+    form = (
+        f"<section class=\"card\"><h2>Web skills</h2><p>{ceiling}</p>"
+        + "".join(switches)
+        + f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Default city <input name=\"location\" value=\"{location}\" maxlength=\"80\"></label> "
+        "<button type=\"submit\">Save city</button></form></section>"
+    )
+    return _page(session, "Settings", form + f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
+
+
+def _settings_post(plane, session: dict, body: dict) -> Page:
+    account_id = session["account"]["id"]
+    location = body.get("location")
+    skill = str(body.get("skill") or "")
+    op = str(body.get("op") or "")
+    if skill and op in {"enable", "disable"}:
+        plane.skills.set_account(account_id, name=skill, enabled=op == "enable")
+    elif location is not None:
+        plane.skills.set_account(account_id, location=str(location))
+    return Page(200, _settings(plane, session))
 
 
 APP_CSS = """

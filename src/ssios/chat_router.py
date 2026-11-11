@@ -71,20 +71,35 @@ class RouteDecision:
     reason_code: str
     source: str
     services: tuple[str, ...] = ()
+    skill: str = ""
 
     def public(self) -> dict:
-        return {
+        payload = {
             "route": self.route,
             "reason": self.reason,
             "source": self.source,
             "services": list(self.services),
         }
+        if self.skill:
+            payload["skill"] = self.skill
+        return payload
 
 
 def classify(text: str, override: str = "auto", llm=None, deadline: float | None = None) -> RouteDecision:
+    from ssios.skill_broker import match_skill
+
     message = " ".join(str(text or "").split())
     services = _services(message)
     forced = override if override in {"force_direct", "force_vm", "auto"} else "auto"
+    skill = match_skill(message)
+    if skill and forced != "force_vm" and not _writes(message):
+        return _decision(
+            "skill",
+            "rule_skill",
+            "The message asks for a public web read. It runs on this computer. The guest stays offline.",
+            (),
+            skill,
+        )
     if forced == "force_vm":
         if services:
             return _decision("connector_vm", "override_vm", "You chose the guest. Cloud data is read on this machine. A workspace change still waits for approval.", services)
@@ -175,6 +190,6 @@ def _unsure(message: str, llm, deadline: float | None) -> RouteDecision:
     return _decision("vm", "unsure", "The message looks like a file or workspace task, so it goes to the guest.", ())
 
 
-def _decision(route: str, code: str, reason: str, services: tuple[str, ...]) -> RouteDecision:
+def _decision(route: str, code: str, reason: str, services: tuple[str, ...], skill: str = "") -> RouteDecision:
     source = "override" if code.startswith("override") else "model" if code.startswith("model") else "default" if code == "unsure" else "rule"
-    return RouteDecision(route=route, reason=reason, reason_code=code, source=source, services=services)
+    return RouteDecision(route=route, reason=reason, reason_code=code, source=source, services=services, skill=skill)

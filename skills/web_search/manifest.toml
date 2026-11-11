@@ -1,0 +1,8 @@
+name = "web_search"
+description = "Search the public web. No provider is bundled."
+enabled = false
+methods = ["GET"]
+domains = []
+tools = ["search"]
+timeout_seconds = 8
+max_bytes = 100000

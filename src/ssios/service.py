@@ -94,6 +94,15 @@ class ControlPlane:
         self._user_cancel: dict[str, bool] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._google = None
+        self._skills = None
+
+    @property
+    def skills(self):
+        if self._skills is None:
+            from ssios.skill_broker import SkillBroker
+
+            self._skills = SkillBroker(self)
+        return self._skills
 
     @property
     def google(self):
