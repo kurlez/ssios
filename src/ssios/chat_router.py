@@ -91,7 +91,15 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
     message = " ".join(str(text or "").split())
     services = _services(message)
     forced = override if override in {"force_direct", "force_vm", "auto"} else "auto"
+    from ssios.reminders import is_agenda, wants_forget, wants_remember
+
     skill = match_skill(message)
+    if wants_forget(message) and forced != "force_vm":
+        return _decision("memory", "rule_memory", "The message asks to forget a saved fact. It is not removed until you approve it.", ())
+    if wants_remember(message) and forced != "force_vm":
+        return _decision("memory", "rule_memory", "The message asks to save memory. A timed reminder is stored immediately. A note waits for approval.", ())
+    if is_agenda(message) and forced != "force_vm" and "calendar" not in services:
+        return _decision("schedule", "rule_schedule", "The message asks what is planned. Reminders and the calendar are read. The model is not asked to invent them.", ())
     if skill and forced != "force_vm" and not _writes(message):
         return _decision(
             "skill",

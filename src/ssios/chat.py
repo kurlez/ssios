@@ -23,7 +23,8 @@ from ssios.scope import AccountScope, memory_excerpt
 _SYSTEM = (
     "You are SSIOS on this machine. Answer from the conversation and the memory excerpt. "
     "This turn has no tools. Do not claim that files, mail, or memory were changed. "
-    "Never invent a date, a weekday, or a time. Use the HOST-CLOCK block."
+    "Never invent a date, a weekday, a time, a meeting, or a message. Use the HOST-CLOCK block and MEMORY-CONTEXT. "
+    "If those do not contain the answer, say you do not know. Never say you saved or recorded something."
 )
 _MAX_MESSAGE = 8000
 
@@ -55,8 +56,11 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
             yield from _clock_turn(plane, scope, record["id"], message, decision)
         elif decision.route == "direct":
             yield from _direct(plane, scope, record["id"], decision)
+            yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "memory":
-            yield from _memory(plane, scope, record["id"], message)
+            yield from _memory(plane, scope, record["id"], message, peer_ip)
+        elif decision.route == "schedule":
+            yield from _schedule(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "connector":
             yield from _stage_fetch(scope, record["id"], message, decision, follow_vm=False, peer_ip=peer_ip)
         elif decision.route == "connector_vm":
@@ -126,6 +130,9 @@ def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, 
 
 def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDecision | None, cloud_text: str = "") -> Iterator[dict]:
     messages = _messages(scope, conversation_id, cloud_text)
+    files = list(getattr(scope, "_last_memory_files", []) or [])
+    if files:
+        yield {"event": "memory", "data": {"files": files}}
     cancel = threading.Event()
     deadline = time.monotonic() + float(plane.settings.llm_timeout_seconds)
     pieces: list[str] = []
@@ -195,19 +202,112 @@ def _wants_clip(message: str) -> bool:
     return any(cue in folded for cue in ("save", "clip")) or any(cue in message for cue in ("保存", "剪藏"))
 
 
-def _memory(plane, scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
-    body = message.split(" ", 1)[1] if " " in message else message
-    content = f"---\nname: chat-note\ndescription: \"approved chat memory\"\n---\n\n{body.strip()}\n"
+def _memory(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str = "127.0.0.1") -> Iterator[dict]:
+    from ssios.account_memory import explicit_facts, files_for_facts, note_document
+    from ssios.calendar_intent import account_zone
+    from ssios.reminders import ReminderStore, capture_due, reminder_text, saved_line, wants_forget
+
+    now, zone_name = host_clock(plane, scope.account)
+    zone, _name = account_zone(plane.settings, scope.account)
+    if wants_forget(message):
+        needle = reminder_text(message) or message
+        done = ReminderStore(scope.home).complete_matching(needle)
+        if done:
+            text = "Forgot the reminder. It will not appear on later days."
+            scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+            yield {"event": "outcome", "data": {"text": text}}
+            return
+        yield from _propose_files(scope, conversation_id, _forget_is_not_here(scope, needle), peer_ip, forget=True)
+        return
+    due = capture_due(message, now, zone)
+    if due is not None:
+        text = reminder_text(message)
+        item = ReminderStore(scope.home).add(text=text, phrase=message, due=due, zone_name=zone_name, created=now)
+        line = saved_line(due, zone_name, item["text"])
+        scope.chat().append(conversation_id, {"role": "assistant", "text": line, "results": [_reminder_block(item, line)]})
+        yield {"event": "results", "data": {"text": line, "blocks": [_reminder_block(item, line)], "reply": ""}}
+        plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="reminder.create", target=item["id"], result="ok")
+        return
+    facts = explicit_facts(message)
+    files = files_for_facts(scope, facts)
+    if not files:
+        files = [note_document(reminder_text(message), now)]
+    yield from _propose_files(scope, conversation_id, files, peer_ip, forget=False)
+
+
+def _reminder_block(item: dict, line: str) -> dict:
+    return {
+        "kind": "reminder",
+        "header": "Reminder",
+        "summary": line,
+        "events": [{"title": item.get("text") or "", "when": item.get("due") or "", "meta": item.get("zone") or ""}],
+    }
+
+
+def _forget_is_not_here(scope, needle: str) -> list[dict]:
+    del scope, needle
+    return []
+
+
+def _propose_explicit(plane, scope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    """Stage facts the user stated. Connector and web text never reach this function."""
+    from ssios.account_memory import explicit_facts, files_for_facts
+
+    del plane
+    files = files_for_facts(scope, explicit_facts(message))
+    if not files:
+        return
+    yield from _propose_files(scope, conversation_id, files, peer_ip, forget=False)
+
+
+def _propose_files(scope, conversation_id: str, files: list[dict], peer_ip: str, *, forget: bool) -> Iterator[dict]:
+    if not files:
+        text = "No matching memory file was found. Nothing was changed."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
     store = scope.memory()
-    proposal = store.propose(
-        scope.project_id(),
-        store.head(scope.project_id()),
-        [{"path": "topics/chat/note.md", "content": content}],
-        task_id="chat",
-    )
+    proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
     approval = scope.create_memory_approval(proposal)
+    preview = "Save to memory?\n" + "\n".join(item["path"] for item in files) + "\nNothing is written until you approve it.\n\n" + files[0]["content"]
     scope.chat().append(conversation_id, {"role": "assistant", "text": "Memory is staged. It is not written until you approve it.", "approval_id": approval["id"]})
-    yield _approval_event(approval, "Memory proposal. Nothing is written until you approve it.\n\n" + content)
+    yield _approval_event(approval, preview)
+    del peer_ip, forget
+
+
+def _schedule(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
+    from ssios.calendar_intent import _phrase_range
+    from ssios.reminders import ReminderStore
+
+    now, zone_name = host_clock(plane, scope.account)
+    kind, _weekday, _scope_name = _phrase_range(message, message.casefold())
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if kind == "tomorrow":
+        start = start + timedelta(days=1)
+        label = "Tomorrow"
+    else:
+        label = "Today"
+    end = start + timedelta(days=1)
+    items = ReminderStore(scope.home).between(start, end)
+    lines = [f"{label} — no reminders." if not items else f"{label} — {len(items)} reminders."]
+    events = []
+    for item in items:
+        lines.append(f"{item.get('due')} {item.get('text')}")
+        events.append({"title": item.get("text") or "", "when": item.get("due") or "", "meta": zone_name})
+    linked = False
+    try:
+        from ssios.google_connector import session_for_account
+
+        linked = bool(plane.google.status(session_for_account(scope.account))["connectors"]["calendar"]["connected"])
+    except Exception:
+        linked = False
+    if not linked:
+        lines.append("Calendar is not connected.")
+    text = "\n".join(lines)
+    block = {"kind": "reminder", "header": label, "summary": lines[0], "start": start.isoformat(), "end": end.isoformat(), "events": events}
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "results": [block]})
+    yield {"event": "results", "data": {"text": text, "blocks": [block], "reply": ""}}
+    del peer_ip
 
 
 def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision, *, follow_vm: bool, peer_ip: str = "127.0.0.1") -> Iterator[dict]:
@@ -858,7 +958,7 @@ def _vm(plane, scope: AccountScope, conversation_id: str, prompt: str, peer_ip: 
         account_id=scope.account_id,
         account_home=scope.home,
         task_id=task_id,
-        prompt=clock_block(plane, scope.account) + "\n\n" + prompt,
+        prompt=_guest_prompt(scope, prompt),
     )
     guest = plane.chat_guest or ProductionChatGuest()
     result = None
@@ -960,8 +1060,22 @@ def _pump(func) -> Iterator[tuple[str, object]]:
         yield item
 
 
+def _guest_prompt(scope: AccountScope, prompt: str) -> str:
+    excerpt = memory_excerpt(scope, prompt[:240])
+    prefix = clock_block(scope.plane, scope.account) + "\n\n"
+    if excerpt:
+        prefix += "MEMORY-CONTEXT\n" + excerpt + "\n\n"
+    return prefix + prompt
+
+
 def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> list[dict]:
-    excerpt = memory_excerpt(scope)
+    record = scope.chat().get(conversation_id)
+    last_user = ""
+    for item in reversed(record.get("messages") or []):
+        if item.get("role") == "user":
+            last_user = str(item.get("text") or "")
+            break
+    excerpt = memory_excerpt(scope, last_user)
     system = _SYSTEM + "\n\n" + clock_block(scope.plane, scope.account)
     if excerpt:
         system += "\n\nMEMORY-CONTEXT\n" + excerpt

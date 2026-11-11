@@ -1,8 +1,6 @@
 # Mac end-to-end test
 
-Run this on the Apple M4 Mac mini. It uses a new state directory and does not read or write `.ssios`, `.ssios-demo`, or `.ssios-memfs`.
-
-`./scripts/ssios` uses that directory unless `SSIOS_STATE` is already set, and `$SSIOS_STATE/ollama.toml` unless `SSIOS_CONFIG` is set. It does not accept `.ssios`, `.ssios-demo`, or `.ssios-memfs`. If you already keep a config at `.ssios/ollama.toml`, copy the keys you want by hand into the new file. Do not point the script at `.ssios`.
+Run this on an Apple Silicon Mac. The state directory is `$HOME/Library/Application Support/ssios` unless `SSIOS_STATE` is set. The config is `$SSIOS_STATE/ollama.toml` unless `SSIOS_CONFIG` is set. The script does not accept `.ssios`, `.ssios-demo`, or `.ssios-memfs`, and it does not delete those directories. If an older config still sits in one of them, copy the keys you want by hand into the new file.
 
 Edit only the copy. These are the same guest settings as `scripts/macos-vz-codex-smoke.sh`, plus the chat model. `[llm] ollama_model` answers chat and reads calendar requests. `[agent.codex] model` is only the model inside the guest. The two names are independent.
 
@@ -32,11 +30,9 @@ time_zone = "America/Los_Angeles"
 
 Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback. Pull both local models if they are not already installed: `ollama pull qwen2.5:7b` and `ollama pull qwen2.5-coder:7b`. Install vfkit with `brew install vfkit`.
 
-From a checkout that contains both the chat UI and the Google connector:
+From a current checkout of this repository:
 
 ```bash
-git fetch origin
-git checkout cursor/ssios-chat-ui-2e2e
 ./scripts/ssios setup
 ```
 
@@ -62,7 +58,13 @@ After the config edits above, prepare the pinned Codex binary and the aarch64 ke
 ./scripts/ssios vm-prepare
 ```
 
-Then start the UI from Terminal.app on the Mac, not over SSH. `start` returns after printing the URL. It backgrounds the UI with `nohup`. It does not call `setsid` and it does not use launchd, so the process stays in that login session, but macOS will not show a Keychain prompt for it. Unlock the login keychain before saving a Google client. `status`, `logs`, `restart`, and `stop` use the pid file under `$SSIOS_STATE/run/`. `logs` includes the error class and a traceback when a request fails, with secret values removed.
+If this shell is SSH, unlock the login keychain before starting. `start` returns after printing the URL. It backgrounds the UI with `nohup`. It does not call `setsid` and it does not use launchd, so the process stays in that login session, but macOS will not show a Keychain prompt for it.
+
+```bash
+security unlock-keychain ~/Library/Keychains/login.keychain-db
+```
+
+`status`, `logs`, `restart`, and `stop` use the pid file under `$SSIOS_STATE/run/`. `logs` includes the error class and a traceback when a request fails, with secret values removed.
 
 ```bash
 ./scripts/ssios start
@@ -97,7 +99,7 @@ Create a Desktop OAuth client in a Google Cloud project that stays in Testing. A
 Install the client for that member. The wrapper adds `--state` and `--config`. Pass the account id from the Admin row. The secret prompt does not echo, and the wrapper does not print it.
 
 ```bash
-./scripts/ssios oauth-install-client --account kent
+./scripts/ssios oauth-install-client --account YOUR_ACCOUNT_ID
 ```
 
 In the UI, signed in as `ada`, open Connections and click Connect gmail, Connect drive, and Connect calendar. Each page shows one status line and only the Connect button while that service is disconnected. The consent URL is in a field you can copy. Open it in a browser on this Mac. Google redirects to `127.0.0.1` on this Mac. From another computer, paste that full `127.0.0.1` address into Finish consent. The state check stays on the Mac. Use the same Google user for all three. A second Google user is refused. After only Calendar is connected, Gmail and Drive still show not connected. An admin can connect that admin's own account the same way, and still cannot open another account's cards.

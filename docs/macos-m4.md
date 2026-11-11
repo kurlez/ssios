@@ -16,7 +16,7 @@ Check the Lima, UTM, or Apple Virtualization docs from that time to see whether 
 
 1. Install Ollama on macOS and keep the default `127.0.0.1:11434`
 2. Run `ollama pull` by hand when a model is needed. That step downloads data. Inference after that can stay off the network
-3. Run the SSIOS dev profile in a Linux guest or in a local terminal. The dev profile does not need KVM
+3. Run `./scripts/ssios start` in a local terminal. See the README. The chat guest on this Mac is vfkit, not KVM
 4. The production microVM profile needs `/dev/kvm` on Linux. macOS itself does not have that device. Whether it exists inside a guest has to be checked separately on the chosen virtualization product
 
 The Ollama address in the SSIOS config must be a loopback address. The program rejects any other host name.
@@ -33,78 +33,31 @@ Do not delete `.ssios` or `.ssios-demo`. Update, then run `make demo` again.
 
 This `git rev-parse` failure was reproduced on Linux: the state directory was the relative path `.ssios-demo`, the repository directory itself existed, but `git -C` still used a relative path while the Git subprocess cwd was `.ssios-demo/git-home`, so it reported `cannot change to '.ssios-demo/memory/demo-alpha/repo'`. The fix resolves the state directory to an absolute path at startup. If the memory repository really does not exist and an approval still names an old revision, the program stops. It does not rebuild the repository and does not change the approval. That reproduction was not run again on a Mac.
 
-## After the service is already up
+## Household UI on this Mac
 
-An `ollama` process that can answer only shows that the local model process is listening. To finish one task, use the same state directory and config as the service that is already running. Do not start a second service, and do not delete `.ssios-memfs`.
-
-Press Ctrl-C in the terminal that is running `ssios up`, update to the current branch, then start that one process again:
+Start and stop with `./scripts/ssios`. The state directory is `$HOME/Library/Application Support/ssios`. Do not point `SSIOS_STATE` at `.ssios`, `.ssios-demo`, or `.ssios-memfs`, and do not delete those directories. An Ollama process that answers on `127.0.0.1:11434` only shows that the model is listening. Set `provider = "ollama"` in `$SSIOS_STATE/ollama.toml` and pull the chat model:
 
 ```bash
-git fetch origin
-git checkout cursor/ssios-local-prototype-6121
-git pull
-PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
+ollama pull qwen2.5:7b
+./scripts/ssios restart
+./scripts/ssios status
 ```
 
-In another terminal:
+The chat guest is vfkit (`backend = "macos-vz"`, `agent = "codex"`), not krunvm. Install vfkit, prepare the guest files, then check prerequisites. This does not boot a guest:
 
 ```bash
-PYTHONPATH=src python3 -m ssios ingest examples/notes \
-  --project local-summary --state .ssios-memfs --config .ssios/memfs.toml
-PYTHONPATH=src python3 -m ssios summary \
-  --project local-summary --topic local-summary \
-  --state .ssios-memfs --config .ssios/memfs.toml
+brew install vfkit
+./scripts/ssios vm-prepare
+./scripts/ssios diagnose
 ```
 
-`ingest` accepts only md and txt. It rejects symlinks and text that looks like a secret. Memory is written only after you type `yes`. `summary` reads only notes under `topics/local-summary/` and does not treat Letta's empty template as a body. A newly approved summary is still written to `topics/fixtures/last-summary.md` by a new git commit that replaces the file. It does not delete old history.
+`diagnose` reports vfkit, the kernel, the initramfs, the Codex binary, Ollama, and a keychain probe. A full boot that uses a temporary directory is `bash scripts/macos-vz-codex-smoke.sh`. See [macos-vz.md](macos-vz.md). The older krunvm summary guest is [macos-vm.md](macos-vm.md) and is not the chat route.
 
-It proposes a summary only for the synthetic project `local-summary`. After reading the text that would be published and the memory diff, type `yes` to approve or `no` to deny. If input ends with no line, the approval stays pending. DeepSeek `message.thinking`, `<think>` content, and `approve` inside JSON do not become an approval.
-
-These keys can be added under `[llm]` in `.ssios/memfs.toml`. Then restart the service with the original arguments. Do not delete the state directory, and do not pull the model again:
-
-```toml
-max_output_tokens = 1024
-num_ctx = 8192
-max_note_chars = 6000
-summary_repair_retries = 1
-```
-
-A thinking model's summary asks for prose by default, not JSON. If it still fails, the output includes a diagnostic file path. The classification is:
+If this shell is SSH, unlock the login keychain before `./scripts/ssios start`:
 
 ```bash
-PYTHONPATH=src python3 -m ssios diagnose <task_id> --state .ssios-memfs --config .ssios/memfs.toml
+security unlock-keychain ~/Library/Keychains/login.keychain-db
 ```
-
-The raw output is in `.ssios-memfs/diagnostics/<task_id>.json`, mode 0600. It does not enter git and it is not auto-approved.
-
-If the summary fails, the old task is kept. Truncated text, an empty answer, and text that restates internal fields do not reach approval. Run the same `ssios summary` again and it creates a new task. A bad summary already written to memory stays in git history. The next summary that receives `yes` replaces `topics/fixtures/last-summary.md` with a new commit. To separate the failure causes first, run:
-
-```bash
-PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
-```
-
-This command uses the dev-profile control plane. It is not a microVM, and it does not treat "the model port is open" as a successful task.
-
-`find .ssios-memfs -path '*topics/fixtures/last-summary.md'` showing several copies is because each read used to leave a Letta `memory export`. New code deletes that run's `exports/<agent>/scratch` after the read. Directories already left behind, named with four hex digits, are removed by the cleanup command. Look first, then delete. After stopping `ssios up`:
-
-```bash
-PYTHONPATH=src python3 -m ssios gc --dry-run --state .ssios-memfs --config .ssios/memfs.toml
-PYTHONPATH=src python3 -m ssios gc --state .ssios-memfs --config .ssios/memfs.toml
-```
-
-The second command prints the list first and deletes only after `yes`. It does not delete Git history under `backend/memfs`.
-
-The local page and the guest preflight:
-
-```bash
-brew install krunvm
-krunvm --version
-PYTHONPATH=src python3 -m ssios vm-doctor --state .ssios-memfs --config .ssios/memfs.toml
-bash scripts/macos-vm-smoke.sh
-PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
-```
-
-`vm-doctor` only reports whether `krunvm` exists. `isolated` is still false: the repository has not actually started and destroyed a guest, and it has not measured cold-start time. After `backend` in the config is changed to `macos-vm`, the task fails closed and does not run on the Mac host instead. The page address is printed by `ui-login` and is valid only on `127.0.0.1`. You can also open `http://127.0.0.1:8765/ui/login` and paste `.ssios-memfs/secrets/human.token` once. Do not send the token to the repository or into chat.
 
 ## What this environment did not cover
 

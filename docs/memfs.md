@@ -2,6 +2,8 @@
 
 The default mode `letta-memfs-compat` only reuses the public Git Markdown shape so the mock demo can run without the Letta CLI. It is not Letta MemFS.
 
+Household logs that say `letta-memfs-compat` are expected. `config/ssios.example.toml` sets that mode, and `./scripts/ssios setup` copies it. Each account then keeps one git repository at `<state>/accounts/<account-id>/memory/notes/repo`. That repository is shared by every conversation and every route. It is not the upstream Letta process. `letta-memfs-upstream` is optional and fails closed when the pinned Letta CLI is missing. It does not fall back, and this build does not switch the default to upstream.
+
 Only the optional mode `letta-memfs-upstream` calls upstream. The pinned package is `@letta-ai/letta-code@0.34.45`. The integrity digest is in `third_party/letta-code.pin.json`.
 
 ## What upstream looks like

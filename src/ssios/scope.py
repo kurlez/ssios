@@ -125,6 +125,7 @@ class AccountScope:
         store = self.approvals()
         record = store.get(approval_id)
         if record["status"] == "pending" and time.time() >= float(record["expires_at"]):
+            record["decided_at"] = time.time()
             store.mark(approval_id, status="expired", decision=None)
             raise SsiosError("approval_expired", "approval expired", 409)
         if record["status"] != "pending":
@@ -136,10 +137,12 @@ class AccountScope:
         if decision not in ("approve", "deny"):
             raise SsiosError("approval_invalid", "decision rejected", 400)
         if decision == "deny":
+            record["decided_at"] = time.time()
             store.mark(approval_id, status="denied", decision="deny")
             self._audit(peer_ip, "approval.deny", record["action"], "denied")
             return {"status": "denied", "action": record["action"]}
         applied = self._apply(record, peer_ip)
+        record["decided_at"] = time.time()
         store.mark(approval_id, status="consumed", decision="approve")
         self._audit(peer_ip, "approval.approve", record["action"], "ok")
         applied["status"] = "consumed"
@@ -198,6 +201,7 @@ def seed_member_memory(plane, home: Path) -> None:
         "human.md": "---\nname: human\ndescription: \"profile\"\n---\n\nThe person I'm working with. Learn more about the person.\n",
         "persona.md": "---\nname: persona\ndescription: \"persona\"\n---\n\nI am a helpful assistant.\n",
         "project.md": "---\nname: project\ndescription: \"account project\"\n---\n\n",
+        "preferences.md": "---\nname: preferences\ndescription: \"preferences\"\n---\n\n",
     }
     for name, content in files.items():
         (repo / name).write_text(content, encoding="utf-8")
@@ -216,24 +220,8 @@ def seed_member_memory(plane, home: Path) -> None:
     write_json(store.provenance_path(project), provenance)
 
 
-def memory_excerpt(scope: AccountScope) -> str:
-    from ssios.llm import is_template_boilerplate
+def memory_excerpt(scope: AccountScope, query: str = "") -> str:
+    from ssios.account_memory import memory_context
 
-    store = scope.memory()
-    project = scope.project_id()
-    parts = []
-    for rel in ("project.md", "MEMORY.md"):
-        try:
-            doc = store.read_file(project, rel, include_untrusted=False)
-        except SsiosError:
-            continue
-        content = str(doc.get("content") or "")
-        if is_template_boilerplate(rel, content):
-            continue
-        stripped = content.strip()
-        if stripped in {"# Memory", "# Fixtures"} or stripped.startswith("# Synthetic memory index"):
-            continue
-        if stripped:
-            parts.append(stripped[:800])
-    text = "\n\n".join(parts)[:2000]
+    text, _files = memory_context(scope, query)
     return text

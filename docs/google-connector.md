@@ -99,83 +99,58 @@ Do this on the Mac that runs SSIOS. The browser consent has to be completed by y
    - `https://www.googleapis.com/auth/calendar.calendarlist.readonly`
 
 3. Leave the project in Testing. Add only the Google account you will use as a test user. Create an OAuth client of type Desktop app. Do not publish the app to skip verification.
-4. Install the keyring package. On the Connections page, signed in as that account, save the client id and secret or upload the Desktop `client_secret_*.json` file. The same `install_client` path stores them in the Keychain. The page shows only the last characters of the client id. The secret is not written into the repo, the state directory, the config, or the audit log, and it is not passed to a shell command. The command-line prompt does the same thing:
+4. `./scripts/ssios setup` installs the keyring package into `.venv`. On the Connections page, signed in as that account, save the client id and secret or upload the Desktop `client_secret_*.json` file. The same `install_client` path stores them in the Keychain. The page shows only the last characters of the client id. The secret is not written into the repo, the state directory, the config, or the audit log, and it is not passed to a shell command. The command-line prompt does the same thing. If this shell is SSH, run `security unlock-keychain ~/Library/Keychains/login.keychain-db` before `./scripts/ssios start`, or the Keychain returns `-25308`.
 
 ```bash
-pip install keyring
+./scripts/ssios oauth-install-client --account YOUR_ACCOUNT_ID
 ```
 
-```bash
-PYTHONPATH=src python3 -m ssios oauth-install-client \
-  --account YOUR_ACCOUNT_ID \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config config/ssios.example.toml
-```
-
-The prompt reads the secret without echoing it. `YOUR_ACCOUNT_ID` is the household account id from login (letters, digits, `_`, `-`). Use your own id, not someone else's.
+The wrapper adds the state directory and `$SSIOS_STATE/ollama.toml`. The prompt reads the secret without echoing it. `YOUR_ACCOUNT_ID` is the id on the Admin row, `acct-` plus 16 hex digits. Use that account's own id.
 
 5. In the shared config, under `[connectors]`, set `enabled = ["drive", "gmail", "calendar"]` for the services this Mac may use. A name left out stays denied for every account, and the Connections page shows that toggle as disabled. Each signed-in account then turns its own services on from the Connections page. That choice is stored under the account's state, not in the shared TOML. A service works only when both switches are on. Restart SSIOS if you change the shared config while it is running.
 6. On the Connections page, choose Connect for a service that is turned on, or start consent from the command line. A browser opens. Sign in and approve the requested scope yourself:
 
 ```bash
-PYTHONPATH=src python3 -m ssios oauth-connect \
-  --account YOUR_ACCOUNT_ID \
-  --connector drive \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
+./scripts/ssios oauth-connect --account YOUR_ACCOUNT_ID --connector drive
 ```
 
 Repeat with `--connector gmail` for mail and `--connector calendar` for Calendar. Each consent asks only for that connector. The Google user must be the same one already linked to the SSIOS account. A different Google user is refused. Calendar's consent URL requests the events scope and the read-only calendar list scope, not the full calendar scope.
 
-If you click Connect in the chat UI from another computer on the LAN, the redirect still has to hit this Mac's `127.0.0.1`. Finish that consent on the Mac, or run `oauth-connect` here.
+From another computer on the LAN, Connect opens Google in that browser. Google then redirects to `http://127.0.0.1:<port>/oauth/callback` on the Mac. That address does not load in the other browser. Copy the full redirect address from the address bar and paste it into Finish consent on the Connections page. The state check stays on the Mac. Enter submits the paste.
 
 7. Check the connection. The output is only the service name, whether it is connected, and when:
 
 ```bash
-PYTHONPATH=src python3 -m ssios oauth-status \
-  --account YOUR_ACCOUNT_ID \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
+./scripts/ssios oauth-status --account YOUR_ACCOUNT_ID
 ```
 
 8. Read something. This example lists files in one folder. Replace the folder id with one from your own Drive. A read does not ask for approval. The text is marked untrusted.
 
 ```bash
-PYTHONPATH=src python3 -m ssios connector-fetch \
+./scripts/ssios connector-fetch \
   --account YOUR_ACCOUNT_ID \
   --project local-summary \
   --tool drive.search \
   --arguments '{"q":"trashed = false"}' \
-  --limits '{"folder_ids":["YOUR_FOLDER_ID"],"max_items":5,"max_bytes":4096,"max_calls":20}' \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
+  --limits '{"folder_ids":["YOUR_FOLDER_ID"],"max_items":5,"max_bytes":4096,"max_calls":20}'
 ```
 
 A calendar list uses the same command with `--tool calendar.list_events`. Replace the window with a range of at most 31 days. The command calls Google and prints the events. It does not wait for `yes`. A create, update, or delete uses the same command, prints the approval card, and waits. Type `yes` to let the host call Google. The card is the change you are approving. `send_updates` defaults to `none`.
 
 ```bash
-PYTHONPATH=src python3 -m ssios connector-fetch \
+./scripts/ssios connector-fetch \
   --account YOUR_ACCOUNT_ID \
   --project local-summary \
   --tool calendar.list_events \
   --arguments '{"calendar_id":"YOUR_CALENDAR_ID","time_min":"2026-11-01T00:00:00Z","time_max":"2026-11-20T00:00:00Z"}' \
-  --limits '{"max_items":5,"max_bytes":4096,"max_calls":20}' \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
+  --limits '{"max_items":5,"max_bytes":4096,"max_calls":20}'
 ```
 
 9. Disconnect one service, or wipe the account's Google secrets after a password reset or account deletion:
 
 ```bash
-PYTHONPATH=src python3 -m ssios oauth-disconnect \
-  --account YOUR_ACCOUNT_ID --connector drive \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
-
-PYTHONPATH=src python3 -m ssios oauth-revoke-account \
-  --account YOUR_ACCOUNT_ID \
-  --state "$HOME/Library/Application Support/ssios" \
-  --config /path/to/your.toml
+./scripts/ssios oauth-disconnect --account YOUR_ACCOUNT_ID --connector drive
+./scripts/ssios oauth-revoke-account --account YOUR_ACCOUNT_ID
 ```
 
 `oauth-revoke-account` is what account deletion and an admin password reset must call. It revokes the Gmail, Drive, and Calendar refresh tokens at Google and deletes the keychain items, including the Calendar ones. It does not print them. An admin still cannot read the member's mail, files, or calendar. The member has to consent again.

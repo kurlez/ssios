@@ -26,7 +26,7 @@ Ollama stays on `127.0.0.1:11434`. `./scripts/ssios` uses `$HOME/Library/Applica
 ./scripts/ssios setup
 ```
 
-`setup` creates `.venv` if needed, installs `keyring`, and copies `config/ssios.example.toml` only when the config is missing or empty. Edit the copy: set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to `America/Los_Angeles` on Wenfeng's Mac. An empty value uses the computer's local zone. Do not put an OAuth client secret in the file.
+`setup` creates `.venv` if needed, installs `keyring`, and copies `config/ssios.example.toml` only when the config is missing or empty. Edit the copy: set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to an IANA name such as `America/Los_Angeles`. An empty value uses the computer's local zone. Do not put an OAuth client secret in the file.
 
 ```bash
 ./scripts/ssios user add --admin --username owner
@@ -42,12 +42,18 @@ Type the password twice. It is hashed with scrypt and is not printed.
 ./scripts/ssios stop
 ```
 
-`start` runs the UI in the background and prints the URL from `listen.url`. It uses `nohup` and does not call `setsid` or launchd, so the process stays in the login session of this terminal. macOS still will not show a Keychain prompt for that background process. Unlock the login keychain in Terminal.app on the Mac before saving a Google client: `security unlock-keychain ~/Library/Keychains/login.keychain-db`. An SSH session gets `keychain_locked` (`-25308`). `restart` stops that process and starts it again. `stop` signals only the process recorded in `$SSIOS_STATE/run/ui.pid` after checking that it is this UI. `logs` follows `$SSIOS_STATE/run/ui.log`, including the error class and a traceback with secret values removed. Open the printed URL and sign in. Chat is at `/ui/chat`. `./scripts/ssios fg` runs the same server in this terminal. `./scripts/ssios diagnose` includes a keychain read/write probe that deletes its throwaway item.
+`start` runs the UI in the background and prints the URL from `listen.url`. It uses `nohup` and does not call `setsid` or launchd, so the process stays in the login session of this terminal. macOS still will not show a Keychain prompt for that background process. When this shell is SSH, unlock the login keychain before `./scripts/ssios start`:
+
+```bash
+security unlock-keychain ~/Library/Keychains/login.keychain-db
+```
+
+A locked keychain, including an SSH session that skipped that command, returns `keychain_locked` (`-25308`). `restart` stops that process and starts it again. `stop` signals only the process recorded in `$SSIOS_STATE/run/ui.pid` after checking that it is this UI. `logs` follows `$SSIOS_STATE/run/ui.log`, including the error class and a traceback with secret values removed. Open the printed URL and sign in. Chat is at `/ui/chat`. `./scripts/ssios fg` runs the same server in this terminal. `./scripts/ssios diagnose` includes a keychain read/write probe that deletes its throwaway item. Paths for the account memory repository, the vault, and the log are in the README.
 
 - Direct answer: send `What is a microVM?` and leave the route on Auto. The badge says `direct`. The conversation stays in the sidebar for that account. Reopening the page, or restarting the server, reloads the messages, the route, and any approval card with its current state. Another account cannot see it.
 - Guest task: send `edit readme.md`. The turn shows booting, running, and the isolation checks, then an approval card. Approving records the result. It does not run the change on the host outside the account workspace.
 
-`ssios up` still serves the same UI on loopback. `ssios ui` is the same server with the `--lan` switch below.
+`./scripts/ssios start` is the loopback UI. `--lan` below is the home-network switch. The module command `ssios ui` is what the script runs.
 
 ## Home network (opt-in)
 
@@ -115,7 +121,7 @@ The chat UI calls the connector in `src/ssios/google_connector.py`. The API, sco
 
 The signed-in account, whether member or admin, can connect, disconnect, and propose a read or a calendar change for that same account. An admin still cannot open or approve another account's cards, and cannot read that account's tokens or mail. The Connections page shows Gmail, Drive, and Calendar separately from `status(session)["connectors"]`. Connecting Calendar does not mark Gmail or Drive connected. The admin console uses `admin_connection_status` for other accounts and sees only connected and connected_at for each connector. Password reset and account deletion call `revoke_and_delete`, which includes Calendar. Chat uses `propose_fetch`. After the owning account approves, `take_result` shows the read text or `created` / `updated` / `deleted` plus the event id. A calendar update card shows the before and after text. A delete card is marked destructive. Attendees are not emailed unless `send_updates` is `all` or `externalOnly`.
 
-Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `./scripts/ssios oauth-install-client --account kent`. The account value is the id shown on the Admin row. The command reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file. The wrapper does not print that secret.
+Connect from another computer shows the consent URL. Open it in a browser on the Mac. Google redirects to `127.0.0.1` on that Mac. The callback is not bound to the LAN address. The OAuth client is installed with `./scripts/ssios oauth-install-client --account YOUR_ACCOUNT_ID`. The account value is the id shown on the Admin row (`acct-` and 16 hex digits). The command reads the secret from a hidden prompt. It is stored by the `keyring` package, not on a command line and not in a file. The wrapper does not print that secret.
 
 ## Tests
 

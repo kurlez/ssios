@@ -122,6 +122,10 @@ CHAT_JS = r"""
             var applied = applyEvent(answer, raw, part, stepsHolder, function () { sawResult = true; });
             raw = applied == null ? raw : applied;
           });
+          if (!turnFailed && String(raw || "").trim()) {
+            answer.dataset.source = raw;
+            renderMarkdown(answer.querySelector(".content"), raw);
+          }
           return pump();
         });
       }
@@ -176,7 +180,8 @@ CHAT_JS = r"""
       copy.type = "button";
       copy.className = "copy";
       copy.textContent = "Copy";
-      copy.addEventListener("click", function () { copyText(message.text || content.innerText || ""); });
+      wrap.dataset.source = message.text || "";
+      copy.addEventListener("click", function () { copyText(wrap.dataset.source || message.text || ""); });
       tools.appendChild(copy);
       if (message.at) tools.appendChild(stamp(message.at));
       body.appendChild(tools);
@@ -322,6 +327,23 @@ CHAT_JS = r"""
   }
 
   function renderMarkdown(node, text) {
+    if (window.ssiosRender) {
+      var host = node.querySelector(".md");
+      if (!host) {
+        host = document.createElement("div");
+        host.className = "md";
+        node.appendChild(host);
+      }
+      host.innerHTML = window.ssiosRender(String(text || ""));
+      if (window.katex) {
+        host.querySelectorAll(".math").forEach(function (el) {
+          try {
+            window.katex.render(el.textContent || "", el, {throwOnError: false, displayMode: el.getAttribute("data-display") === "1"});
+          } catch (err) {}
+        });
+      }
+      return;
+    }
     node.textContent = "";
     String(text || "").split(/```/).forEach(function (part, index) {
       if (index % 2 === 1) {
@@ -610,6 +632,12 @@ CHAT_JS = r"""
     });
     return {title: title, destructive: destructive, fields: fields, before: before, after: after, body: body};
   }
+
+  document.querySelectorAll("form[action^='/ui/approvals/']").forEach(function (form) {
+    form.addEventListener("submit", function () {
+      form.querySelectorAll("button").forEach(function (button) { button.disabled = true; });
+    });
+  });
 })();
 
 """
@@ -800,6 +828,10 @@ def _events_html(session, events: list[dict]) -> str:
                 technical.append("<p>" + html.escape(full) + "</p>")
         elif name == "approval":
             parts.append(_approval_card(session, data))
+        elif name == "memory":
+            names = ", ".join(str(item) for item in (data.get("files") or []) if item)
+            if names:
+                technical.append("<p>Used memory: " + html.escape(names) + "</p>")
         elif name == "error":
             parts.append("<p>" + html.escape(str(data.get("detail") or "")) + "</p>")
     details = ""
@@ -1083,7 +1115,10 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M3 11.5 21 3l-8.5 18-2.2-7.3z\"/></svg>"
         "</button></div></form>"
         "<p class=\"hint\">Enter to send, Shift+Enter for a new line</p></div></section>"
+        + "<link rel=\"stylesheet\" href=\"/ui/vendor/katex/katex.min.css\">"
         + "<script type=\"application/json\" id=\"chat-data\">" + blob + "</script>"
+        + "<script src=\"/ui/vendor/katex/katex.min.js\"></script>"
+        + "<script src=\"/ui/vendor/render.js\"></script>"
         + "<script src=\"" + CHAT_PATH + "\"></script>"
         + "<noscript><p>The form still sends the message when the script does not run.</p></noscript>"
     )

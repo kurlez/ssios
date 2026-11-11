@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import re
 import json
 import secrets
 import time
 from http.cookies import SimpleCookie
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from ssios.errors import SsiosError
@@ -95,7 +97,7 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         _csrf(session, body)
         return _summary_post(plane, session, body)
     if method == "GET" and path == "/ui/memory":
-        return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", "")))
+        return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", ""), query.get("q", "")))
     if method == "GET" and path == "/ui/settings":
         return Page(200, _settings(plane, session))
     if method == "POST" and path == "/ui/settings":
@@ -483,16 +485,131 @@ def _decide(plane, session: dict, approval_id: str, body: dict, peer_ip: str = "
 
     account = _account(session)
     scope = AccountScope(plane, account)
+    if str(body.get("decision") or "") == "retry":
+        return _retry_approval(plane, session, scope, approval_id, peer_ip)
     google_record = _google_fetch_record(plane, approval_id)
     if google_record is not None:
         return _decide_google(plane, session, scope, google_record, body, peer_ip)
     if scope.has_approval(approval_id):
-        result = scope.decide(approval_id, body, peer_ip)
-        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+        try:
+            result = scope.decide(approval_id, body, peer_ip)
+        except SsiosError as exc:
+            if exc.code not in {"approval_replay_denied", "approval_expired"}:
+                raise
+            _log_approval(approval_id, "replay", scope.approvals().get(approval_id))
+            return Page(200, _approval_status_page(plane, session, scope, approval_id, None))
+        _log_approval(approval_id, "decide", scope.approvals().get(approval_id))
+        return Page(200, _approval_status_page(plane, session, scope, approval_id, result))
     if account.get("legacy_owner"):
         result = plane.decide(_human(plane), approval_id, body)
         return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
     raise SsiosError("not_found", "approval not found", 404)
+
+
+def _log_approval(approval_id: str, path: str, record: dict) -> None:
+    import sys
+
+    status = re.sub(r"[^a-z_]", "", str(record.get("status") or ""))[:24]
+    action = re.sub(r"[^a-z.]", "", str(record.get("action") or ""))[:32]
+    safe_id = re.sub(r"[^A-Za-z0-9-]", "", str(approval_id))[:40]
+    sys.stderr.write(f"ssios.ui approval id={safe_id} path={path} status={status} action={action}\n")
+    sys.stderr.flush()
+
+
+def _approval_status_page(plane, session, scope, approval_id: str, result: dict | None, extra: str = "") -> str:
+    from datetime import datetime
+
+    from ssios.calendar_intent import account_zone
+
+    record = scope.approvals().get(approval_id)
+    status = str(record.get("status") or "")
+    decision = str(record.get("decision") or "")
+    if status == "consumed" and decision == "approve":
+        label = "Approved"
+    elif status == "denied":
+        label = "Denied"
+    elif status == "expired":
+        label = "Expired"
+    elif status == "superseded":
+        label = "Superseded"
+    else:
+        label = status or "Unknown"
+    zone, zone_name = account_zone(plane.settings, session.get("account"))
+    stamp = record.get("decided_at") or record.get("expires_at")
+    try:
+        when = datetime.fromtimestamp(float(stamp), zone).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OSError):
+        when = ""
+    outcome = _approval_outcome(scope, record, result)
+    found = scope.chat().find_approval(approval_id)
+    conversation = found[0] if found else ""
+    back = f"/ui/chat?conversation={html.escape(conversation)}" if conversation else "/ui/chat"
+    retry = ""
+    if status == "expired":
+        csrf = html.escape(str(session.get("csrf") or ""))
+        retry = (
+            f"<form method=\"post\" action=\"/ui/approvals/{html.escape(approval_id)}\">"
+            f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<button class=\"primary\" name=\"decision\" value=\"retry\" type=\"submit\">Retry</button></form>"
+        )
+    return _page(
+        session,
+        "Decided",
+        "<h2>" + html.escape(label) + "</h2>"
+        + (f"<p>When: <time datetime=\"{html.escape(when)}\">{html.escape(when)}</time> ({html.escape(zone_name)})</p>" if when else "")
+        + f"<p>{html.escape(outcome)}</p>"
+        + retry
+        + extra
+        + f"<p><a href=\"{back}\">Back to the conversation</a></p>",
+    )
+
+
+def _approval_outcome(scope, record: dict, result: dict | None) -> str:
+    status = str(record.get("status") or "")
+    if status == "denied":
+        return "Nothing was changed."
+    if status == "expired":
+        return "This approval expired before it ran. Retry stages a new one."
+    if status == "superseded":
+        return "A newer approval replaced this one."
+    action = str(record.get("action") or "")
+    if action == "memory.commit":
+        try:
+            proposal = scope.memory().load_proposal(str(record.get("proposal_id") or ""))
+            paths = ", ".join(str(item.get("path") or "") for item in proposal.get("files") or [])
+        except SsiosError:
+            paths = ""
+        if paths:
+            return "Saved to memory: " + paths
+        return "Saved to memory."
+    if action == "vault.clip":
+        return "Saved the clip."
+    if action == "chat.accept":
+        return "Saved the guest result for this account."
+    if isinstance(result, dict) and result.get("status"):
+        return "Status: " + str(result.get("status"))
+    return "The decision was recorded."
+
+
+def _retry_approval(plane, session, scope, approval_id: str, peer_ip: str) -> Page:
+    del peer_ip
+    if not scope.has_approval(approval_id):
+        raise SsiosError("not_found", "approval not found", 404)
+    record = scope.approvals().get(approval_id)
+    if record.get("status") != "expired" or record.get("action") != "memory.commit":
+        _log_approval(approval_id, "retry-rejected", record)
+        return Page(200, _approval_status_page(plane, session, scope, approval_id, None))
+    proposal = scope.memory().load_proposal(str(record.get("proposal_id") or ""))
+    files = [item for item in proposal.get("files") or [] if isinstance(item, dict)]
+    if not files:
+        return Page(200, _page(session, "Decided", "<p>Nothing to stage again.</p>"))
+    fresh = scope.memory().propose(scope.project_id(), scope.memory().head(scope.project_id()), files, task_id="chat")
+    approval = scope.create_memory_approval(fresh)
+    record["status"] = "superseded"
+    scope.approvals().save()
+    _log_approval(approval_id, "retry", record)
+    form = "<h2>New approval</h2>" + _decision_form(session, scope.approvals().get(approval["id"]))
+    return Page(200, _approval_status_page(plane, session, scope, approval_id, None, form))
 
 
 def _owns_google_fetch(plane, account_id: str, record: dict) -> bool:
@@ -640,7 +757,7 @@ def _summary_form(plane, session: dict) -> str:
     )
 
 
-def _memory(plane, session: dict, project_id: str, path: str) -> str:
+def _memory(plane, session: dict, project_id: str, path: str, query_text: str = "") -> str:
     account = _account(session)
     if not account.get("legacy_owner"):
         from ssios.scope import AccountScope
@@ -648,15 +765,30 @@ def _memory(plane, session: dict, project_id: str, path: str) -> str:
         scope = AccountScope(plane, account)
         project_id = scope.project_id()
         paths = scope.memory().list_markdown(project_id)
-        links = "".join(
-            f"<li><a href=\"/ui/memory?path={html.escape(item)}\">{html.escape(item)}</a></li>"
-            for item in paths
-        )
         content = ""
         if path:
             doc = scope.memory().read_file(project_id, path, include_untrusted=False)
-            content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>"
-        return _page(session, "Memory", f"<ul>{links}</ul>{content}")
+            from ssios.vault import render_markdown
+
+            _meta, rendered = render_markdown(str(doc.get("content") or ""), link_for=lambda url: url if str(url).startswith(("http://", "https://")) else "")
+            trust = html.escape(str(doc.get("trust") or ""))
+            revision = html.escape(str(doc.get("revision") or ""))
+            content = (
+                f"<p>Trust: {trust}. Revision: {revision}.</p>"
+                + rendered
+                + _account_history(scope, project_id, path)
+            )
+        shown = [item for item in paths if not query_text or query_text.casefold() in item.casefold()]
+        links = "".join(
+            f"<li><a href=\"/ui/memory?path={html.escape(item)}\">{html.escape(item)}</a></li>"
+            for item in shown
+        )
+        safe_q = html.escape(query_text)
+        search = (
+            f"<form method=\"get\" action=\"/ui/memory\"><label>Search <input name=\"q\" value=\"{safe_q}\"></label>"
+            "<button type=\"submit\">Search</button></form>"
+        )
+        return _page(session, "Memory", search + f"<ul>{links}</ul>{content}")
     paths = plane.memory.list_markdown(project_id) if not plane._uses_upstream() else plane.upstream.list_markdown(project_id)
     links = "".join(
         f"<li><a href=\"/ui/memory?project_id={html.escape(project_id)}&path={html.escape(item)}\">{html.escape(item)}</a></li>"
@@ -667,6 +799,15 @@ def _memory(plane, session: dict, project_id: str, path: str) -> str:
         doc = plane.read_memory(_human(plane), project_id, path)
         content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>" + _history(plane, project_id, path)
     return _page(session, "Memory", f"<ul>{links}</ul>{content}")
+
+
+def _account_history(scope, project_id: str, path: str) -> str:
+    repo = scope.memory().repo(project_id)
+    completed = scope.memory().git.run(repo, ["log", "--pretty=format:%h %s", "-n", "8", "--", path], check=False)
+    if completed.returncode != 0 or not completed.stdout:
+        return ""
+    text = completed.stdout.decode("utf-8", "replace")
+    return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
 def _history(plane, project_id: str, path: str) -> str:
@@ -974,7 +1115,31 @@ def _static_asset(method: str, path: str) -> Page | None:
             return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     if path == CONN_PATH:
         return Page(200, CONN_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    vendor = _vendor_asset(path)
+    if vendor is not None:
+        return vendor
     return None
+
+
+def _vendor_asset(path: str) -> Page | None:
+    """Same-origin KaTeX and the markdown renderer. No CDN."""
+    prefix = "/ui/vendor/"
+    if not path.startswith(prefix):
+        return None
+    rel = path[len(prefix):]
+    if not rel or ".." in rel.split("/") or rel.startswith("/"):
+        return None
+    allowed = rel in {"render.js", "katex/katex.min.js", "katex/katex.min.css"} or (
+        rel.startswith("katex/fonts/") and rel.endswith(".woff2") and rel.count("/") == 2
+    )
+    if not allowed:
+        return None
+    root = Path(__file__).resolve().parent / "vendor"
+    file = (root / rel).resolve()
+    if root not in file.parents or not file.is_file():
+        return None
+    kinds = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
+    return Page(200, file.read_bytes(), content_type=kinds[file.suffix], cache_control=_ASSET_CACHE)
 
 
 def _login_page(code: str) -> str:

@@ -1069,10 +1069,17 @@ class HouseholdTest(PlaneTest):
         _status, before = _get(self.base, "/ui/memory", self.ada)
         self.assertNotIn("HARBOR", before)
         self._approve(self.ada, pending)
-        _status, after = _get(self.base, "/ui/memory?path=topics/chat/note.md", self.ada)
+        _status, listing = _get(self.base, "/ui/memory", self.ada)
+        self.assertIn("topics/chat/", listing)
+        self.assertNotIn("topics/chat/note.md", listing)
+        import re as _re
+        found = _re.search(r'href="/ui/memory\?path=(topics/chat/[^"]+)"', listing)
+        self.assertIsNotNone(found)
+        _status, after = _get(self.base, "/ui/memory?path=" + found.group(1), self.ada)
         self.assertIn("HARBOR", after)
+        self.assertIn("History", after)
         request = urllib.request.Request(
-            self.base + "/ui/memory?project_id=local-summary&path=topics/chat/note.md",
+            self.base + "/ui/memory?project_id=local-summary&path=" + found.group(1),
             headers={"Cookie": self.owner},
         )
         try:
@@ -1081,6 +1088,12 @@ class HouseholdTest(PlaneTest):
         except urllib.error.HTTPError as exc:
             owner = exc.read().decode()
         self.assertNotIn("HARBOR", owner)
+        again = self._approve(self.ada, pending)
+        self.assertIn("Approved", again)
+        self.assertIn("Saved to memory:", again)
+        self.assertIn("topics/chat/", again)
+        self.assertIn("Back to the conversation", again)
+        self.assertNotIn("no longer pending", again)
 
     def _approve(self, cookie: str, page: str) -> str:
         csrf = page.split('name="csrf" value="', 1)[1].split('"', 1)[0]
@@ -1671,6 +1684,70 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("2023", listed)
         self.assertEqual(len(calls), 1)
         self.plane.llm.complete_chat = real
+
+    def test_saved_name_is_recalled_in_a_new_conversation(self) -> None:
+        pending = self._send(self.ada, "My name is Harbor")
+        self.assertIn("human.md", pending)
+        self.assertIn("Nothing is written until you approve", pending)
+        _status, before = _get(self.base, "/ui/memory", self.ada)
+        self.assertNotIn("Harbor", before)
+        self._approve(self.ada, pending)
+        calls = []
+
+        def wrapped(messages, cancel_event, deadline):
+            calls.append(messages)
+            yield "I do not know."
+
+        self.plane.llm.stream_chat = wrapped
+        again = self._send(self.ada, "what do you know about me")
+        self.assertIn("Used memory: human.md", again)
+        self.assertTrue(calls)
+        blob = json.dumps(calls[0], ensure_ascii=False)
+        self.assertIn("MEMORY-CONTEXT", blob)
+        self.assertIn("Harbor", blob)
+        self.assertIn("- name: Harbor", blob)
+        repo = self.state / "accounts" / self._ada_id() / "memory" / "notes" / "repo"
+        log = subprocess.check_output(["git", "-C", str(repo), "log", "--oneline"], text=True)
+        self.assertGreaterEqual(len(log.splitlines()), 2)
+        shown = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:human.md"], text=True)
+        self.assertIn("Harbor", shown)
+        _status, owner = _get(self.base, "/ui/memory", self.owner)
+        self.assertNotIn("Harbor", owner)
+
+    def test_reminder_uses_an_absolute_time_across_midnight(self) -> None:
+        from dataclasses import replace
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo("America/Los_Angeles")
+        self.plane.settings = replace(self.plane.settings, ui_time_zone="America/Los_Angeles")
+        self.plane.calendar_now = datetime(2026, 11, 10, 23, 50, tzinfo=zone)
+        calls = []
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            yield "I recorded that."
+
+        self.plane.llm.stream_chat = wrapped
+        saved = self._send(self.ada, "帮我记一下，我明天上午11点需要给Chase打电话")
+        self.assertIn("Route: memory", saved)
+        self.assertIn("Saved: Wed Nov 11, 11:00 AM PT", saved)
+        self.assertIn("2026-11-11T11:00:00-08:00", saved)
+        mirror = (self.state / "accounts" / self._ada_id() / "Tasks.md").read_text(encoding="utf-8")
+        self.assertIn("2026-11-11T11:00:00-08:00", mirror)
+        self.assertIn("Chase", mirror)
+        self.assertIn("Chase", saved)
+        self.assertNotIn("I recorded that", saved)
+        self.assertEqual(calls, [])
+        self.plane.calendar_now = datetime(2026, 11, 11, 0, 30, tzinfo=zone)
+        today = self._send(self.ada, "我今天有什么事情")
+        self.assertIn("2026-11-11T11:00:00-08:00", today)
+        self.assertIn("Chase", today)
+        self.assertNotIn("I recorded that", today)
+        tomorrow = self._send(self.ada, "我明天需要做什么")
+        self.assertIn("Tomorrow — no reminders.", tomorrow)
+        self.assertNotIn("Chase", tomorrow)
+        self.assertIn("Calendar is not connected.", tomorrow)
 
     def test_natural_language_calendar_examples_need_approval(self) -> None:
         from ssios.errors import SsiosError
