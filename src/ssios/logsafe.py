@@ -27,3 +27,20 @@ def log_failure(exc: BaseException) -> None:
     rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     sys.stderr.write(f"ssios.ui error class={exc.__class__.__name__}\n{redact(rendered)}")
     sys.stderr.flush()
+
+
+def log_upstream(*, account_id: str, service: str, endpoint: str, status: int, error: str) -> None:
+    """One triage line. No codes, tokens, secrets, or URLs."""
+    account = re.sub(r"[^A-Za-z0-9_-]", "", str(account_id))[:64]
+    service_name = re.sub(r"[^a-z]", "", str(service))[:16]
+    endpoint_name = re.sub(r"[^a-z.]", "", str(endpoint))[:32]
+    error_name = re.sub(r"[^A-Za-z0-9_-]", "", str(error or ""))[:40] or "none"
+    sys.stderr.write(
+        "ssios.ui connector"
+        f" account={account}"
+        f" service={service_name}"
+        f" endpoint={endpoint_name}"
+        f" status={int(status)}"
+        f" error={error_name}\n"
+    )
+    sys.stderr.flush()

@@ -411,6 +411,7 @@ class HouseholdTest(PlaneTest):
     def setUp(self) -> None:
         super().setUp()
         _CalendarApi.seen = []
+        _CalendarApi.token_reply = None
         _CalendarApi.writes = []
         _CalendarApi.mismatch = False
         _CalendarApi.listed = None
@@ -734,7 +735,7 @@ class HouseholdTest(PlaneTest):
             cookie=self.owner,
         )
         self.assertEqual(status, 200, started)
-        self.assertIn("Consent URL", started)
+        self.assertIn("Open Google consent", started)
         self.assertIn("readonly", started)
         self.assertNotIn("admin cannot access", started)
         self.assertIn("Connect calendar", started)
@@ -812,7 +813,7 @@ class HouseholdTest(PlaneTest):
             extra={"Accept": "text/html"},
         )
         self.assertEqual(status, 200, started)
-        self.assertIn("Consent URL", started)
+        self.assertIn("Open Google consent", started)
         self.assertNotIn("connector_admin_denied", started)
         self.assertIsNone(self.store.get(self._ada_id(), "drive-refresh"))
         self.assertNotEqual(service_name(owner_id), service_name(self._ada_id()))
@@ -1036,6 +1037,63 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Not set up", removed)
         self.assertIsNone(self.store.get(self._ada_id(), "client-secret"))
         self.assertIn("oauth.client.remove", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))
+
+    def test_connections_scroll_and_put_consent_on_the_service_card(self) -> None:
+        from ssios.ui import APP_CSS
+        from ssios.ui_household import _connections_page
+
+        self.assertIn("body.app-body { overflow: hidden; }", APP_CSS)
+        self.assertIn(".stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }", APP_CSS)
+        self.assertIn(".page { flex: 1; min-height: 0; overflow-y: auto;", APP_CSS)
+        self.assertIn(".log { flex: 1; overflow: auto; min-height: 0; }", APP_CSS)
+        page = _connections_page(
+            self.plane,
+            {"account": self.plane.accounts.get(self._ada_id()), "csrf": "csrf-token"},
+            "",
+            "192.168.1.20",
+        )
+        self.assertIn('class="page"', page)
+        self.assertIn('class="sheet"', page)
+        self.assertNotIn("<select", page)
+        self.store.put(self._ada_id(), "client-id", "desktop-client-abcdef.apps.googleusercontent.com")
+        self.store.put(self._ada_id(), "client-secret", "GOCSPX-test")
+        ready = _connections_page(
+            self.plane,
+            {"account": self.plane.accounts.get(self._ada_id()), "csrf": "csrf-token"},
+            "",
+            "192.168.1.20",
+        )
+        self.assertIn("Manage client", ready)
+        self.assertIn("<details", ready)
+        self.assertIn("not on the Mac", ready)
+        self.assertIn("Finish consent", ready)
+        self.assertIn('name="redirect_url"', ready)
+        self.assertIn('name="op" value="finish"', ready)
+        self.assertIn("enterkeyhint=\"done\"", ready)
+        focused = _connections_page(
+            self.plane,
+            {"account": self.plane.accounts.get(self._ada_id()), "csrf": "csrf-token"},
+            "<p class=\"notice\">The consent code expired. Click Connect again.</p>",
+            "192.168.1.20",
+            focus="gmail",
+        )
+        client = focused.split('<article class="svc"', 1)[0]
+        gmail = focused.split("<h2>Gmail</h2>", 1)[1].split("<h2>Drive</h2>", 1)[0]
+        self.assertNotIn("code expired", client)
+        self.assertIn("code expired", gmail)
+        from dataclasses import replace
+
+        self.plane.settings = replace(self.plane.settings, connectors_enabled=("gmail",))
+        gated = _connections_page(
+            self.plane,
+            {"account": self.plane.accounts.get(self._ada_id()), "csrf": "csrf-token"},
+            "",
+            "127.0.0.1",
+        )
+        self.assertIn("line 74", gated)
+        self.assertIn("ssios.example.toml", gated)
+        self.assertIn("add &quot;calendar&quot; to enabled", gated)
         self.plane.settings = replace(self.plane.settings, connectors_enabled=("drive", "gmail", "calendar"))
 
     def test_desktop_json_connects_and_keychain_errors_stay_on_the_card(self) -> None:

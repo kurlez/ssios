@@ -95,7 +95,41 @@ def parse_desktop_client(raw: str) -> tuple[str, str]:
     installed = data.get("installed") if isinstance(data, dict) else None
     if not isinstance(installed, dict):
         raise SsiosError("oauth_client_invalid", "the file is not a Desktop client", 400)
-    return str(installed.get("client_id") or ""), str(installed.get("client_secret") or "")
+    client_id = str(installed.get("client_id") or "").strip()
+    client_secret = str(installed.get("client_secret") or "").strip()
+    return client_id, client_secret
+
+
+def _oauth_fields(raw: bytes) -> tuple[str, str]:
+    """Google's OAuth error and error_description. Empty when the body is not that shape."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    error = data.get("error")
+    description = data.get("error_description")
+    if isinstance(error, dict):
+        if not isinstance(description, str):
+            description = error.get("message")
+        error = error.get("status") or ""
+    if not isinstance(error, str):
+        error = ""
+    if not isinstance(description, str):
+        description = ""
+    return error.strip(), description.strip()
+
+
+def _safe_oauth_description(text: str) -> str:
+    if not text or len(text) > 160 or "://" in text or "?" in text:
+        return ""
+    lowered = text.lower()
+    if any(word in lowered for word in ("ya29.", "gocspx-", "client_secret", "refresh_token", "access_token", "bearer ")):
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9 .,':_-]+", text) is None:
+        return ""
+    return text
 
 
 def member_session(account_id: str) -> AccountSession:
@@ -138,6 +172,8 @@ class GoogleConnector:
 
     def install_client(self, session: AccountSession, client_id: str, client_secret: str) -> dict:
         account_id = self._bind(session)
+        client_id = client_id.strip()
+        client_secret = client_secret.strip()
         if not client_id or not client_secret or "\n" in client_id or "\n" in client_secret:
             raise SsiosError("oauth_client_invalid", "oauth client rejected", 400)
         self.store.put(account_id, "client-id", client_id)
@@ -266,6 +302,7 @@ class GoogleConnector:
                 "state": state,
                 "redirect": redirect,
                 "scope": chosen,
+                "authorization_url": url,
             }
 
         def runner() -> None:
@@ -284,6 +321,13 @@ class GoogleConnector:
         if open_browser:
             webbrowser.open(url)
         return {"authorization_url": url, "awaiting_consent": True}
+
+    def pending_consent(self, session: AccountSession, connector: str) -> str:
+        """The consent URL for a service that is waiting. The verifier stays here."""
+        account_id = self._bind(session)
+        connector = _connector_name(connector)
+        pending = self._pending.get((account_id, connector)) or {}
+        return str(pending.get("authorization_url") or "")
 
     def submit_redirect(self, session: AccountSession, connector: str, pasted: str) -> dict:
         """Finish consent from a pasted http://127.0.0.1 callback. The PKCE verifier stays here."""
@@ -499,7 +543,9 @@ class GoogleConnector:
                 "redirect_uri": redirect,
                 "grant_type": "authorization_code",
                 "code_verifier": verifier,
-            }
+            },
+            account_id=account_id,
+            service=connector,
         )
         refresh = str(token.get("refresh_token") or "")
         access = str(token.get("access_token") or "")
@@ -515,7 +561,7 @@ class GoogleConnector:
                     raise SsiosError("oauth_scope_widened", "token includes a scope that was not requested", 409)
                 scope = " ".join(part for part in granted.split() if part)
                 _check_scope(connector, scope)
-            sub = self._subject(access)
+            sub = self._identity(account_id, connector, access)
             existing = self.store.get(account_id, "google-sub")
             if existing and existing != sub:
                 raise SsiosError("google_identity_mismatch", "this account is already linked to a different Google identity", 409)
@@ -562,7 +608,9 @@ class GoogleConnector:
                 "client_id": self.store.get(account_id, "client-id") or "",
                 "client_secret": self.store.get(account_id, "client-secret") or "",
                 "grant_type": "refresh_token",
-            }
+            },
+            account_id=account_id,
+            service=connector,
         )
         access = str(token.get("access_token") or "")
         if not access:
@@ -572,12 +620,40 @@ class GoogleConnector:
             self.store.put(account_id, f"{connector}-refresh", rotated)
         return access
 
-    def _subject(self, access: str) -> str:
-        payload = self._get_json(self.endpoints.userinfo_url, access, None)
-        sub = payload.get("sub") if isinstance(payload, dict) else None
-        if not isinstance(sub, str) or not sub:
+    def _identity(self, account_id: str, connector: str, access: str) -> str:
+        """Who this token belongs to, using an API the granted scope can call.
+
+        The OpenID userinfo endpoint returns 401 for a Gmail, Drive, or Calendar
+        token, because those consents do not include the openid scope.
+        """
+        url, params, endpoint = self._identity_target(connector)
+        payload = self._google_get(account_id, connector, endpoint, url, access, params)
+        identity = ""
+        email = payload.get("emailAddress")
+        user = payload.get("user")
+        if isinstance(email, str) and email:
+            identity = email
+        elif isinstance(user, dict) and isinstance(user.get("emailAddress"), str):
+            identity = user["emailAddress"]
+        elif isinstance(payload.get("id"), str):
+            identity = payload["id"]
+        elif isinstance(payload.get("sub"), str):
+            identity = payload["sub"]
+        if not identity:
             raise SsiosError("oauth_incomplete", "google identity missing", 502)
-        return sub
+        return identity
+
+    def _identity_target(self, connector: str) -> tuple[str, dict | None, str]:
+        base = self.endpoints.api_base.rstrip("/")
+        names = {"gmail": "gmail.profile", "drive": "drive.about", "calendar": "calendar.primary"}
+        endpoint = names[connector]
+        if base != "https://www.googleapis.com":
+            return f"{base}/identity/{connector}", None, endpoint
+        if connector == "gmail":
+            return "https://gmail.googleapis.com/gmail/v1/users/me/profile", None, endpoint
+        if connector == "drive":
+            return base + "/drive/v3/about", {"fields": "user"}, endpoint
+        return base + "/calendar/v3/calendars/primary", None, endpoint
 
     def _revoke(self, account_id: str, refresh: str) -> bool:
         body = urllib.parse.urlencode(
@@ -597,7 +673,7 @@ class GoogleConnector:
         except (urllib.error.URLError, TimeoutError, OSError):
             return False
 
-    def _token_request(self, form: dict) -> dict:
+    def _token_request(self, form: dict, *, account_id: str, service: str) -> dict:
         request = urllib.request.Request(
             self.endpoints.token_url,
             data=urllib.parse.urlencode(form).encode("utf-8"),
@@ -607,12 +683,59 @@ class GoogleConnector:
             with urllib.request.urlopen(request, timeout=20) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            exc.read()
-            raise SsiosError("connector_upstream", f"google status {exc.code}", 502) from None
+            raw = exc.read()
+            self._raise_oauth(account_id, service, "token", exc.code, raw)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            from ssios.logsafe import log_upstream
+
+            log_upstream(account_id=account_id, service=service, endpoint="token", status=0, error="transport")
             raise SsiosError("connector_upstream", "google token request failed", 502) from exc
         if not isinstance(payload, dict):
             raise SsiosError("connector_upstream", "google token response rejected", 502)
+        return payload
+
+    def _raise_oauth(self, account_id: str, service: str, endpoint: str, status: int, raw: bytes) -> None:
+        from ssios.logsafe import log_upstream
+
+        error, description = _oauth_fields(raw)
+        log_upstream(account_id=account_id, service=service, endpoint=endpoint, status=status, error=error)
+        safe = _safe_oauth_description(description)
+        if error == "invalid_client":
+            detail = "Google rejected this OAuth client. Re-upload the Desktop client JSON."
+            if safe:
+                detail += " " + safe
+            detail += " Error code: connector_invalid_client."
+            raise SsiosError("connector_invalid_client", detail, 401)
+        if error == "invalid_grant":
+            detail = "The consent code expired or was already used. Click Connect again."
+            if safe:
+                detail += " " + safe
+            detail += " Error code: connector_invalid_grant."
+            raise SsiosError("connector_invalid_grant", detail, 400)
+        detail = f"Google returned {error or 'an error'}."
+        if safe:
+            detail += " " + safe
+        detail += " Error code: connector_upstream."
+        raise SsiosError("connector_upstream", detail, 502)
+
+    def _google_get(
+        self,
+        account_id: str,
+        service: str,
+        endpoint: str,
+        url: str,
+        access: str,
+        params: dict | None,
+    ) -> dict:
+        status, raw = self._exchange("GET", url, access, params, None)
+        if status >= 400:
+            self._raise_oauth(account_id, service, endpoint, status, raw)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SsiosError("connector_upstream", "google response rejected", 502) from exc
+        if not isinstance(payload, dict):
+            raise SsiosError("connector_upstream", "google response rejected", 502)
         return payload
 
     def _fetch(self, tool: str, arguments: dict, limits: dict, access: str) -> tuple[str, dict]:
@@ -836,7 +959,7 @@ class GoogleConnector:
                 return 409, body
             if method == "DELETE" and exc.code in (404, 410):
                 return exc.code, body
-            return exc.code, b""
+            return exc.code, body
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise SsiosError("connector_upstream", "google request failed", 502) from exc
 

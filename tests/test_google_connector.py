@@ -47,6 +47,7 @@ FIXTURE_EVENT = {
 class _Google(BaseHTTPRequestHandler):
     seen: list[dict] = []
     events: dict[str, dict] = {}
+    token_reply: dict | None = None
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
@@ -78,6 +79,9 @@ class _Google(BaseHTTPRequestHandler):
         body = self._read_body()
         path, _query = self._record("POST", body)
         form = urllib.parse.parse_qs(body)
+        if path == "/token" and self.token_reply is not None:
+            self._json(self.token_reply["body"], int(self.token_reply["status"]))
+            return
         if path == "/token":
             grant = (form.get("grant_type") or [""])[0]
             if grant == "authorization_code":
@@ -126,9 +130,9 @@ class _Google(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path, query = self._record("GET")
         auth = self.headers.get("Authorization", "")
-        if path == "/userinfo":
+        if path in ("/userinfo", "/identity/gmail", "/identity/drive", "/identity/calendar"):
             sub = "fixture-sub-a" if auth.endswith("-a") else "fixture-sub-b"
-            payload = {"sub": sub}
+            payload = {"sub": sub, "emailAddress": sub, "id": sub, "user": {"emailAddress": sub}}
         elif path == "/drive/v3/files":
             payload = {
                 "files": [
@@ -202,6 +206,7 @@ class ConnectorTest(PlaneTest):
     def setUp(self) -> None:
         super().setUp()
         _Google.seen = []
+        _Google.token_reply = None
         _Google.events = {"cal-1/evt1demo": copy.deepcopy(FIXTURE_EVENT)}
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
@@ -793,6 +798,86 @@ class ConnectorTest(PlaneTest):
         self.assertIsNone(self.store.get("ada", "client-secret"))
         self.assertFalse(self.connector.admin_connection_status("ada")["connectors"]["calendar"]["connected"])
         self.assertEqual(self.store.get("bea", "client-secret"), "client-secret-bea")
+
+    def test_token_exchange_sends_the_stored_desktop_secret_and_reports_google_errors(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from ssios.google_connector import parse_desktop_client
+        from ssios.httpapi import _multipart_memory
+
+        secret = "GOCSPX-desktop-secret-value"
+        client_id = "1234567890-abc.apps.googleusercontent.com"
+        raw_json = json.dumps(
+            {
+                "installed": {
+                    "client_id": client_id,
+                    "client_secret": secret,
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        )
+        boundary = "----ssios"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"client_file\"; filename=\"client_secret.json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{raw_json}\r\n--{boundary}--\r\n"
+        ).encode()
+        parsed = _multipart_memory(f"multipart/form-data; boundary={boundary}", body)
+        got_id, got_secret = parse_desktop_client(parsed["client_file"])
+        self.assertEqual(got_id, client_id)
+        self.assertEqual(got_secret, secret)
+        self.connector.install_client(self.ada, got_id, got_secret)
+        self.assertEqual(self.store.get("ada", "client-secret"), secret)
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "gmail", pasted)
+        posts = [item for item in _Google.seen if item["method"] == "POST" and item["path"] == "/token"]
+        self.assertTrue(posts)
+        form = urllib.parse.parse_qs(posts[-1]["body"])
+        self.assertEqual(form["client_id"], [client_id])
+        self.assertEqual(form["client_secret"], [secret])
+        self.assertEqual(form["code"], ["code-a"])
+        self.assertEqual(form["grant_type"], ["authorization_code"])
+        self.assertEqual(form["redirect_uri"], [auth["redirect_uri"][0]])
+        self.assertTrue(form["code_verifier"][0])
+        self.assertEqual(posts[-1]["auth"], "")
+        self.assertFalse(any(item["path"] == "/userinfo" for item in _Google.seen))
+        self.assertTrue(any(item["path"] == "/identity/gmail" for item in _Google.seen))
+
+        self.connector.disconnect(self.ada, "gmail")
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        _Google.token_reply = {"status": 401, "body": {"error": "invalid_client", "error_description": "Unauthorized"}}
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.submit_redirect(self.ada, "gmail", pasted)
+        self.assertEqual(caught.exception.code, "connector_invalid_client")
+        self.assertIn("Re-upload the Desktop client JSON", caught.exception.detail)
+        self.assertNotIn(secret, caught.exception.detail)
+        self.assertNotIn("code-a", caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("endpoint=token", log)
+        self.assertIn("status=401", log)
+        self.assertIn("error=invalid_client", log)
+        self.assertNotIn(secret, log)
+        self.assertNotIn("code-a", log)
+        self.assertNotIn("http://", log)
+        self.assertNotIn("https://", log)
+        self.assertEqual(log.count("ssios.ui connector"), 1)
+
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        _Google.token_reply = {"status": 400, "body": {"error": "invalid_grant", "error_description": "Bad Request"}}
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(self.ada, "gmail", pasted)
+        self.assertEqual(caught.exception.code, "connector_invalid_grant")
+        self.assertIn("Click Connect again", caught.exception.detail)
+        self.assertIn("expired", caught.exception.detail)
+        _Google.token_reply = None
 
     def test_keychain_errors_use_stable_codes_and_the_probe_deletes_its_item(self) -> None:
         from contextlib import redirect_stderr

@@ -711,9 +711,10 @@ summary { list-style: none; cursor: pointer; }
 summary::-webkit-details-marker { display: none; }
 button, input, textarea, select { font: inherit; color: inherit; }
 .page a, main a, .msg a { color: var(--accent); }
+.page a.button, .page a.button:hover { color: var(--on-accent); text-decoration: none; }
 .msg ul { list-style: disc; padding-left: 1.25rem; margin: 8px 0; }
 h1 { font-weight: 600; font-size: 1.35rem; margin: 0 0 16px; }
-main, .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
 button { background: transparent; cursor: pointer; width: auto; }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
@@ -749,10 +750,12 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .popover a:hover, .popover button:hover, .popover a:focus-visible, .popover button:focus-visible { background: var(--bg); }
 .popover form { display: block; }
 .menu-label { margin: 8px 12px 4px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.page { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: none; margin: 0; padding: 0; }
+.sheet { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 .menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.log { flex: 1; overflow: auto; }
+.log { flex: 1; overflow: auto; min-height: 0; }
 .column { max-width: 760px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
 .msg { display: flex; gap: 8px; }
 .msg.user { justify-content: flex-end; }
@@ -793,12 +796,19 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
 .error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
 .notice { margin: 0 0 12px; padding: 8px 12px; border-radius: 12px; background: var(--warn-bg); color: var(--warn); }
+.notice.ok { background: var(--ok-bg); color: var(--ok); }
 .setup-steps { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: var(--muted); }
 .setup-steps .done { color: var(--ink); font-weight: 600; }
 .help { list-style: decimal; padding-left: 1.25rem; }
 .svc-grid { display: grid; gap: 16px; }
-.svc { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
-.svc form { margin-left: auto; }
+.svc { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.svc .body { display: grid; gap: 8px; min-width: 0; }
+.svc-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.svc form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 0; }
+.consent { display: grid; gap: 8px; }
+a.button { display: inline-flex; align-items: center; width: auto; border-radius: 12px; padding: 8px 12px; border: 1px solid transparent; }
+a.button.primary { background: var(--accent); }
+.manage summary { padding: 8px 0; }
 .dot { width: 8px; height: 8px; border-radius: 99px; background: #737373; }
 .dot.on { background: #15803d; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); }
@@ -817,6 +827,21 @@ def _asset_hash(text: str) -> str:
 
 
 STYLE_PATH = "/ui/assets/app-" + _asset_hash(APP_CSS) + ".css"
+CONN_JS = """
+"use strict";
+document.querySelectorAll("[data-copy]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    var value = button.getAttribute("data-copy") || "";
+    function mark() { button.textContent = "Copied"; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(mark).catch(mark);
+      return;
+    }
+    mark();
+  });
+});
+"""
+CONN_PATH = "/ui/assets/conn-" + _asset_hash(CONN_JS) + ".js"
 _ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
@@ -834,6 +859,8 @@ def _static_asset(method: str, path: str) -> Page | None:
 
         if path == CHAT_PATH:
             return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path == CONN_PATH:
+        return Page(200, CONN_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     return None
 
 
@@ -885,7 +912,7 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
 
 
 def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "") -> str:
-    main = body if chat else f"<div class=\"page\"><h1>{html.escape(title)}</h1>{body}</div>"
+    main = body if chat else f"<div class=\"page\"><div class=\"sheet\"><h1>{html.escape(title)}</h1>{body}</div></div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _style_link()

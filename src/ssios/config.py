@@ -252,3 +252,27 @@ def load_settings(
 
 def lan_enabled(settings) -> bool:
     return settings.ui_bind == "0.0.0.0"
+
+
+def connector_config_location(settings) -> str:
+    """Where an administrator edits [connectors] enabled. Includes the line when it is present."""
+    path = getattr(settings, "config_path", None)
+    if path is None:
+        return "the SSIOS config, under [connectors] enabled"
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return f"{path}, under [connectors] enabled"
+    section = ""
+    found = 0
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            continue
+        if section == "connectors" and not stripped.startswith("#") and stripped.startswith("enabled"):
+            found = index
+            break
+    if found:
+        return f"{path} line {found}"
+    return f"{path}, under [connectors] enabled"
