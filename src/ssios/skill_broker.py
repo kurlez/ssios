@@ -499,6 +499,16 @@ class SkillBroker:
             result="ok",
             extra={"service": "web_fetch"},
         )
+        if getattr(self.plane, "accounts", None) is not None:
+            from ssios.files import FileLibrary
+
+            FileLibrary(self.plane).add(
+                account_id,
+                markdown.encode("utf-8"),
+                name=Path(rel).name,
+                origin="generated",
+                source="clip",
+            )
         return {"path": rel, "title": str(meta.get("title") or "")}
 
     def _prefs_path(self, account_id: str):

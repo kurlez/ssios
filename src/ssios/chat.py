@@ -29,7 +29,17 @@ _SYSTEM = (
 _MAX_MESSAGE = 8000
 
 
-def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conversation_id: str = "", quote: str = "", image: str = "") -> Iterator[dict]:
+def iter_turn(
+    plane,
+    account: dict,
+    text: str,
+    override: str,
+    peer_ip: str,
+    conversation_id: str = "",
+    quote: str = "",
+    image: str = "",
+    file_ids: list[str] | None = None,
+) -> Iterator[dict]:
     scope = AccountScope(plane, account)
     message = " ".join(str(text or "").split())
     if not message or len(message) > _MAX_MESSAGE:
@@ -52,12 +62,23 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     quoted = " ".join(str(quote or "").split())[:180]
     if quoted:
         user_message["quote"] = quoted
-    if str(image or "").startswith("/ui/chat/file/img-"):
+    if str(image or "").startswith(("/ui/chat/file/img-", "/ui/files/file-")):
         user_message["image"] = str(image)
-    store.append(record["id"], user_message)
+    if file_ids:
+        user_message["file_ids"] = [item for item in file_ids if str(item).startswith("file-")][:6]
+    stored = store.append(record["id"], user_message)
+    from ssios.files import FileLibrary, screenshot_request
+
+    library = FileLibrary(plane)
+    for file_id in user_message.get("file_ids") or []:
+        library.attach(account["id"], file_id, thread_id=record["id"], message_id=str(stored.get("id") or ""))
     yield {"event": "conversation", "data": {"id": record["id"]}}
     yield {"event": "route", "data": decision.public()}
     try:
+        filing = screenshot_request(message)
+        if filing is not None:
+            yield from _file_screenshot(plane, scope, record["id"], message, filing, user_message.get("file_ids") or [], peer_ip)
+            return
         if clock_answer(message, *host_clock(plane, scope.account)):
             yield from _clock_turn(plane, scope, record["id"], message, decision)
         elif _saved_name_answer(scope, message):
@@ -1520,6 +1541,50 @@ def _guest_prompt(scope: AccountScope, prompt: str) -> str:
     if excerpt:
         prefix += "MEMORY-CONTEXT\n" + excerpt + "\n\n"
     return prefix + prompt
+
+
+def _file_screenshot(plane, scope, conversation_id: str, message: str, filing: dict, file_ids: list[str], peer_ip: str):
+    from ssios.files import FileLibrary
+
+    library = FileLibrary(plane)
+    file_id = ""
+    for item in file_ids:
+        try:
+            row = library.get(scope.account_id, item)
+        except SsiosError:
+            continue
+        if row.get("role") == "image" and not row.get("trashed"):
+            file_id = item
+            break
+    if not file_id:
+        record = scope.chat().get(conversation_id)
+        for item in reversed(record.get("messages") or []):
+            for candidate in item.get("file_ids") or []:
+                try:
+                    row = library.get(scope.account_id, str(candidate))
+                except SsiosError:
+                    continue
+                if row.get("role") == "image" and not row.get("trashed"):
+                    file_id = str(candidate)
+                    break
+            if file_id:
+                break
+    if not file_id:
+        text = "Attach a screenshot first. Nothing was saved."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    saved = library.file_screenshot(
+        scope.account_id,
+        file_id,
+        title=filing.get("title") or "",
+        tags=list(filing.get("tags") or []),
+        peer_ip=peer_ip,
+    )
+    text = "Saved the screenshot to Notes (" + saved["note"] + ")."
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+    yield {"event": "outcome", "data": {"text": text}}
+    del message
 
 
 def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> list[dict]:

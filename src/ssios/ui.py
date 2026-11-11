@@ -1408,6 +1408,16 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .event-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .event-card h3, .event-card h4 { margin: 0; font-size: 1rem; }
 .event-card p { margin: 4px 0 0; }
+.file-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.file-filters a { text-decoration: none; }
+.file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
+.file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.file-list { display: grid; gap: 12px; }
+.file-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.file-card input { width: 100%; }
+.file-card img, img.preview { width: 100%; max-height: 160px; object-fit: cover; border-radius: 8px; }
+iframe.preview { width: 100%; height: 360px; border: 1px solid var(--line); border-radius: 12px; }
+.file-card form { margin-top: 8px; }
 .type-badge { display: inline-block; width: max-content; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
 .technical { margin-top: 12px; color: var(--muted); }
 .svc-grid { display: grid; gap: 16px; }
@@ -1588,6 +1598,7 @@ def _rail(session: dict) -> str:
         "<a href=\"/ui/chat\" title=\"Chat\" aria-label=\"Chat\">C</a>"
         "<a href=\"#thread-search\" title=\"Search\" aria-label=\"Search\">S</a>"
         "<a href=\"/ui/vault\" title=\"Notes\" aria-label=\"Notes\">N</a>"
+        "<a href=\"/ui/files\" title=\"Files\" aria-label=\"Files\">F</a>"
         "<a href=\"/ui/memory?project_id=local-summary\" title=\"Memory\" aria-label=\"Memory\">M</a>"
         "<a href=\"/ui/tasks\" title=\"Tasks\" aria-label=\"Tasks\">T</a>"
         "<a href=\"/ui/connections\" title=\"Connections\" aria-label=\"Connections\">K</a>"

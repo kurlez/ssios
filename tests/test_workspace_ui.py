@@ -150,10 +150,10 @@ class WorkspaceUiTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         conv = page.split('class="conversation">', 1)[1].split("<", 1)[0]
         shown = self._get(self.case.base, "/ui/chat?conversation=" + conv, self.cookie)[1]
-        self.assertIn("/ui/chat/file/img-", shown)
-        self.assertIn('"image": "/ui/chat/file/img-', shown)
-        src = shown.split("/ui/chat/file/img-", 1)[1].split('"', 1)[0]
-        fetched = urllib.request.Request(self.case.base + "/ui/chat/file/img-" + src, headers={"Cookie": self.cookie})
+        self.assertIn("/ui/files/file-", shown)
+        self.assertIn('"image": "/ui/files/file-', shown)
+        src = shown.split("/ui/files/file-", 1)[1].split('"', 1)[0].split("/", 1)[0]
+        fetched = urllib.request.Request(self.case.base + "/ui/files/file-" + src + "/raw", headers={"Cookie": self.cookie})
         with urllib.request.urlopen(fetched, timeout=10) as response:
             body = response.read()
             self.assertEqual(response.headers.get("Content-Type"), "image/png")

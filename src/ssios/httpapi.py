@@ -37,17 +37,24 @@ def _multipart_memory(content_type: str, raw: bytes) -> dict:
         if b"\r\n\r\n" not in chunk:
             continue
         header, body = chunk.split(b"\r\n\r\n", 1)
-        if len(body) > 100000:
-            raise SsiosError("too_large", "upload rejected", 413)
         found = re.search(br'name="([^"]+)"', header)
         if found is None:
             continue
         name = found.group(1).decode("ascii", "replace")
-        if name == "image":
-            if len(body) > 80000 or not _image_magic(body):
-                raise SsiosError("bad_request", "that image was rejected", 400)
-            result["image_bytes"] = body
+        if name in {"image", "file"}:
+            if len(body) > 512_000:
+                raise SsiosError("too_large", "upload rejected", 413)
+            filename = ""
+            named = re.search(br'filename="([^"]*)"', header)
+            if named:
+                filename = named.group(1).decode("utf-8", "replace")
+            result.setdefault("uploads", [])
+            result["uploads"].append({"name": filename, "bytes": body})
+            if name == "image":
+                result["image_bytes"] = body
             continue
+        if len(body) > 100000:
+            raise SsiosError("too_large", "upload rejected", 413)
         if name not in {
             "csrf",
             "op",

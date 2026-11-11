@@ -52,7 +52,8 @@ CHAT_JS = r"""
   box.addEventListener("keydown", function (event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (box.value.trim()) {
+      var pickedNow = form.querySelector("input[name=image]");
+      if (box.value.trim() || pending.length || (pickedNow && pickedNow.files && pickedNow.files.length)) {
         send.disabled = false;
         form.requestSubmit();
       }
@@ -72,10 +73,35 @@ CHAT_JS = r"""
       }
     });
   }
+  var pending = [];
+  var note = document.getElementById("file-note");
+  function takeFiles(list) {
+    Array.prototype.forEach.call(list || [], function (file) {
+      if (file && pending.length < 6) pending.push(file);
+    });
+    if (note) note.textContent = pending.length ? String(pending.length) + " file ready to send." : "";
+    syncSend();
+  }
+  form.addEventListener("dragover", function (event) { event.preventDefault(); });
+  form.addEventListener("drop", function (event) {
+    event.preventDefault();
+    takeFiles(event.dataTransfer && event.dataTransfer.files);
+  });
+  box.addEventListener("paste", function (event) {
+    var files = event.clipboardData && event.clipboardData.files;
+    if (files && files.length) {
+      event.preventDefault();
+      takeFiles(files);
+    }
+  });
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = box.value;
-    if (!text.trim()) return;
+    var picked = form.querySelector("input[name=image]");
+    var hasFiles = pending.length || (picked && picked.files && picked.files.length);
+    if (!text.trim() && !hasFiles) return;
+    if (!text.trim()) box.value = "Attached a file.";
+    text = box.value;
     column.classList.add("has-messages");
     if (empty) empty.hidden = true;
     renderMessage({role: "user", text: text, at: Date.now() / 1000});
@@ -85,9 +111,12 @@ CHAT_JS = r"""
     typing.textContent = "Assistant is writing";
     answer.querySelector(".content").appendChild(typing);
     var params = new FormData(form);
+    pending.forEach(function (file) { params.append("file", file, file.name || "file"); });
     var file = form.querySelector("input[name=image]");
-    var useFile = file && file.files && file.files.length;
+    var useFile = pending.length || (file && file.files && file.files.length);
     if (!useFile) params.delete("image");
+    pending = [];
+    if (note) note.textContent = "";
     turnFailed = false;
     box.value = "";
     grow();
@@ -147,7 +176,11 @@ CHAT_JS = r"""
     });
   });
 
-  function syncSend() { if (send) send.disabled = !box.value.trim(); }
+  function syncSend() {
+    var picked = form.querySelector("input[name=image]");
+    var hasFiles = pending.length || (picked && picked.files && picked.files.length);
+    if (send) send.disabled = !box.value.trim() && !hasFiles;
+  }
   function grow() {
     box.style.height = "auto";
     box.style.height = Math.min(box.scrollHeight, 160) + "px";
@@ -769,6 +802,14 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
         return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control="public, max-age=31536000, immutable")
     if headers.get("Upgrade", "").lower() == "websocket":
         return Page(404, _page(session, "Not available", "<p>WebSocket is not enabled. Chat uses a same-origin event stream.</p>"))
+    if path == "/ui/files" and method == "GET":
+        return Page(200, _files_page(plane, session, query))
+    if path == "/ui/files" and method == "POST":
+        _csrf(session, body)
+        return _files_post(plane, session, body, peer_ip)
+    filed = re.fullmatch(r"/ui/files/(file-[0-9a-f]{16})(?:/(raw|download))?", path)
+    if filed and method == "GET":
+        return _file_response(plane, session, filed.group(1), filed.group(2) or "preview")
     if path == "/ui/chat" and method == "GET":
         return Page(200, _chat_page(plane, session, query.get("conversation", "")))
     if path == "/ui/chat/rename" and method == "POST":
@@ -854,17 +895,17 @@ def _send(plane, session, body, peer_ip, headers):
     override = str(body.get("override") or "auto")
     conversation = str(body.get("conversation") or "")
     quote = str(body.get("quote") or "")
-    image = _store_chat_image(plane, account["id"], body.get("image_bytes"))
+    image, file_ids = _accept_uploads(plane, account["id"], body, peer_ip, conversation)
     accept = str(headers.get("Accept") or "")
     if "text/event-stream" in accept:
         return Page(
             200,
             "",
-            stream=_sse(plane, account, text, override, peer_ip, conversation, quote, image),
+            stream=_sse(plane, account, text, override, peer_ip, conversation, quote, image, file_ids),
             content_type="text/event-stream; charset=utf-8",
         )
     try:
-        events = list(iter_turn(plane, account, text, override, peer_ip, conversation, quote, image))
+        events = list(iter_turn(plane, account, text, override, peer_ip, conversation, quote, image, file_ids))
     except SsiosError as exc:
         from ssios.chat import english_connector_error
 
@@ -874,6 +915,34 @@ def _send(plane, session, body, peer_ip, headers):
         if event.get("event") == "error":
             status = int(event.get("data", {}).get("status") or 500)
     return Page(status, _page(session, "Chat", _events_html(session, events)))
+
+
+def _accept_uploads(plane, account_id: str, body: dict, peer_ip: str, conversation: str) -> tuple[str, list[str]]:
+    from ssios.files import FileLibrary
+
+    uploads = body.get("uploads") if isinstance(body.get("uploads"), list) else []
+    if not uploads and isinstance(body.get("image_bytes"), bytes):
+        uploads = [{"name": "image.png", "bytes": body.get("image_bytes")}]
+    library = FileLibrary(plane)
+    image = ""
+    file_ids = []
+    thread = conversation if re.fullmatch(r"conv-[0-9a-f]{16}", conversation or "") else ""
+    for item in uploads[:6]:
+        if not isinstance(item, dict):
+            continue
+        saved = library.add(
+            account_id,
+            item.get("bytes") if isinstance(item.get("bytes"), bytes) else b"",
+            name=str(item.get("name") or ""),
+            origin="uploaded",
+            source="upload",
+            thread_id=thread,
+            peer_ip=peer_ip,
+        )
+        file_ids.append(saved["id"])
+        if not image and saved.get("role") == "image":
+            image = saved["url"]
+    return image, file_ids
 
 
 def _store_chat_image(plane, account_id: str, raw) -> str:
@@ -900,6 +969,171 @@ def _store_chat_image(plane, account_id: str, raw) -> str:
     return "/ui/chat/file/" + name
 
 
+def _files_page(plane, session, query: dict) -> str:
+    from ssios.files import FileLibrary
+    from ssios.ui import _page
+
+    account_id = session["account"]["id"]
+    csrf = html.escape(str(session.get("csrf") or ""))
+    origin = query.get("origin") if query.get("origin") in {"uploaded", "generated"} else ""
+    role = query.get("type") if query.get("type") in {"image", "pdf", "markdown", "text"} else ""
+    day = query.get("date") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", query.get("date") or "") else ""
+    thread = query.get("thread") if re.fullmatch(r"conv-[0-9a-f]{16}", query.get("thread") or "") else ""
+    trash = query.get("trash") == "1"
+    view = "list" if query.get("view") == "list" else "grid"
+    needle = str(query.get("q") or "")[:80]
+    rows = FileLibrary(plane).list(
+        account_id,
+        origin=origin,
+        role=role,
+        day=day,
+        thread_id=thread,
+        query=needle,
+        trash=trash,
+    )
+    filters = []
+    for label, href in (
+        ("All", "/ui/files"),
+        ("Uploaded", "/ui/files?origin=uploaded"),
+        ("Generated", "/ui/files?origin=generated"),
+        ("Images", "/ui/files?type=image"),
+        ("PDF", "/ui/files?type=pdf"),
+        ("Markdown", "/ui/files?type=markdown"),
+        ("Text", "/ui/files?type=text"),
+        ("Trash", "/ui/files?trash=1"),
+        ("Grid", "/ui/files?view=grid"),
+        ("List", "/ui/files?view=list"),
+    ):
+        filters.append(f"<a href=\"{href}\">{label}</a>")
+    search = (
+        f"<form method=\"get\" action=\"/ui/files\" class=\"file-search\">"
+        f"<input type=\"search\" name=\"q\" value=\"{html.escape(needle, quote=True)}\" aria-label=\"Search files\" placeholder=\"Name or tag\">"
+        f"<input type=\"hidden\" name=\"view\" value=\"{view}\">"
+        + (f"<input type=\"hidden\" name=\"origin\" value=\"{html.escape(origin)}\">" if origin else "")
+        + (f"<input type=\"hidden\" name=\"type\" value=\"{html.escape(role)}\">" if role else "")
+        + ("<input type=\"hidden\" name=\"trash\" value=\"1\">" if trash else "")
+        + "<button type=\"submit\">Search</button></form>"
+    )
+    cards = []
+    for item in rows:
+        ident = html.escape(item["id"])
+        name = html.escape(item["name"])
+        thumb = ""
+        if item["role"] == "image" and not item["trashed"]:
+            thumb = f"<img src=\"/ui/files/{ident}/raw\" alt=\"\">"
+        thread_link = ""
+        if item["thread_id"]:
+            thread_link = f"<a href=\"/ui/chat?conversation={html.escape(item['thread_id'])}\">Thread</a>"
+        if item["trashed"]:
+            actions = (
+                f"<form method=\"post\" action=\"/ui/files\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"id\" value=\"{ident}\"><button name=\"op\" value=\"restore\" type=\"submit\">Restore</button></form>"
+                f"<form method=\"post\" action=\"/ui/files\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"id\" value=\"{ident}\">"
+                "<label>Type delete <input name=\"confirm\" autocomplete=\"off\"></label>"
+                "<button name=\"op\" value=\"purge\" type=\"submit\">Delete permanently</button></form>"
+            )
+        else:
+            actions = (
+                f"<a href=\"/ui/files/{ident}\">Preview</a> "
+                f"<a href=\"/ui/files/{ident}/download\">Download</a> "
+                f"<form method=\"post\" action=\"/ui/files\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"id\" value=\"{ident}\">"
+                f"<label>Rename <input name=\"name\" value=\"{name}\"></label>"
+                "<button name=\"op\" value=\"rename\" type=\"submit\">Rename</button></form>"
+                f"<form method=\"post\" action=\"/ui/files\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"id\" value=\"{ident}\">"
+                "<label>Tags <input name=\"tags\" placeholder=\"plant, desk\"></label>"
+                "<button name=\"op\" value=\"tag\" type=\"submit\">Tag</button></form>"
+                f"<form method=\"post\" action=\"/ui/files\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                f"<input type=\"hidden\" name=\"id\" value=\"{ident}\"><button name=\"op\" value=\"trash\" type=\"submit\">Trash</button></form>"
+            )
+        cards.append(
+            "<article class=\"file-card\">" + thumb + f"<h2>{name}</h2>"
+            f"<p>{html.escape(item['origin'])} · {html.escape(item['role'])} · {html.escape(item['created_at'][:10])}</p>"
+            f"<p>{html.escape(' '.join(item['tags']))}</p><p>{thread_link}</p>{actions}</article>"
+        )
+    klass = "file-grid" if view == "grid" else "file-list"
+    body = (
+        "<div class=\"file-filters\">" + " ".join(filters) + "</div>"
+        + search
+        + f"<div class=\"{klass}\">" + ("".join(cards) or "<p>No files.</p>") + "</div>"
+    )
+    return _page(session, "Files", body)
+
+
+def _files_post(plane, session, body: dict, peer_ip: str):
+    from ssios.files import FileLibrary
+    from ssios.ui import Page
+
+    library = FileLibrary(plane)
+    account_id = session["account"]["id"]
+    file_id = str(body.get("id") or "")
+    op = str(body.get("op") or "")
+    if op == "rename":
+        library.rename(account_id, file_id, str(body.get("name") or ""), peer_ip)
+    elif op == "tag":
+        library.retag(account_id, file_id, str(body.get("tags") or "").replace(",", " ").split(), peer_ip)
+    elif op == "trash":
+        library.trash(account_id, file_id, peer_ip)
+    elif op == "restore":
+        library.restore(account_id, file_id, peer_ip)
+    elif op == "purge":
+        library.purge(account_id, file_id, str(body.get("confirm") or ""), peer_ip)
+    else:
+        raise SsiosError("bad_request", "file action rejected", 400)
+    target = "/ui/files?trash=1" if op in {"trash", "restore", "purge"} else "/ui/files"
+    return Page(303, "", location=target)
+
+
+def _file_response(plane, session, file_id: str, mode: str):
+    from ssios.files import FileLibrary
+    from ssios.ui import Page, _page
+    from ssios.vault import render_markdown
+
+    library = FileLibrary(plane)
+    account_id = session["account"]["id"]
+    record = library.get(account_id, file_id)
+    if record["trashed"]:
+        raise SsiosError("not_found", "file not found", 404)
+    raw, content_type, name = library.bytes(account_id, file_id)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "", name)[:80] or "file"
+    if mode == "download":
+        return Page(
+            200,
+            raw,
+            content_type=content_type,
+            extra_headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+    if mode == "raw":
+        disposition = "inline" if record["role"] in {"image", "pdf"} else "attachment"
+        return Page(
+            200,
+            raw,
+            content_type=content_type if record["role"] != "markdown" else "text/plain; charset=utf-8",
+            extra_headers={"Content-Disposition": f'{disposition}; filename="{safe_name}"'},
+        )
+    if record["role"] == "image":
+        preview = f"<img class=\"preview\" src=\"/ui/files/{html.escape(file_id)}/raw\" alt=\"\">"
+    elif record["role"] == "pdf":
+        preview = f"<iframe class=\"preview\" sandbox src=\"/ui/files/{html.escape(file_id)}/raw\" title=\"PDF preview\"></iframe>"
+    elif record["role"] == "markdown":
+        _meta, rendered = render_markdown(raw.decode("utf-8", "replace"), link_for=lambda url: url if str(url).startswith("/ui/") else "")
+        preview = "<article class=\"markdown\">" + rendered + "</article>"
+    else:
+        preview = "<pre>" + html.escape(raw.decode("utf-8", "replace")[:20000]) + "</pre>"
+    thread = ""
+    if record["thread_id"]:
+        thread = f"<p><a href=\"/ui/chat?conversation={html.escape(record['thread_id'])}\">Open thread</a></p>"
+    body = (
+        f"<p>{html.escape(record['name'])} · {html.escape(record['origin'])}</p>"
+        + thread
+        + preview
+        + f"<p><a href=\"/ui/files/{html.escape(file_id)}/download\">Download</a> <a href=\"/ui/files\">All files</a></p>"
+    )
+    return Page(200, _page(session, record["name"], body))
+
+
 def _chat_file(plane, session, path: str):
     from ssios.ui import Page
 
@@ -915,9 +1149,9 @@ def _chat_file(plane, session, path: str):
     raise SsiosError("not_found", "file not found", 404)
 
 
-def _sse(plane, account, text, override, peer_ip, conversation, quote="", image=""):
+def _sse(plane, account, text, override, peer_ip, conversation, quote="", image="", file_ids=None):
     try:
-        for event in iter_turn(plane, account, text, override, peer_ip, conversation, quote, image):
+        for event in iter_turn(plane, account, text, override, peer_ip, conversation, quote, image, file_ids):
             yield _frame(event)
     except SsiosError as exc:
         from ssios.chat import english_connector_error, failure_hint
@@ -1112,8 +1346,26 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
         if message.get("quote"):
             item["quote"] = str(message.get("quote") or "")[:180]
         image = str(message.get("image") or "")
-        if image.startswith("/ui/chat/file/img-"):
+        if image.startswith(("/ui/chat/file/img-", "/ui/files/file-")):
             item["image"] = image
+        files = []
+        for file_id in message.get("file_ids") or []:
+            try:
+                from ssios.files import FileLibrary
+
+                row = FileLibrary(plane).get(str(account.get("id") or ""), str(file_id))
+            except SsiosError:
+                continue
+            if row.get("trashed"):
+                continue
+            files.append({"id": row["id"], "name": row["name"], "url": row["url"], "role": row["role"]})
+        if files:
+            item["files"] = files
+            if not item.get("image"):
+                for row in files:
+                    if row["role"] == "image":
+                        item["image"] = row["url"]
+                        break
         if message.get("error_code"):
             item["error_code"] = str(message.get("error_code"))
         checks = message.get("checks")
@@ -1268,7 +1520,6 @@ def _conv_row(item: dict, csrf: str) -> str:
 def _info_pane(plane, session, state: dict) -> str:
     from ssios.activity import activity_timeline
     from ssios.reminders import ReminderStore
-    from ssios.vault import list_notes
 
     account = session["account"]
     scope = AccountScope(plane, account)
@@ -1321,14 +1572,19 @@ def _info_pane(plane, session, state: dict) -> str:
     for item in decided[-5:]:
         approval_rows.append("<li>" + html.escape(str(item.get("status") or "decided")) + " " + html.escape(str(item.get("action") or "")) + "</li>")
     approvals = "<ul class=\"activity\">" + ("".join(approval_rows) or "<li>No approvals.</li>") + "</ul><p><a href=\"/ui/approvals\">Open approvals</a></p>"
+    from ssios.files import FileLibrary
+
     files = []
     try:
-        notes = list_notes(plane.settings, account["id"])
+        listed = FileLibrary(plane).list(account["id"])[:8]
     except Exception:
-        notes = []
-    for note in notes[:12]:
-        files.append("<li>" + html.escape(str(note.get("title") or note.get("path") or "Note")) + "</li>")
-    library = "<h3>Files</h3><ul class=\"activity\">" + ("".join(files) or "<li>No clips yet.</li>") + "</ul><h3>Trash</h3><p>Nothing in trash.</p><p><a href=\"/ui/vault\">Open notes</a></p>"
+        listed = []
+    for item in listed:
+        files.append("<li><a href=\"/ui/files/" + html.escape(item["id"]) + "\">" + html.escape(item["name"]) + "</a></li>")
+    library = (
+        "<h3>Files</h3><ul class=\"activity\">" + ("".join(files) or "<li>No files yet.</li>") + "</ul>"
+        "<p><a href=\"/ui/files\">Open files</a></p><p><a href=\"/ui/vault\">Open notes</a></p>"
+    )
     return (
         "<aside id=\"info-pane\" class=\"info\" aria-label=\"Account details\">"
         "<div class=\"who\"><span class=\"avatar\" aria-hidden=\"true\">S</span><div><strong>SSIOS</strong>"
@@ -1386,6 +1642,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"conversation\" value=\"{conv}\">"
         "<input type=\"hidden\" name=\"quote\" value=\"\">"
         "<p id=\"quote-bar\" class=\"quote-bar\" hidden></p>"
+        "<p id=\"file-note\" class=\"hint\"></p>"
         "<textarea name=\"message\" rows=\"1\" aria-label=\"Message\" placeholder=\"Message SSIOS…\" required></textarea>"
         "<div class=\"composer-bar\">"
         "<label class=\"attach\" aria-label=\"Attach an image\">+<input name=\"image\" type=\"file\" accept=\"image/png,image/jpeg,image/gif,image/webp\"></label>"
