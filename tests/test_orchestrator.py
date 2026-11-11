@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ssios.errors import SsiosError
 from ssios.orchestrator import choose_route, present_answer
 from support import PlaneTest
 from test_ui import _form, _get
@@ -34,6 +35,7 @@ class RouteTableTest(PlaneTest):
             "What's the weather in Seattle?",
             "check my inbox",
             "update the readme",
+            "Summarize the harbor notes",
         )
         for phrase in codex:
             ready, note = choose_route(phrase, guest_ready=True)
@@ -106,9 +108,51 @@ class CodexTurnTest(PlaneTest):
         self.assertNotIn("[z9]", page)
         self.assertIn("Sources", page)
         self.assertIn("You have no network", self.guest.prompt)
+        self.assertIn("Plan", page)
+        self.assertIn("badge read", page)
+        self.assertIn("weather</p>", page)
         self.plane.chat_guest = type("Down", (), {"orchestrator_ready": False, "run": lambda *args, **kwargs: None})()
         status, fallen, _cookie = _form(self.base, "/ui/chat/send", {"csrf": self._csrf(), "message": "今天天气怎么样"}, cookie=self.cookie)
         self.assertEqual(status, 200, fallen)
         self.assertIn("Codex guest is not available", fallen)
         self.assertIn("Which city?", fallen)
         self.assertNotIn("Route: codex", fallen)
+
+    def test_cancel_stops_the_guest_turn(self) -> None:
+        import threading
+        import time
+
+        class _Slow:
+            orchestrator_ready = True
+            started = threading.Event()
+
+            def run(self, plane, request, on_status):
+                del plane
+                on_status({"phase": "planning", "backend": "stub"})
+                self.started.set()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if request.cancel is not None and request.cancel.is_set():
+                        raise SsiosError("cancelled", "The turn was cancelled.", 400)
+                    time.sleep(0.02)
+                return {"text": "should have stopped", "isolated": True, "boot_ms": 1, "backend": "stub", "checks": {}}
+
+        self.plane.chat_guest = _Slow()
+        box = {}
+
+        def send() -> None:
+            box["result"] = _form(
+                self.base,
+                "/ui/chat/send",
+                {"csrf": self._csrf(), "message": "总结一下邮件"},
+                cookie=self.cookie,
+            )
+
+        thread = threading.Thread(target=send)
+        thread.start()
+        self.assertTrue(self.plane.chat_guest.started.wait(2))
+        status, body, _cookie = _form(self.base, "/ui/chat/cancel", {"csrf": self._csrf(), "conversation": ""}, cookie=self.cookie)
+        self.assertEqual(status, 200, body)
+        thread.join(4)
+        self.assertIn("Cancelled", box["result"][1])
+        self.assertNotIn("should have stopped", box["result"][1])

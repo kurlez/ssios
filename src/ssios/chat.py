@@ -397,7 +397,7 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         else:
             error = payload
     plane._codex_cancel.pop(conversation_id, None)
-    if cancel.is_set():
+    if cancel.is_set() or (isinstance(error, SsiosError) and error.code == "cancelled"):
         text = "Cancelled. A pending approval that was already created stays pending."
         scope.chat().append(conversation_id, {"role": "assistant", "text": text})
         yield {"event": "outcome", "data": {"text": text}}

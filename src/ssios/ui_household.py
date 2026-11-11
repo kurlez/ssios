@@ -130,12 +130,15 @@ CHAT_JS = r"""
       headers["Content-Type"] = "application/x-www-form-urlencoded";
       payload = new URLSearchParams(params).toString();
     }
+    var cancelBtn = document.getElementById("cancel-turn");
+    if (cancelBtn) cancelBtn.hidden = false;
     fetch(form.action, {
       method: "POST",
       headers: headers,
       body: payload,
       credentials: "same-origin"
     }).then(function (response) {
+      if (cancelBtn) cancelBtn.hidden = true;
       if (!response.ok || !response.body) {
         typing.remove();
         showError(answer.querySelector(".content"), "The request was rejected.\n\nError code: chat_rejected\nHint: Reload the page and try again.");
@@ -171,12 +174,24 @@ CHAT_JS = r"""
       }
       return pump();
     }).catch(function () {
+      if (cancelBtn) cancelBtn.hidden = true;
       typing.remove();
       var content = answer.querySelector(".content");
       if (!content.textContent) showError(content, "The stream stopped.\n\nError code: chat_failed\nHint: Reload the chat. If it is still empty, run ssios vm-diagnose.");
     });
   });
 
+  var cancelTurn = document.getElementById("cancel-turn");
+  if (cancelTurn) {
+    cancelTurn.addEventListener("click", function () {
+      var token = form.querySelector("input[name=csrf]");
+      var conv = form.querySelector("input[name=conversation]");
+      var body = new URLSearchParams();
+      body.set("csrf", token ? token.value : "");
+      body.set("conversation", conv ? conv.value : "");
+      fetch("/ui/chat/cancel", {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body: body.toString(), credentials: "same-origin"});
+    });
+  }
   function syncSend() {
     var picked = form.querySelector("input[name=image]");
     var hasFiles = pending.length || (picked && picked.files && picked.files.length);
@@ -569,7 +584,10 @@ CHAT_JS = r"""
     try { payload = JSON.parse(data); } catch (err) { return raw; }
     if (name === "token") return raw + (payload.text || "");
     if (name === "route") pill(payload.route || "route", payload.reason || "");
-    if (name === "status") markStep(stepsHolder, payload.phase || "");
+    if (name === "status") {
+      if (payload.phase === "planning" || payload.phase === "tool" || payload.phase === "writing") addCodexStep(answer, payload);
+      else markStep(stepsHolder, payload.phase || "");
+    }
     if (name === "isolation") markStep(stepsHolder, "checks", payload);
     if (name === "approval") addApproval({id: payload.id, status: "pending", actionable: true, preview: payload.preview || "", destructive: !!payload.destructive || String(payload.preview || "").indexOf("DESTRUCTIVE") === 0, action: payload.action, payload_sha256: payload.payload_sha256, expected_revision: payload.expected_revision, bound_hash: payload.bound_hash});
     if (name === "error") {
@@ -613,6 +631,30 @@ CHAT_JS = r"""
       column.appendChild(note);
     }
     return raw;
+  }
+
+  function addCodexStep(answer, payload) {
+    var content = answer.querySelector(".content");
+    var list = content.querySelector(".codex-steps");
+    if (!list) {
+      list = document.createElement("ol");
+      list.className = "codex-steps";
+      content.insertBefore(list, content.firstChild);
+    }
+    var li = document.createElement("li");
+    li.className = "codex-step";
+    var phase = payload.phase || "";
+    if (phase === "tool") {
+      var kind = payload.kind === "write" ? "write" : "read";
+      var badge = document.createElement("span");
+      badge.className = "badge " + kind;
+      badge.textContent = kind;
+      li.appendChild(badge);
+      li.appendChild(document.createTextNode(payload.name || "tool"));
+    } else {
+      li.textContent = phase === "planning" ? "Plan" : "Writing the answer";
+    }
+    list.appendChild(li);
   }
 
   function markStep(holder, phase, checks) {
@@ -823,6 +865,9 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
     if path == "/ui/chat/send" and method == "POST":
         _csrf(session, body)
         return _send(plane, session, body, peer_ip, headers)
+    if path == "/ui/chat/cancel" and method == "POST":
+        _csrf(session, body)
+        return _cancel_turn(plane, body)
     if path == "/ui/chat/events" and method == "GET":
         return Page(200, "", stream=iter(["event: ready\ndata: {}\n\n"]), content_type="text/event-stream; charset=utf-8")
     if path == "/ui/connections/help" and method == "GET":
@@ -891,6 +936,19 @@ def _wants_event_stream(accept: str) -> bool:
     """The chat script asks for an event stream. A plain form POST asks for a page."""
     types = [part.split(";", 1)[0].strip().lower() for part in str(accept or "").split(",") if part.strip()]
     return "text/event-stream" in types and "text/html" not in types
+
+
+def _cancel_turn(plane, body):
+    from ssios.ui import Page
+
+    conversation = str(body.get("conversation") or "")
+    pending = getattr(plane, "_codex_cancel", {})
+    if conversation and conversation in pending:
+        pending[conversation].set()
+    else:
+        for event in list(pending.values()):
+            event.set()
+    return Page(200, "ok", content_type="text/plain; charset=utf-8")
 
 
 def _send(plane, session, body, peer_ip, headers):
@@ -1193,7 +1251,18 @@ def _events_html(session, events: list[dict]) -> str:
         elif name == "token":
             parts.append(html.escape(str(data.get("text") or "")))
         elif name == "status":
-            parts.append("<p>Guest: " + html.escape(str(data.get("phase") or "")) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
+            phase = str(data.get("phase") or "")
+            if phase == "tool":
+                kind = "write" if data.get("kind") == "write" else "read"
+                parts.append(
+                    f"<p class=\"codex-step\"><span class=\"badge {kind}\">{kind}</span> {html.escape(str(data.get('name') or 'tool'))}</p>"
+                )
+            elif phase == "planning":
+                parts.append("<p class=\"codex-step\">Plan</p>")
+            elif phase == "writing":
+                parts.append("<p class=\"codex-step\">Writing the answer</p>")
+            else:
+                parts.append("<p>Guest: " + html.escape(phase) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
         elif name == "isolation":
             technical.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
         elif name == "results":
@@ -1703,6 +1772,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "<label class=\"route-chip\"><select name=\"override\" aria-label=\"Route\">"
         "<option value=\"auto\">Auto</option><option value=\"force_direct\">Local</option>"
         "<option value=\"force_vm\">VM</option></select></label>"
+        "<button type=\"button\" id=\"cancel-turn\" hidden>Cancel</button>"
         "<button type=\"submit\" class=\"send primary\" aria-label=\"Send\">"
         "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M3 11.5 21 3l-8.5 18-2.2-7.3z\"/></svg>"
         "</button></div></form>"

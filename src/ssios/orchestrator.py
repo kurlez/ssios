@@ -34,7 +34,8 @@ def choose_route(message: str, *, guest_ready: bool, override: str = "auto", llm
     if _explicit_host(message) and override != "force_vm":
         return classify(message, override, llm=llm), ""
     decision = classify(message, override, llm=llm)
-    if not pending_fill and decision.route == "direct" and decision.reason_code == "rule_direct":
+    report = bool(_REPORT.search(message))
+    if not pending_fill and not report and decision.route == "direct" and decision.reason_code == "rule_direct":
         return decision, ""
     if guest_ready and override != "force_direct":
         return (

@@ -1410,6 +1410,11 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }
+.codex-steps { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.codex-step { margin: 0; color: var(--muted); font-size: 13px; }
+.badge.read, .badge.write { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.badge.read { background: var(--user); color: var(--ink); }
+.badge.write { background: var(--danger-bg); color: var(--danger); }
 .error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
 .error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
 .notice { margin: 0 0 12px; padding: 8px 12px; border-radius: 12px; background: var(--warn-bg); color: var(--warn); }
