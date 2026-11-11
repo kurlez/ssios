@@ -18,6 +18,53 @@ document.getElementById("save").addEventListener("click", () => {
   });
 });
 
+document.getElementById("session").addEventListener("click", () => {
+  const api = globalThis.browser || globalThis.chrome;
+  const base = baseInput.value.trim().replace(/\/$/, "");
+  const token = tokenInput.value.trim();
+  if (!base || !token) {
+    status.textContent = "Add the SSIOS address and clip token first.";
+    return;
+  }
+  api.tabs.query({active: true, currentWindow: true}).then((tabs) => {
+    const tab = tabs[0];
+    if (!tab || !tab.url) {
+      status.textContent = "No page is open.";
+      return;
+    }
+    let host = "";
+    try { host = new URL(tab.url).hostname; } catch (err) { host = ""; }
+    if (!host) {
+      status.textContent = "This page has no site to save.";
+      return;
+    }
+    api.cookies.getAll({url: tab.url}).then((cookies) => {
+      const slim = (cookies || []).filter((item) => item && item.name && item.value).map((item) => ({
+        name: item.name,
+        value: item.value,
+        expirationDate: item.expirationDate || 0,
+      }));
+      if (!slim.length) {
+        status.textContent = "No cookies were readable for this site.";
+        return;
+      }
+      return fetch(base + "/ui/clip", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-SSIOS-Clip-Token": token},
+        body: JSON.stringify({op: "save-session", domain: host, cookies: slim}),
+      }).then((response) => response.json()).then((payload) => {
+        const retry = payload.retry || {};
+        if (retry.status === "saved") status.textContent = "Saved. Retried the clip.";
+        else if (retry.status === "pending") status.textContent = "Saved. Retried the clip. Waiting for your approval.";
+        else if (retry.status === "expired") status.textContent = "Saved, but the clip is still expired.";
+        else status.textContent = "Saved site session for " + (payload.domain || host) + ".";
+      });
+    }).catch(() => {
+      status.textContent = "SSIOS did not accept the site session.";
+    });
+  });
+});
+
 document.getElementById("send").addEventListener("click", () => {
   const api = globalThis.browser || globalThis.chrome;
   const base = baseInput.value.trim().replace(/\/$/, "");

@@ -20,7 +20,7 @@ Two skills are on when an admin enables web skills:
 
 `allow_domains` restricts every skill to those hosts when the list is not empty. `deny_domains` always blocks those hosts. Weather can only call `api.open-meteo.com` and `geocoding-api.open-meteo.com`.
 
-Only `GET` is implemented. A request body, cookies, and an `Authorization` header are not sent. SSIOS resolves the name and refuses loopback, private, link-local, and carrier-grade NAT addresses. It checks again after each redirect. The audit line stores the host, the HTTP status, and the byte count. It does not store the page or the city.
+Only `GET` is implemented. A request body and an `Authorization` header are not sent. A site session cookie, if you saved one, goes only to that exact host. SSIOS resolves the name and refuses loopback, private, link-local, and carrier-grade NAT addresses. It checks again after each redirect. The audit line stores the host, the HTTP status, and the byte count. It does not store the page or the city.
 
 Fetched text is labeled untrusted. It is not parsed as a tool call, and it cannot approve a connector write or start the guest.
 

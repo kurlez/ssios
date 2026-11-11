@@ -487,6 +487,20 @@ CHAT_JS = r"""
         contentNode.appendChild(replyLine);
       }
     }
+    if (name === "renew") {
+      var renew = document.createElement("p");
+      renew.textContent = payload.text || "Site session expired. Log in if needed, then click Save site session.";
+      column.appendChild(renew);
+      if (payload.url) {
+        var button = document.createElement("a");
+        button.className = "button primary";
+        button.href = payload.url;
+        button.target = "_blank";
+        button.rel = "noopener noreferrer";
+        button.textContent = "Renew";
+        column.appendChild(button);
+      }
+    }
     if (name === "outcome" && (payload.visible || payload.text)) {
       var note = document.createElement("p");
       note.textContent = payload.visible || payload.text;
@@ -835,6 +849,13 @@ def _events_html(session, events: list[dict]) -> str:
             parts.append(_result_blocks_html(blocks))
             if data.get("reply"):
                 parts.append("<p class=\"reply\">" + html.escape(str(data.get("reply") or "")) + "</p>")
+        elif name == "renew":
+            text = html.escape(str(data.get("text") or ""))
+            url = str(data.get("url") or "")
+            link = ""
+            if url.startswith("https://"):
+                link = f"<p><a class=\"button primary\" href=\"{html.escape(url, quote=True)}\" target=\"_blank\" rel=\"noopener noreferrer\">Renew</a></p>"
+            parts.append(f"<p class=\"outcome\">{text}</p>" + link)
         elif name == "outcome":
             full = str(data.get("text") or "")
             visible = str(data.get("visible") or full)
@@ -1339,7 +1360,28 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1", f
             + "<button class=\"primary\" name=\"op\" value=\"install-client\" type=\"submit\">Save client</button></form></article>"
         )
     script = f"<script src=\"{CONN_PATH}\"></script>"
-    return _page(session, "Connections", steps + client_card + "<div class=\"svc-grid\">" + "".join(cards) + "</div>" + script)
+    sites = _site_sessions(plane, session)
+    return _page(session, "Connections", steps + client_card + "<div class=\"svc-grid\">" + "".join(cards) + "</div>" + sites + script)
+
+
+def _site_sessions(plane, session: dict) -> str:
+    from ssios.site_session import list_sessions
+
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    csrf = html.escape(str(session.get("csrf") or ""))
+    rows = []
+    for item in list_sessions(plane, str(account.get("id") or "")):
+        dot = "dot warn" if item["state"] != "active" else "dot on"
+        rows.append(
+            "<article class=\"svc\"><span class=\"" + dot + "\"></span><div class=\"body\">"
+            + "<div class=\"svc-head\"><div><h2>" + html.escape(item["domain"]) + "</h2>"
+            + "<p>" + html.escape(item["label"]) + "</p></div>"
+            + f"<form method=\"post\" action=\"/ui/connections\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            + f"<input type=\"hidden\" name=\"domain\" value=\"{html.escape(item['domain'])}\">"
+            + "<button name=\"op\" value=\"delete-site\" type=\"submit\">Delete</button></form></div></div></article>"
+        )
+    body = "".join(rows) or "<p>No site sessions. Open the site, then click Save site session.</p>"
+    return "<h2>Site sessions</h2>" + body
 
 
 def _consent_box(name: str, csrf: str, consent_url: str, remote: bool) -> str:
@@ -1412,6 +1454,11 @@ def _connections_post(plane, session, body, peer_ip):
 
     account = session["account"]
     account_id = account["id"]
+    if str(body.get("op") or "") == "delete-site":
+        from ssios.site_session import delete_session
+
+        delete_session(plane, account_id, str(body.get("domain") or ""))
+        return Page(200, _connections_page(plane, session, "<p class=\"notice\">Site session deleted.</p>", peer_ip))
     if body.get("account_id") and str(body.get("account_id")) != account_id:
         raise SsiosError("forbidden", "a session cannot act for another account", 403)
     service = str(body.get("service") or "")

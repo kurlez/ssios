@@ -79,6 +79,84 @@ def account_for_token(plane, header: str) -> str:
     raise SsiosError("unauthorized", "clip token rejected", 401)
 
 
+def save_site_from_browser(plane, account_id: str, body: dict, peer_ip: str) -> dict:
+    """Store cookies from the user's browser, then retry one pending clip."""
+    from ssios.site_session import header_from_cookies, save_session, take_pending
+
+    domain = str(body.get("domain") or body.get("url") or "")
+    cookies = body.get("cookies") if isinstance(body.get("cookies"), list) else []
+    expires = str(body.get("expires") or "")
+    if cookies:
+        header, earliest = header_from_cookies(cookies)
+        expires = expires or earliest
+    else:
+        header = str(body.get("cookie") or "")
+    saved = save_session(plane, account_id, domain, header, expires=expires)
+    host = saved["domain"]
+    pending = take_pending(plane, account_id, host)
+    retry = None
+    if pending:
+        retry = _retry_clip(plane, account_id, pending, peer_ip)
+    return {"status": "saved", "domain": host, "retry": retry}
+
+
+def _retry_clip(plane, account_id: str, url: str, peer_ip: str) -> dict:
+    try:
+        result = plane.skills.run(account_id, "clip " + url, peer_ip=peer_ip)
+    except SsiosError as exc:
+        if exc.reason == "session_expired":
+            _tell(plane, account_id, "Retried the clip. The site session is still expired.")
+            return {"status": "expired", "url": url}
+        _tell(plane, account_id, "Retried the clip. It did not complete.")
+        return {"status": "error", "url": url}
+    clip = result.get("clip") if isinstance(result, dict) else None
+    if not isinstance(clip, dict):
+        return {"status": "error", "url": url}
+    title = str(clip.get("title") or "the page")
+    prefs = plane.skills.account_prefs(account_id)
+    if prefs.get("auto_save") and not clip.get("truncated"):
+        saved = plane.skills.commit_clip(
+            account_id,
+            clip["markdown"],
+            {"path": clip["relpath"], "title": clip["title"], "staging": clip["staging"]},
+        )
+        _tell(plane, account_id, "Retried the clip. Saved to " + saved["path"] + ".")
+        return {"status": "saved", "url": url, "title": title}
+    account = plane.accounts.users.get(account_id)
+    if isinstance(account, dict):
+        from ssios.scope import AccountScope
+
+        scope = AccountScope(plane, account)
+        approval = scope.create_approval(
+            action="vault.clip",
+            project_id=scope.project_id(),
+            task_id="chat",
+            payload=clip["markdown"].encode("utf-8"),
+            meta={"path": clip["relpath"], "title": clip["title"], "staging": clip["staging"], "expected_revision": "vault"},
+        )
+        preview = "Retried the clip. Waiting for your approval.\n\n" + title + "\n" + clip["relpath"]
+        _tell(plane, account_id, preview, approval_id=approval["id"])
+    return {"status": "pending", "url": url, "title": title}
+
+
+def _tell(plane, account_id: str, text: str, approval_id: str = "") -> None:
+    account = plane.accounts.users.get(account_id) if hasattr(plane, "accounts") else None
+    if not isinstance(account, dict):
+        return
+    from ssios.scope import AccountScope
+
+    store = AccountScope(plane, account).chat()
+    rows = store.list_conversations()
+    if rows:
+        conv = max(rows, key=lambda row: float(row.get("updated_at") or 0))["id"]
+    else:
+        conv = store.create("Clip")["id"]
+    message = {"role": "assistant", "text": text}
+    if approval_id:
+        message["approval_id"] = approval_id
+    store.append(conv, message)
+
+
 def clip_from_browser(plane, account_id: str, body: dict, peer_ip: str) -> dict:
     """Sanitize a page the user's browser already rendered and stage or save it."""
     from ssios.scope import AccountScope

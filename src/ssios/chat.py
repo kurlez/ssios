@@ -215,7 +215,18 @@ def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDec
 
 
 def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
-    result = plane.skills.run(scope.account_id, message, peer_ip=peer_ip)
+    from ssios.site_session import warnings
+
+    for note in warnings(plane, scope.account_id):
+        scope.chat().append(conversation_id, {"role": "assistant", "text": note})
+        yield {"event": "outcome", "data": {"text": note}}
+    try:
+        result = plane.skills.run(scope.account_id, message, peer_ip=peer_ip)
+    except SsiosError as exc:
+        if exc.reason == "session_expired":
+            yield from _renew_prompt(scope, conversation_id, message, exc.detail)
+            return
+        raise
     blocks = result["blocks"]
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     reply = _grounded_reply(plane, message, summary, blocks, scope.account)
@@ -257,6 +268,18 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         preview = warning + "Save this clip to your vault.\n\n" + clip["title"] + "\n" + clip["relpath"] + "\nNothing is written until you approve it."
         scope.chat().append(conversation_id, {"role": "assistant", "text": preview, "approval_id": approval["id"]})
         yield _approval_event(approval, preview)
+
+
+def _renew_prompt(scope, conversation_id: str, message: str, detail: str) -> Iterator[dict]:
+    import re
+    from urllib.parse import urlsplit
+
+    found = re.search(r"https://[^\s]+", message or "")
+    host = urlsplit(found.group(0)).hostname if found else ""
+    url = f"https://{host}/" if host else ""
+    text = detail or "Site session expired. Log in if needed, then click Save site session."
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+    yield {"event": "renew", "data": {"text": text, "url": url, "host": host or ""}}
 
 
 def _wants_clip(message: str) -> bool:

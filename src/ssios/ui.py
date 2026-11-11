@@ -388,10 +388,14 @@ def _notices(plane, session: dict) -> Page:
 
     sweep_accounts(plane)
     scope = AccountScope(plane, _account(session))
+    from ssios.site_session import warnings
+
     items = [
         {"text": str(item.get("text") or "")[:160], "due": str(item.get("due") or "")}
         for item in ReminderStore(scope.home).unseen()
     ]
+    for note in warnings(plane, scope.account_id):
+        items.append({"text": note[:160], "due": ""})
     payload = json.dumps({"count": len(items), "items": items[:10]}, ensure_ascii=False)
     return Page(200, payload, content_type="application/json; charset=utf-8")
 
@@ -1117,7 +1121,12 @@ def _browser_clip(plane, method: str, headers, body: dict, peer_ip: str) -> Page
     if headers is not None:
         token = str(headers.get("X-SSIOS-Clip-Token") or "")
     account_id = account_for_token(plane, token)
-    result = clip_from_browser(plane, account_id, body, peer_ip)
+    if str(body.get("op") or "") == "save-session":
+        from ssios.clipper import save_site_from_browser
+
+        result = save_site_from_browser(plane, account_id, body, peer_ip)
+    else:
+        result = clip_from_browser(plane, account_id, body, peer_ip)
     return Page(200, json.dumps(result), content_type="application/json; charset=utf-8", extra_headers=_CLIP_HEADERS)
 
 
@@ -1132,8 +1141,7 @@ def _clipper_page(plane, session: dict, notice: str, token: str = "") -> str:
     rows = []
     for item in list_sessions(plane, account_id):
         rows.append(
-            f"<li>{html.escape(item['domain'])} last used {html.escape(item['last_used'] or 'never')} "
-            f"expires {html.escape(item['expires'])} "
+            f"<li>{html.escape(item['domain'])} {html.escape(item.get('label') or '')} "
             f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
             f"<input type=\"hidden\" name=\"domain\" value=\"{html.escape(item['domain'])}\">"
             "<button name=\"op\" value=\"delete-site\" type=\"submit\">Delete</button></form></li>"
@@ -1148,11 +1156,12 @@ def _clipper_page(plane, session: dict, notice: str, token: str = "") -> str:
         "<button name=\"op\" value=\"revoke\" type=\"submit\">Revoke</button></form>"
         + "<p><a href=\"/ui/clipper\">Install notes are in docs/clipper.md</a></p>"
         + "<h2>Site sessions</h2>"
-        + "<p>Off until you add a domain. The cookie stays in the OS secret store. SSIOS does not store the cookie in its files, and it does not store a password.</p>"
+        + "<p>Open the site while you are logged in, then click Save site session in the extension or bookmarklet. Status is on Connections. The cookie stays in the OS secret store. SSIOS does not store a password and does not log in for you.</p>"
+        + "<details><summary>Paste a cookie instead</summary>"
         + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<label>Domain <input name=\"domain\" placeholder=\"nytimes.com\"></label>"
+        "<label>Domain <input name=\"domain\" placeholder=\"example.com\"></label>"
         "<label>Cookie header <textarea name=\"cookie\" rows=\"3\"></textarea></label>"
-        "<button name=\"op\" value=\"save-site\" type=\"submit\">Save site session</button></form>"
+        "<button name=\"op\" value=\"save-site\" type=\"submit\">Save pasted cookie</button></form></details>"
         + "<ul>" + ("".join(rows) or "<li>No site sessions.</li>") + "</ul>"
         + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button name=\"op\" value=\"undo-clip\" type=\"submit\">Undo last auto clip</button></form>"
@@ -1280,7 +1289,7 @@ h1 { font-weight: 600; font-size: 1.35rem; margin: 0 0 16px; }
 main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
 button { background: transparent; cursor: pointer; width: auto; }
-button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+button.primary, a.button.primary { display: inline-block; background: var(--accent); color: var(--on-accent); border-color: transparent; text-decoration: none; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.danger, .card.danger button.primary { background: var(--danger); color: #fff; border-color: transparent; }
 @media (prefers-color-scheme: dark) {
@@ -1414,9 +1423,13 @@ NOTICES_JS = r"""
       count.hidden = n < 1;
       count.textContent = n ? String(n) : "";
     }
+    var site = ((data && data.items) || []).filter(function (row) { return row && !row.due; })[0];
+    if (site) item = site;
     if (banner) {
       banner.hidden = n < 1;
-      banner.textContent = n ? ("Reminder: " + (item.text || "") + " was due " + (item.due || "")) : "";
+      if (!n) banner.textContent = "";
+      else if (item.due) banner.textContent = "Reminder: " + (item.text || "") + " was due " + item.due;
+      else banner.textContent = item.text || "";
     }
   }
   function poll() {
