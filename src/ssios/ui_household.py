@@ -913,7 +913,6 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
         if gate == "on":
             any_on = True
         state = "Connected" if connected else "Not connected"
-        legacy = f"{name}: connected" if connected else f"{name}: not connected"
         if gate == "config":
             reason = "Disabled in config by the administrator."
             switch = ""
@@ -949,7 +948,7 @@ def _connections_page(plane, session, notice: str, peer_ip: str = "127.0.0.1") -
         dot = "dot on" if connected else "dot"
         cards.append(
             "<article class=\"svc\"><span class=\"" + dot + "\"></span><div><h2>" + html.escape(name.title()) + "</h2>"
-            "<p>" + html.escape(state) + "</p><p class=\"hint\">" + html.escape(legacy) + "</p>" + switch + "</div>" + button + "</article>"
+            "<p>" + html.escape(state) + "</p>" + switch + "</div>" + button + "</article>"
         )
     steps = (
         "<ol class=\"setup-steps\">"

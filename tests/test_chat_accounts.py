@@ -714,7 +714,7 @@ class HouseholdTest(PlaneTest):
         _status, connections = _get(self.base, "/ui/connections", kent)
         self.assertIn("Signed in as kent", connections)
         self.assertNotIn(">Admin</a>", connections)
-        self.assertIn("gmail: not connected", connections)
+        self.assertIn("<h2>Gmail</h2><p>Not connected</p>", connections)
         self.assertNotIn("not connected / not connected", connections)
         self.assertIn("Connect gmail", connections)
         self.assertIn("Connect drive", connections)
@@ -1047,9 +1047,9 @@ class HouseholdTest(PlaneTest):
         self.assertIn("was not sent", english_connector_error(SsiosError("connector_conflict", "raw", 409)))
         self._install_and_connect(self._ada_id(), "calendar", "code-a")
         _status, connections = _get(self.base, "/ui/connections", self.ada)
-        self.assertIn("calendar: connected", connections)
-        self.assertIn("gmail: not connected", connections)
-        self.assertIn("drive: not connected", connections)
+        self.assertIn("<h2>Calendar</h2><p>Connected</p>", connections)
+        self.assertIn("<h2>Gmail</h2><p>Not connected</p>", connections)
+        self.assertIn("<h2>Drive</h2><p>Not connected</p>", connections)
         self.assertNotIn(self.secret, connections)
         status, window, _cookie = _form(
             self.base,
