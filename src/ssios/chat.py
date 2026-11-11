@@ -149,12 +149,22 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
     tool, arguments, limits, followup = _fetch_plan(scope.plane, message, decision.services[0])
     route_name = "connector_vm" if follow_vm else "connector"
     if not requires_approval(tool):
-        yield from _read_tool(scope, conversation_id, tool, arguments, limits, followup=followup, follow_vm=follow_vm, peer_ip=peer_ip)
+        yield from _read_tool(
+            scope,
+            conversation_id,
+            tool,
+            arguments,
+            limits,
+            followup=followup,
+            follow_vm=follow_vm,
+            peer_ip=peer_ip,
+            user_message=message,
+        )
         return
     yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
 
 
-def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, follow_vm: bool = False, peer_ip: str = "127.0.0.1") -> Iterator[dict]:
+def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: dict, *, followup=None, follow_vm: bool = False, peer_ip: str = "127.0.0.1", user_message: str = "") -> Iterator[dict]:
     from ssios.calendar_intent import account_zone
     from ssios.google_connector import session_for_account
 
@@ -171,11 +181,14 @@ def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: 
     )
     blocks = read_blocks(result["tool"], result["arguments"], result["text"], zone_name)
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
-    scope.chat().append(
-        conversation_id,
-        {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}},
-    )
-    yield {"event": "results", "data": {"text": summary, "blocks": blocks}}
+    reply = ""
+    if not followup and not follow_vm:
+        reply = _grounded_reply(scope.plane, user_message, summary, blocks)
+    stored = {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}}
+    if reply:
+        stored["reply"] = reply
+    scope.chat().append(conversation_id, stored)
+    yield {"event": "results", "data": {"text": summary, "blocks": blocks, "reply": reply}}
     if followup and result["tool"] == "calendar.list_events":
         yield from _match_calendar(scope, conversation_id, result["text"], followup)
         return
@@ -225,6 +238,45 @@ def read_blocks(tool: str, arguments: dict, text: str, zone_name: str) -> list[d
         summary = _count_line(header, len(files), "file")
         return [{"kind": "drive", "header": header, "summary": summary, "events": files}]
     return [{"kind": "note", "header": tool, "summary": "Done.", "events": []}]
+
+
+def _grounded_reply(plane, message: str, summary: str, blocks: list[dict]) -> str:
+    """One sentence in the user's language. The cards stay the source of the count."""
+    lines = []
+    count = 0
+    for block in blocks:
+        for item in block.get("events") or []:
+            if not isinstance(item, dict):
+                continue
+            count += 1
+            bits = [str(item.get("title") or ""), str(item.get("when") or ""), str(item.get("location") or ""), str(item.get("meta") or "")]
+            lines.append(" | ".join(bit for bit in bits if bit))
+    facts = "GROUNDED-READ\ncount=" + str(count) + "\n" + summary + "\n" + "\n".join(lines[:20])
+    messages = [
+        {
+            "role": "system",
+            "content": facts + "\nAnswer in the user's language. Use only these facts. Do not invent events.",
+        },
+        {"role": "user", "content": message or summary},
+    ]
+    try:
+        text = plane.llm.complete_chat(messages, cancel_event=threading.Event(), deadline=time.monotonic() + 20)
+    except (SsiosError, FlowInterrupt, TimeoutError, OSError):
+        return ""
+    reply = " ".join(str(text or "").split())
+    if not reply or not _reply_fits(reply, count):
+        return ""
+    return reply[:500]
+
+
+def _reply_fits(reply: str, count: int) -> bool:
+    folded = reply.casefold()
+    empty_claim = ("no events", "no event", "nothing on", "没有日程", "没有安排", "没有任何", "没有会")
+    if count > 0 and any(phrase in folded or phrase in reply for phrase in empty_claim):
+        return False
+    if count == 0 and re.search(r"\b[1-9]\d*\s+(events?|items?|messages?|files?)\b", folded):
+        return False
+    return True
 
 
 def _mail_blocks(arguments: dict, text: str) -> list[dict]:
@@ -607,6 +659,8 @@ def failure_hint(code: str) -> str:
         "chat_empty": "The stream ended before any answer was saved. Reload the chat, then run ssios vm-diagnose.",
         "drive_intent_invalid": "Name a folder, or say root, My Drive, or 根目录. Recent files and a file name work too.",
         "drive_grant_limited": "Open Connections and check Drive. Ask for an allowed folder by name. A raw folder id is not required.",
+        "calendar_intent_invalid": "Say the day in ordinary words, such as tomorrow, this week, or 明天. Nothing was read. The guest is not involved.",
+        "calendar_intent_unclear": "Include a clock time, such as 3pm or 下午三点. Nothing was changed.",
     }
     return hints.get(code, 'Run ssios vm-diagnose --state "$SSIOS_STATE" --config "$SSIOS_STATE/ollama.toml".')
 

@@ -558,6 +558,14 @@ class MockLLM:
         if cancel_event.is_set() or time.monotonic() >= deadline:
             raise FlowInterrupt("timeout")
         blob = json.dumps(messages, ensure_ascii=False)
+        if "GROUNDED-READ" in blob:
+            count = "0"
+            found = re.search(r"count=(\d+)", blob)
+            if found:
+                count = found.group(1)
+            if re.search(r"[\u4e00-\u9fff]", blob):
+                return f"共 {count} 项。"
+            return f"{count} items."
         if "MEMORY-CONTEXT" in blob and "HARBOR-LOCK" in blob:
             return "Synthetic local answer. The memory excerpt stayed on this machine. No tools were used."
         if "Untrusted approved cloud text" in blob:

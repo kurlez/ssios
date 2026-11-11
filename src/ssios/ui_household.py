@@ -161,6 +161,12 @@ CHAT_JS = r"""
       content = document.createElement("div");
       content.className = "content";
       if (message.results && message.results.length) renderResults(message.results, "", content);
+      if (message.reply) {
+        var reply = document.createElement("p");
+        reply.className = "reply";
+        reply.textContent = message.reply;
+        content.appendChild(reply);
+      }
       else if (message.error_code || String(message.text || "").indexOf("Error code:") >= 0) showError(content, message.text || "");
       else renderMarkdown(content, message.text || "");
       body.appendChild(content);
@@ -439,7 +445,14 @@ CHAT_JS = r"""
       if (onResult) onResult();
       var typingNode = answer.querySelector(".typing");
       if (typingNode) typingNode.remove();
-      renderResults(payload.blocks || [], "", answer.querySelector(".content"));
+      var contentNode = answer.querySelector(".content");
+      renderResults(payload.blocks || [], "", contentNode);
+      if (payload.reply) {
+        var replyLine = document.createElement("p");
+        replyLine.className = "reply";
+        replyLine.textContent = payload.reply;
+        contentNode.appendChild(replyLine);
+      }
     }
     if (name === "outcome" && (payload.visible || payload.text)) {
       var note = document.createElement("p");
@@ -764,6 +777,8 @@ def _events_html(session, events: list[dict]) -> str:
         elif name == "results":
             parts.append("<p class=\"outcome\">" + html.escape(str(data.get("text") or "")) + "</p>")
             parts.append(_result_blocks_html(data.get("blocks") or []))
+            if data.get("reply"):
+                parts.append("<p class=\"reply\">" + html.escape(str(data.get("reply") or "")) + "</p>")
         elif name == "outcome":
             full = str(data.get("text") or "")
             visible = str(data.get("visible") or full)
@@ -871,6 +886,8 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
                 "sandbox_denied": bool(checks.get("sandbox_denied")),
                 "outside_write": bool(checks.get("outside_write")),
             }
+        if message.get("reply"):
+            item["reply"] = str(message.get("reply") or "")
         if message.get("approval_id"):
             item["approval"] = _approval_view(plane, account, str(message["approval_id"]), item["text"])
         results = message.get("results")

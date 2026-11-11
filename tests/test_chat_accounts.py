@@ -136,6 +136,7 @@ class RouterTest(PlaneTest):
         self.assertNotIn("发件人", mail["q"])
         week = plan_mail("unread mail from the last 7 days")
         self.assertEqual(week["q"], "in:inbox is:unread newer_than:7d")
+        self.assertEqual(plan_mail("今天的邮件")["q"], "in:inbox newer_than:1d")
         root = plan_drive("列一下我的Google Drive的根目录下的文件名")
         self.assertEqual(root, {"mode": "root"})
         named = plan_drive("list files in the Harbor folder on Google Drive")
@@ -145,6 +146,71 @@ class RouterTest(PlaneTest):
         with self.assertRaises(SsiosError) as caught:
             plan_drive("list my Google Drive")
         self.assertEqual(caught.exception.code, "drive_intent_invalid")
+
+    def test_calendar_phrases_survive_a_broken_model(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from ssios.calendar_intent import plan_calendar
+
+        class Broken:
+            def __init__(self, replies: list[str]) -> None:
+                self.replies = list(replies)
+
+            def extract_calendar_intent(self, message: str, deadline: float, repair: bool = False):
+                del message, deadline, repair
+                if not self.replies:
+                    return "{"
+                return self.replies.pop(0)
+
+        zone = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 11, 10, 9, 0, tzinfo=zone)
+        broken = Broken(["{", "not-json"])
+        tomorrow, arguments, followup = plan_calendar(
+            "查一下我明天有什么日程",
+            now=now,
+            zone_name="America/Los_Angeles",
+            llm=broken,
+            deadline=10**12,
+        )
+        self.assertEqual(tomorrow, "calendar.list_events")
+        self.assertIsNone(followup)
+        self.assertEqual(arguments["calendar_id"], "primary")
+        self.assertEqual(arguments["time_min"], "2026-11-11T00:00:00-08:00")
+        self.assertEqual(arguments["time_max"], "2026-11-12T00:00:00-08:00")
+        self.assertEqual(broken.replies, ["{", "not-json"])
+        week, week_args, _follow = plan_calendar(
+            "what's on my calendar this week",
+            now=now,
+            zone_name="America/Los_Angeles",
+            llm=Broken(["{", "{"]),
+            deadline=10**12,
+        )
+        self.assertEqual(week, "calendar.list_events")
+        self.assertEqual(week_args["time_min"], "2026-11-09T00:00:00-08:00")
+        self.assertEqual(week_args["time_max"], "2026-11-16T00:00:00-08:00")
+        monday, monday_args, _follow = plan_calendar(
+            "下周一上午有什么会",
+            now=now,
+            zone_name="America/Los_Angeles",
+            llm=Broken(["{", "{"]),
+            deadline=10**12,
+        )
+        self.assertEqual(monday, "calendar.list_events")
+        self.assertEqual(monday_args["time_min"], "2026-11-16T08:00:00-08:00")
+        self.assertEqual(monday_args["time_max"], "2026-11-16T12:00:00-08:00")
+        repaired = Broken(["{", '{"op":"list","range_kind":"unspecified","weekday":"","weekday_scope":"","hour":-1,"minute":0,"duration_minutes":0,"part_of_day":"","title":"","match_text":"","location":"","attendee_names":[],"attendee_emails":[],"notify":"none","calendar_id":"primary"}'])
+        tool, args, _follow = plan_calendar(
+            "把日历上的那件事处理一下",
+            now=now,
+            zone_name="America/Los_Angeles",
+            llm=repaired,
+            deadline=10**12,
+        )
+        self.assertEqual(tool, "calendar.list_events")
+        self.assertEqual(args["time_min"], "2026-11-10T00:00:00-08:00")
+        self.assertEqual(args["time_max"], "2026-11-17T00:00:00-08:00")
+        self.assertEqual(repaired.replies, [])
 
     def test_each_calendar_query_keeps_its_own_range(self) -> None:
         from ssios.chat import read_blocks
@@ -1547,26 +1613,40 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Standup", explicit)
         self.assertEqual(self.plane.llm.intent_script, ["nope"])
         _CalendarApi.writes.clear()
-        self.plane.llm.intent_script = ["nope", "still-nope"]
+        self.plane.llm.intent_script = ["{", "{"]
+        tomorrow = self._send(self.ada, "查一下我明天有什么日程")
+        self.assertIn("2026-11-11T00:00:00-08:00", tomorrow)
+        self.assertIn("2026-11-12T00:00:00-08:00", tomorrow)
+        self.assertIn("共 1 项。", tomorrow)
+        self.assertNotIn("vm-diagnose", tomorrow)
+        self.assertNotIn('value="connector.fetch"', tomorrow)
+        week_again = self._send(self.ada, "what's on my calendar this week")
+        self.assertIn("2026-11-09T00:00:00-08:00", week_again)
+        self.assertIn("2026-11-16T00:00:00-08:00", week_again)
+        self.assertIn("1 items.", week_again)
+        monday = self._send(self.ada, "下周一上午有什么会")
+        self.assertIn("2026-11-16T08:00:00-08:00", monday)
+        self.assertIn("2026-11-16T12:00:00-08:00", monday)
+        self.assertIn("共 1 项。", monday)
+        self.assertEqual(self.plane.llm.intent_script, ["{", "{"])
+        self.plane.llm.intent_script = ["{", "{"]
         status, failed, _cookie = _form(
             self.base,
             "/ui/chat/send",
-            {"csrf": self._csrf(self.ada), "message": "这周我有什么安排"},
+            {"csrf": self._csrf(self.ada), "message": "把日历改一下"},
             cookie=self.ada,
         )
         self.assertEqual(status, 400, failed)
-        self.assertIn("explicit form", failed)
+        self.assertIn("calendar_intent_invalid", failed)
         self.assertIn("Nothing was read or changed", failed)
+        self.assertIn("查一下我明天有什么日程", failed)
+        self.assertNotIn("vm-diagnose", failed)
         self.plane.llm.intent_script = [SsiosError("llm_unavailable", "down", 503)]
-        status, down, _cookie = _form(
-            self.base,
-            "/ui/chat/send",
-            {"csrf": self._csrf(self.ada), "message": "取消明天的站会"},
-            cookie=self.ada,
-        )
-        self.assertEqual(status, 400, down)
-        self.assertIn("Nothing was read or changed", down)
-        self.assertEqual(_CalendarApi.writes, [])
+        _CalendarApi.writes.clear()
+        down = self._send(self.ada, "取消明天的站会")
+        self.assertIn("2026-11-11T00:00:00-08:00", down)
+        self.assertNotIn("vm-diagnose", down)
+        self.assertFalse(any(item["method"] == "DELETE" for item in _CalendarApi.writes))
 
     def test_natural_language_update_and_delete_ask_before_writing(self) -> None:
         self._install_and_connect(self._ada_id(), "calendar", "code-a")

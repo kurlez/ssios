@@ -85,7 +85,7 @@ An admin sees whether Gmail or Drive is connected, and the connected-at time. Th
 
 ## Calendar in ordinary language
 
-Say what you want in Chinese or English. The local Ollama model only fills a small JSON intent. It does not choose the calendar date. The program resolves "this week", "tomorrow afternoon", "下周三", and "周五" from today's date and the account time zone. A read shows that window as its own heading. A write's approval card shows the absolute date, time, and zone.
+Say what you want in Chinese or English. The local Ollama model only fills a small JSON intent. It does not choose the calendar date. The program resolves "this week", "tomorrow", "下周一上午", and "周五" from today's date and the account time zone. If that JSON is unusable, the same phrases still resolve, after one repair attempt. A read shows that window as its own heading and one sentence in the language you used. A write's approval card shows the absolute date, time, and zone. An intent error does not suggest `vm-diagnose`.
 
 Examples:
 

@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ssios.errors import FlowInterrupt, SsiosError
 
 _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-_RANGES = {"today", "tomorrow", "this_week", "next_week", "tomorrow_afternoon", "weekday", "unspecified"}
+_RANGES = {"today", "tomorrow", "day_after", "this_week", "next_week", "tomorrow_afternoon", "weekday", "unspecified"}
 _PARTS = {"", "morning", "afternoon", "evening"}
 _OPS = {"list", "create", "update", "delete"}
 _KEYS = {
@@ -117,7 +117,7 @@ def mentions_calendar(message: str) -> bool:
     folded = message.casefold()
     if "calendar" in folded:
         return True
-    if any(cue in message for cue in ("日历", "日程", "安排", "有空", "开会", "会议", "站会", "牙医")):
+    if any(cue in message for cue in ("日历", "日程", "安排", "有空", "开会", "会议", "站会", "牙医", "什么会")):
         return True
     if "改到" in message and any(part in message for part in ("点", "上午", "下午", "早上", "晚上")):
         return True
@@ -167,18 +167,40 @@ def intent_messages(message: str, *, repair: bool) -> list[dict]:
 
 
 def extract_intent(llm, message: str, deadline: float) -> dict:
+    """The model only fills slots. A common phrase still resolves when that JSON is bad."""
+    phrase = fallback_intent(message)
     reader = getattr(llm, "extract_calendar_intent", None)
+    if phrase is not None and not _needs_model(message):
+        return phrase
     if not callable(reader):
-        raise SsiosError("calendar_intent_invalid", FALLBACK, 400)
-    first_error = _read_once(reader, message, deadline, repair=False)
-    if isinstance(first_error, dict):
-        return first_error
-    if first_error == "unavailable":
-        raise SsiosError("calendar_intent_invalid", FALLBACK, 400)
-    second = _read_once(reader, message, deadline, repair=True)
-    if isinstance(second, dict):
-        return second
-    raise SsiosError("calendar_intent_invalid", FALLBACK, 400)
+        if phrase is not None:
+            return phrase
+        raise SsiosError("calendar_intent_invalid", intent_error(message), 400)
+    first = _read_once(reader, message, deadline, repair=False)
+    if isinstance(first, dict):
+        return _merge_phrase(first, phrase)
+    if first != "unavailable":
+        second = _read_once(reader, message, deadline, repair=True)
+        if isinstance(second, dict):
+            return _merge_phrase(second, phrase)
+    if phrase is not None:
+        return phrase
+    raise SsiosError("calendar_intent_invalid", intent_error(message), 400)
+
+
+def intent_error(message: str) -> str:
+    text = FALLBACK
+    if re.search(r"[\u4e00-\u9fff]", message or ""):
+        text += " For example: 查一下我明天有什么日程"
+    return text
+
+
+def _needs_model(message: str) -> bool:
+    """Creates and edits still ask the model, then keep the phrase if that answer is unusable."""
+    folded = message.casefold()
+    if any(cue in message for cue in ("取消", "删除", "改到", "改成", "改为", "开会")):
+        return True
+    return bool(re.search(r"\b(cancel|delete|reschedule|move|schedule|create|book)\b", folded))
 
 
 def plan_calendar(message: str, *, now: datetime, zone_name: str, llm, deadline: float) -> tuple[str, dict, dict | None]:
@@ -391,6 +413,8 @@ def _resolve_when(intent: dict, now: datetime, zone_name: str):
         moment = None
         if intent["hour"] >= 0:
             moment = start.replace(hour=intent["hour"], minute=intent["minute"])
+        if intent.get("op") == "list":
+            start, end = _maybe_part(intent, start, end)
         note = _weekday_note(moment or start, today, target, scope, zone_name, now)
         return start, end, moment, note
     if kind == "tomorrow_afternoon":
@@ -400,10 +424,17 @@ def _resolve_when(intent: dict, now: datetime, zone_name: str):
     if kind == "tomorrow":
         start = _at(today + timedelta(days=1), zone)
         end = start + timedelta(days=1)
+        start, end = _maybe_part(intent, start, end)
         return start, end, None, f"Resolved: { _day_text(start) } {zone_name}. Tomorrow."
+    if kind == "day_after":
+        start = _at(today + timedelta(days=2), zone)
+        end = start + timedelta(days=1)
+        start, end = _maybe_part(intent, start, end)
+        return start, end, None, f"Resolved: { _day_text(start) } {zone_name}. The day after tomorrow."
     if kind == "today":
         start = _at(today, zone)
         end = start + timedelta(days=1)
+        start, end = _maybe_part(intent, start, end)
         return start, end, None, f"Resolved: { _day_text(start) } {zone_name}. Today."
     if kind == "this_week":
         start = _at(_monday(today), zone)
@@ -457,6 +488,209 @@ def _description(names: list[str], note: str) -> str:
     if note:
         parts.append(note)
     return ". ".join(parts)
+
+
+def _maybe_part(intent: dict, start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    if intent.get("op") not in {"", "list"}:
+        return start, end
+    part = intent.get("part_of_day") or ""
+    hours = {"morning": (8, 12), "afternoon": (13, 17), "evening": (18, 22)}
+    if part not in hours or intent.get("range_kind") == "tomorrow_afternoon":
+        return start, end
+    open_hour, close_hour = hours[part]
+    begin = start.replace(hour=open_hour, minute=0, second=0, microsecond=0)
+    finish = start.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+    if finish <= begin:
+        return start, end
+    return begin, finish
+
+
+def _merge_phrase(parsed: dict, phrase: dict | None) -> dict:
+    if not phrase or phrase.get("range_kind") in {None, "", "unspecified"}:
+        return parsed
+    if parsed.get("range_kind") not in {None, "", "unspecified"}:
+        return parsed
+    merged = dict(parsed)
+    for key in ("range_kind", "weekday", "weekday_scope", "part_of_day", "hour", "minute", "duration_minutes", "op"):
+        if phrase.get(key) not in (None, "", -1, 0) or key in {"weekday", "weekday_scope", "part_of_day", "op", "range_kind"}:
+            merged[key] = phrase[key]
+    return merged
+
+
+def fallback_intent(message: str) -> dict | None:
+    """Relative words such as 明天 and tomorrow. Dates are not computed here."""
+    text = " ".join(str(message or "").split())
+    if not text:
+        return None
+    folded = text.casefold()
+    intent = _blank()
+    intent["op"] = _phrase_op(text, folded)
+    kind, weekday, scope = _phrase_range(text, folded)
+    if kind is None:
+        if intent["op"] == "list" and _list_cue(text, folded):
+            kind = "unspecified"
+        else:
+            return None
+    if intent["op"] != "list" and kind == "unspecified":
+        return None
+    intent["range_kind"] = kind
+    intent["weekday"] = weekday
+    intent["weekday_scope"] = scope
+    part = _phrase_part(text, folded)
+    intent["part_of_day"] = part
+    if kind == "tomorrow" and part == "afternoon" and intent["op"] == "list" and "有空" in text:
+        intent["range_kind"] = "tomorrow_afternoon"
+    hour, minute = _phrase_clock(text, folded, part)
+    intent["hour"] = hour
+    intent["minute"] = minute
+    intent["duration_minutes"] = _phrase_duration(text, folded)
+    if intent["op"] in {"update", "delete"}:
+        for token in ("牙医", "站会", "会议"):
+            if token in text:
+                intent["match_text"] = token
+                break
+    if intent["op"] == "create" and "开会" in text:
+        intent["title"] = "开会"
+    name = _phrase_name(text)
+    if name:
+        intent["attendee_names"] = [name]
+    return intent
+
+
+def _list_cue(text: str, folded: str) -> bool:
+    if any(cue in text for cue in ("查", "看看", "有什么", "有哪些", "哪些", "有空", "什么日程", "什么安排", "什么会")):
+        return True
+    return bool(re.search(r"\b(what|what's|show|list|any)\b", folded))
+
+
+def _phrase_op(text: str, folded: str) -> str:
+    if _list_cue(text, folded):
+        return "list"
+    if any(cue in text for cue in ("取消", "删除")) or re.search(r"\b(cancel|delete)\b", folded):
+        return "delete"
+    if any(cue in text for cue in ("改到", "改成", "改为")) or re.search(r"\b(reschedule|move)\b", folded):
+        return "update"
+    if any(cue in text for cue in ("开会", "新建", "预约")) or re.search(r"\b(schedule|create|book)\b", folded):
+        return "create"
+    return "list"
+
+
+def _phrase_range(text: str, folded: str) -> tuple[str | None, str, str]:
+    if "后天" in text or "day after tomorrow" in folded:
+        return "day_after", "", ""
+    if "明天" in text or re.search(r"\btomorrow\b", folded):
+        return "tomorrow", "", ""
+    if "今天" in text or "今儿" in text or re.search(r"\btoday\b", folded):
+        return "today", "", ""
+    found = re.search(r"(下个?|这个?|本)?(?:周|星期)([一二三四五六日天])", text)
+    if found:
+        weekday = _CN_DAY[found.group(2)]
+        prefix = found.group(1) or ""
+        scope = "next" if prefix.startswith("下") else "this" if prefix else "upcoming"
+        return "weekday", weekday, scope
+    english = re.search(
+        r"\b(next|this)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        folded,
+    )
+    if english:
+        names = {
+            "monday": "mon",
+            "tuesday": "tue",
+            "wednesday": "wed",
+            "thursday": "thu",
+            "friday": "fri",
+            "saturday": "sat",
+            "sunday": "sun",
+        }
+        scope = english.group(1) or "upcoming"
+        return "weekday", names[english.group(2)], scope
+    if "下周" in text or "下个周" in text or "next week" in folded:
+        return "next_week", "", ""
+    if any(cue in text for cue in ("本周", "这周", "这个周")) or "this week" in folded:
+        return "this_week", "", ""
+    return None, "", ""
+
+
+_CN_DAY = {"一": "mon", "二": "tue", "三": "wed", "四": "thu", "五": "fri", "六": "sat", "日": "sun", "天": "sun"}
+_CN_NUM = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _phrase_part(text: str, folded: str) -> str:
+    if "下午" in text or "afternoon" in folded:
+        return "afternoon"
+    if "上午" in text or "早上" in text or "morning" in folded:
+        return "morning"
+    if "晚上" in text or "evening" in folded:
+        return "evening"
+    return ""
+
+
+def _phrase_clock(text: str, folded: str, part: str) -> tuple[int, int]:
+    minute = 0
+    match = re.search(r"([零一二两三四五六七八九十\d]{1,3})\s*点(半)?", text)
+    if match:
+        hour = _cn_number(match.group(1))
+        if match.group(2):
+            minute = 30
+    else:
+        match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", folded)
+        if not match:
+            return -1, 0
+        hour = int(match.group(1))
+        if match.group(2):
+            minute = int(match.group(2))
+        if match.group(3) == "pm" and hour < 12:
+            hour += 12
+        if match.group(3) == "am" and hour == 12:
+            hour = 0
+    if hour is None or not 0 <= hour <= 23:
+        return -1, 0
+    if part in {"afternoon", "evening"} and hour <= 11:
+        hour += 12
+    return hour, minute
+
+
+def _cn_number(token: str) -> int | None:
+    if token.isdigit():
+        return int(token)
+    if token == "十":
+        return 10
+    if len(token) == 2 and token[0] == "十" and token[1] in _CN_NUM:
+        return 10 + _CN_NUM[token[1]]
+    if len(token) == 2 and token[1] == "十" and token[0] in _CN_NUM:
+        return _CN_NUM[token[0]] * 10
+    if len(token) == 3 and token[1] == "十" and token[0] in _CN_NUM and token[2] in _CN_NUM:
+        return _CN_NUM[token[0]] * 10 + _CN_NUM[token[2]]
+    if len(token) == 1 and token in _CN_NUM:
+        return _CN_NUM[token]
+    return None
+
+
+def _phrase_duration(text: str, folded: str) -> int:
+    if "半小时" in text or "half an hour" in folded:
+        return 30
+    if "一个小时" in text or "一小时" in text or "an hour" in folded or "1 hour" in folded:
+        return 60
+    match = re.search(r"(\d+)\s*(?:个)?小时", text)
+    if match:
+        return min(1440, int(match.group(1)) * 60)
+    match = re.search(r"(\d+)\s*分钟", text)
+    if match:
+        return min(1440, int(match.group(1)))
+    match = re.search(r"\b(\d+)\s*hours?\b", folded)
+    if match:
+        return min(1440, int(match.group(1)) * 60)
+    return 0
+
+
+def _phrase_name(text: str) -> str:
+    found = re.search(r"和([\u4e00-\u9fffA-Za-z]{1,12}?)(?:开会|见面)", text)
+    if not found:
+        return ""
+    name = found.group(1).strip()
+    if name in {"我", "他", "她"}:
+        return ""
+    return name
 
 
 def _monday(day):

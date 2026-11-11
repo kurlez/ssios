@@ -104,16 +104,17 @@ class CalendarIntentTest(unittest.TestCase):
         self.assertEqual(arguments["start"], "2026-11-18T15:00:00-08:00")
 
     def test_invalid_model_output_does_not_return_a_plan(self) -> None:
+        week = extract_intent(_Script(["nope", "still nope"]), "这周我有什么安排", deadline=10**12)
+        self.assertEqual(week["range_kind"], "this_week")
         with self.assertRaises(SsiosError) as caught:
-            extract_intent(_Script(["nope", "still nope"]), "这周我有什么安排", deadline=10**12)
+            extract_intent(_Script(["nope", "still nope"]), "put the calendar somewhere", deadline=10**12)
         self.assertEqual(caught.exception.code, "calendar_intent_invalid")
         self.assertIn("explicit form", caught.exception.detail)
         self.assertEqual(caught.exception.detail, FALLBACK)
-        repaired = extract_intent(_Script(["nope", scripted_intent("这周我有什么安排")]), "这周我有什么安排", deadline=10**12)
+        repaired = extract_intent(_Script(["nope", scripted_intent("这周我有什么安排")]), "put the calendar somewhere", deadline=10**12)
         self.assertEqual(repaired["range_kind"], "this_week")
-        with self.assertRaises(SsiosError) as unavailable:
-            extract_intent(_Script([SsiosError("llm_unavailable", "down", 503)]), "这周我有什么安排", deadline=10**12)
-        self.assertIn("Nothing was read or changed", unavailable.exception.detail)
+        down = extract_intent(_Script([SsiosError("llm_unavailable", "down", 503)]), "这周我有什么安排", deadline=10**12)
+        self.assertEqual(down["range_kind"], "this_week")
 
     def test_explicit_syntax_stays_on_the_legacy_path(self) -> None:
         self.assertTrue(is_legacy_calendar("create calendar event title:Standup start:2026-11-12T15:00:00Z end:2026-11-12T15:30:00Z"))

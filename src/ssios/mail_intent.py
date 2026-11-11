@@ -20,4 +20,6 @@ def plan_mail(message: str) -> dict:
         parts.append("is:unread")
     if any(cue in text for cue in _CN_WEEK) or _WEEK.search(folded):
         parts.append("newer_than:7d")
+    elif "今天" in text or re.search(r"\btoday\b", folded):
+        parts.append("newer_than:1d")
     return {"q": " ".join(parts), "view": view}
