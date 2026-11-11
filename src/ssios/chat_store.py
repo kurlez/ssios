@@ -37,6 +37,7 @@ class ChatStore:
                     "id": record["id"],
                     "title": record.get("title") or "Conversation",
                     "updated_at": record.get("updated_at"),
+                    "created_at": record.get("created_at"),
                 }
             )
         return rows

@@ -43,13 +43,42 @@ def _multipart_memory(content_type: str, raw: bytes) -> dict:
         if found is None:
             continue
         name = found.group(1).decode("ascii", "replace")
-        if name not in {"csrf", "op", "service", "client_id", "client_secret", "client_file", "confirm", "redirect_url", "account_id"}:
+        if name == "image":
+            if len(body) > 80000 or not _image_magic(body):
+                raise SsiosError("bad_request", "that image was rejected", 400)
+            result["image_bytes"] = body
+            continue
+        if name not in {
+            "csrf",
+            "op",
+            "service",
+            "client_id",
+            "client_secret",
+            "client_file",
+            "confirm",
+            "redirect_url",
+            "account_id",
+            "message",
+            "override",
+            "conversation",
+            "quote",
+        }:
             continue
         try:
             result[name] = body.decode("utf-8")
         except UnicodeError as exc:
             raise SsiosError("oauth_client_invalid", "the client file is not text", 400) from exc
     return result
+
+
+def _image_magic(raw: bytes) -> bool:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if raw.startswith(b"\xff\xd8\xff"):
+        return True
+    if raw.startswith(b"GIF87a") or raw.startswith(b"GIF89a"):
+        return True
+    return raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
 
 
 class AppHTTPServer(ThreadingHTTPServer):

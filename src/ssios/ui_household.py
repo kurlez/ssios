@@ -84,16 +84,25 @@ CHAT_JS = r"""
     typing.className = "typing";
     typing.textContent = "Assistant is writing";
     answer.querySelector(".content").appendChild(typing);
-    var params = new URLSearchParams(new FormData(form));
+    var params = new FormData(form);
+    var file = form.querySelector("input[name=image]");
+    var useFile = file && file.files && file.files.length;
+    if (!useFile) params.delete("image");
     turnFailed = false;
     box.value = "";
     grow();
     syncSend();
     var steps = null;
+    var headers = {"Accept": "text/event-stream"};
+    var payload = params;
+    if (!useFile) {
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
+      payload = new URLSearchParams(params).toString();
+    }
     fetch(form.action, {
       method: "POST",
-      headers: {"Accept": "text/event-stream", "Content-Type": "application/x-www-form-urlencoded"},
-      body: params.toString(),
+      headers: headers,
+      body: payload,
       credentials: "same-origin"
     }).then(function (response) {
       if (!response.ok || !response.body) {
@@ -146,13 +155,28 @@ CHAT_JS = r"""
 
   function renderMessage(message) {
     var role = message.role === "user" ? "user" : "assistant";
+    markDay(message.at);
     var wrap = document.createElement("div");
     wrap.className = "msg " + role;
+    if (message.text) wrap.dataset.text = message.text;
     var content;
     if (role === "user") {
       var bubble = document.createElement("div");
       bubble.className = "bubble";
-      bubble.textContent = message.text || "";
+      if (message.quote) {
+        var quoted = document.createElement("p");
+        quoted.className = "quote";
+        quoted.textContent = message.quote;
+        bubble.appendChild(quoted);
+      }
+      bubble.appendChild(document.createTextNode(message.text || ""));
+      if (message.image) {
+        var thumb = document.createElement("img");
+        thumb.className = "thumb";
+        thumb.alt = "Attached image";
+        thumb.src = message.image;
+        bubble.appendChild(thumb);
+      }
       wrap.appendChild(bubble);
       content = bubble;
     } else {
@@ -191,12 +215,61 @@ CHAT_JS = r"""
       wrap.appendChild(body);
     }
     if (role === "user" && message.at) wrap.appendChild(stamp(message.at));
+    var reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "copy";
+    reply.textContent = "Reply";
+    reply.addEventListener("click", function () { setQuote(message.text || ""); });
+    wrap.appendChild(reply);
     column.appendChild(wrap);
     if (role !== "user" && message.route) pill(message.route, message.reason || "");
     if (message.checks) stepsFor(message.checks, true);
     if (message.approval) addApproval(message.approval);
     log.scrollTop = log.scrollHeight;
     return wrap;
+  }
+
+  var lastDay = "";
+  function markDay(at) {
+    if (!at) return;
+    var day = new Date(at * 1000).toDateString();
+    if (day === lastDay) return;
+    lastDay = day;
+    var line = document.createElement("p");
+    line.className = "day";
+    var now = new Date();
+    var yesterday = new Date(now.getTime() - 86400000);
+    line.textContent = day === now.toDateString() ? "Today" : day === yesterday.toDateString() ? "Yesterday" : day;
+    column.appendChild(line);
+  }
+
+  function setQuote(text) {
+    var hidden = form.querySelector("input[name=quote]");
+    var bar = document.getElementById("quote-bar");
+    if (hidden) hidden.value = text.slice(0, 180);
+    if (bar) {
+      bar.hidden = !text;
+      bar.textContent = text.slice(0, 180);
+    }
+  }
+
+  var mic = document.getElementById("mic");
+  var Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (mic && !Speech) {
+    mic.disabled = true;
+    mic.title = "Speech input is not available in this browser.";
+  } else if (mic && Speech) {
+    mic.addEventListener("click", function () {
+      var heard = new Speech();
+      heard.lang = "en-US";
+      heard.onresult = function (event) {
+        var said = event.results && event.results[0] && event.results[0][0] ? event.results[0][0].transcript : "";
+        box.value = (box.value + " " + said).trim();
+        grow();
+        syncSend();
+      };
+      heard.start();
+    });
   }
 
   function stamp(at) {
@@ -704,6 +777,8 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
     if path == "/ui/chat/delete" and method == "POST":
         _csrf(session, body)
         return _chat_delete(plane, session, body)
+    if path.startswith("/ui/chat/file/") and method == "GET":
+        return _chat_file(plane, session, path)
     if path == "/ui/chat/send" and method == "POST":
         _csrf(session, body)
         return _send(plane, session, body, peer_ip, headers)
@@ -778,16 +853,18 @@ def _send(plane, session, body, peer_ip, headers):
     text = str(body.get("message") or "")
     override = str(body.get("override") or "auto")
     conversation = str(body.get("conversation") or "")
+    quote = str(body.get("quote") or "")
+    image = _store_chat_image(plane, account["id"], body.get("image_bytes"))
     accept = str(headers.get("Accept") or "")
     if "text/event-stream" in accept:
         return Page(
             200,
             "",
-            stream=_sse(plane, account, text, override, peer_ip, conversation),
+            stream=_sse(plane, account, text, override, peer_ip, conversation, quote, image),
             content_type="text/event-stream; charset=utf-8",
         )
     try:
-        events = list(iter_turn(plane, account, text, override, peer_ip, conversation))
+        events = list(iter_turn(plane, account, text, override, peer_ip, conversation, quote, image))
     except SsiosError as exc:
         from ssios.chat import english_connector_error
 
@@ -799,9 +876,48 @@ def _send(plane, session, body, peer_ip, headers):
     return Page(status, _page(session, "Chat", _events_html(session, events)))
 
 
-def _sse(plane, account, text, override, peer_ip, conversation):
+def _store_chat_image(plane, account_id: str, raw) -> str:
+    if not isinstance(raw, bytes) or not raw:
+        return ""
+    from ssios.httpapi import _image_magic
+
+    if not _image_magic(raw) or len(raw) > 80000:
+        raise SsiosError("bad_request", "that image was rejected", 400)
+    suffix = "png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        suffix = "jpg"
+    elif raw.startswith(b"GIF8"):
+        suffix = "gif"
+    elif raw.startswith(b"RIFF"):
+        suffix = "webp"
+    name = "img-" + hashlib.sha256(raw).hexdigest()[:16]
+    root = plane.accounts.home(account_id) / "attachments"
+    root.mkdir(mode=0o700, exist_ok=True)
+    path = root / f"{name}.{suffix}"
+    if not path.exists():
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    return "/ui/chat/file/" + name
+
+
+def _chat_file(plane, session, path: str):
+    from ssios.ui import Page
+
+    name = path.rsplit("/", 1)[-1]
+    if not re.fullmatch(r"img-[0-9a-f]{16}", name):
+        raise SsiosError("not_found", "file not found", 404)
+    root = plane.accounts.home(session["account"]["id"]) / "attachments"
+    kinds = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+    for suffix, content_type in kinds.items():
+        file = root / f"{name}.{suffix}"
+        if file.is_file() and not file.is_symlink():
+            return Page(200, file.read_bytes(), content_type=content_type)
+    raise SsiosError("not_found", "file not found", 404)
+
+
+def _sse(plane, account, text, override, peer_ip, conversation, quote="", image=""):
     try:
-        for event in iter_turn(plane, account, text, override, peer_ip, conversation):
+        for event in iter_turn(plane, account, text, override, peer_ip, conversation, quote, image):
             yield _frame(event)
     except SsiosError as exc:
         from ssios.chat import english_connector_error, failure_hint
@@ -993,6 +1109,11 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
         }
         if message.get("at"):
             item["at"] = message.get("at")
+        if message.get("quote"):
+            item["quote"] = str(message.get("quote") or "")[:180]
+        image = str(message.get("image") or "")
+        if image.startswith("/ui/chat/file/img-"):
+            item["image"] = image
         if message.get("error_code"):
             item["error_code"] = str(message.get("error_code"))
         checks = message.get("checks")
@@ -1109,39 +1230,119 @@ def _chat_delete(plane, session, body) -> "Page":
 
 
 def _conversation_nav(items: list[dict], csrf: str) -> str:
-    now = time.localtime()
-    today = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
-    groups = {"Today": [], "Yesterday": [], "Previous 7 days": [], "Older": []}
-    for item in items:
-        stamp = float(item.get("updated_at") or 0)
-        if stamp >= today:
-            groups["Today"].append(item)
-        elif stamp >= today - 86400:
-            groups["Yesterday"].append(item)
-        elif stamp >= today - 7 * 86400:
-            groups["Previous 7 days"].append(item)
-        else:
-            groups["Older"].append(item)
+    ordered = sorted(items, key=lambda item: float(item.get("created_at") or item.get("updated_at") or 0))
+    main = ordered[0] if ordered else None
+    rest = list(reversed(ordered[1:])) if main else []
+    main_html = "<a class=\"pin\" href=\"/ui/chat\">Main chat</a>"
+    if main:
+        main_html = (
+            "<a class=\"pin\" data-title=\"" + html.escape(str(main.get("title") or "Main chat"), quote=True) + "\" href=\"/ui/chat?conversation="
+            + html.escape(str(main["id"])) + "\">Main chat</a>"
+            + _conv_row(main, csrf)
+        )
+    rows = "".join(_conv_row(item, csrf) for item in rest) or "<li class=\"muted\">No side chats.</li>"
+    return (
+        "<section><h2>Main</h2>" + main_html + "</section>"
+        "<section><h2>Channels</h2><p class=\"muted\">No channels yet.</p></section>"
+        "<section class=\"side-head\"><h2>Side chats</h2><a class=\"plus\" href=\"/ui/chat\" aria-label=\"New chat\">+</a></section>"
+        "<ul class=\"threads\">" + rows + "</ul>"
+    )
+
+
+def _conv_row(item: dict, csrf: str) -> str:
+    conv_id = html.escape(str(item["id"]))
+    title = html.escape(str(item["title"]))
+    return (
+        "<li class=\"conv\" data-title=\"" + html.escape(str(item.get("title") or ""), quote=True) + "\">"
+        "<a href=\"/ui/chat?conversation=" + conv_id + "\">" + title + "</a>"
+        "<details class=\"kebab\"><summary aria-label=\"Rename or delete\">⋯</summary>"
+        f"<form method=\"post\" action=\"/ui/chat/rename\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\">"
+        f"<label>Rename <input name=\"title\" value=\"{title}\"></label><button type=\"submit\">Rename</button></form>"
+        f"<form method=\"post\" action=\"/ui/chat/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\"><button type=\"submit\">Delete</button></form>"
+        "</details></li>"
+    )
+
+
+def _info_pane(plane, session, state: dict) -> str:
+    from ssios.activity import activity_timeline
+    from ssios.reminders import ReminderStore
+    from ssios.vault import list_notes
+
+    account = session["account"]
+    scope = AccountScope(plane, account)
+    model = html.escape(str(getattr(plane.settings, "ollama_model", "") or "local"))
+    route = ""
+    for message in reversed(state.get("messages") or []):
+        if message.get("route"):
+            route = str(message.get("route") or "")
+            break
+    status = "Connected"
+    if route:
+        status += " · " + route
+    reminders = ReminderStore(scope.home).open_items()
+    scheduled = [item for item in reminders if item.get("repeat") or item.get("due")]
+    count = len(scheduled)
+    rows = []
+    for item in sorted(scheduled, key=lambda row: str(row.get("due") or ""))[:8]:
+        repeat = str(item.get("repeat") or "")
+        label = "Daily" if repeat == "daily" else "Weekly" if repeat.startswith("weekly:") else "Once"
+        rows.append(
+            "<li><span class=\"cal\" aria-hidden=\"true\">◷</span><div><strong>"
+            + html.escape(str(item.get("text") or "Reminder"))
+            + "</strong><p>" + html.escape(label) + " · " + html.escape(str(item.get("due") or "")) + "</p></div></li>"
+        )
+    noun = "scheduled task" if count == 1 else "scheduled tasks"
+    overview = (
+        f"<p class=\"count\">{count} {noun}</p><ul class=\"routines\">"
+        + ("".join(rows) or "<li>No scheduled tasks.</li>")
+        + "</ul><p><a href=\"/ui/tasks\">View all</a></p>"
+    )
+    timeline = activity_timeline(plane, account["id"])
     blocks = []
-    for name, rows in groups.items():
-        if not rows:
-            continue
-        lis = []
-        for item in rows:
-            conv_id = html.escape(str(item["id"]))
-            title = html.escape(str(item["title"]))
-            lis.append(
-                "<li class=\"conv\"><a href=\"/ui/chat?conversation=" + conv_id + "\">" + title + "</a>"
-                + "<details class=\"kebab\"><summary aria-label=\"Rename or delete\">⋯</summary>"
-                + f"<form method=\"post\" action=\"/ui/chat/rename\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                + f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\">"
-                + f"<label>Rename <input name=\"title\" value=\"{title}\"></label><button type=\"submit\">Rename</button></form>"
-                + f"<form method=\"post\" action=\"/ui/chat/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                + f"<input type=\"hidden\" name=\"conversation\" value=\"{conv_id}\"><button type=\"submit\">Delete</button></form>"
-                + "</details></li>"
-            )
-        blocks.append("<section><h2>" + name + "</h2><ul>" + "".join(lis) + "</ul></section>")
-    return "<nav class=\"convs\" aria-label=\"Conversations\">" + "".join(blocks) + "</nav>" if blocks else ""
+    for key, heading in (("today", "Today"), ("yesterday", "Yesterday")):
+        lines = []
+        for item in timeline[key]:
+            lines.append("<li><strong>" + html.escape(item["title"]) + "</strong><p>" + html.escape(item["detail"]) + "</p></li>")
+        blocks.append("<h3>" + heading + "</h3><ul class=\"activity\">" + ("".join(lines) or "<li>Nothing recorded.</li>") + "</ul>")
+    pending = scope.list_pending()
+    approval_rows = []
+    for item in pending[:8]:
+        approval_rows.append("<li>Pending " + html.escape(str(item.get("action") or "approval")) + "</li>")
+    decided = []
+    try:
+        for item in scope.approvals().records():
+            if item.get("status") == "pending":
+                continue
+            decided.append(item)
+    except Exception:
+        decided = []
+    for item in decided[-5:]:
+        approval_rows.append("<li>" + html.escape(str(item.get("status") or "decided")) + " " + html.escape(str(item.get("action") or "")) + "</li>")
+    approvals = "<ul class=\"activity\">" + ("".join(approval_rows) or "<li>No approvals.</li>") + "</ul><p><a href=\"/ui/approvals\">Open approvals</a></p>"
+    files = []
+    try:
+        notes = list_notes(plane.settings, account["id"])
+    except Exception:
+        notes = []
+    for note in notes[:12]:
+        files.append("<li>" + html.escape(str(note.get("title") or note.get("path") or "Note")) + "</li>")
+    library = "<h3>Files</h3><ul class=\"activity\">" + ("".join(files) or "<li>No clips yet.</li>") + "</ul><h3>Trash</h3><p>Nothing in trash.</p><p><a href=\"/ui/vault\">Open notes</a></p>"
+    return (
+        "<aside id=\"info-pane\" class=\"info\" aria-label=\"Account details\">"
+        "<div class=\"who\"><span class=\"avatar\" aria-hidden=\"true\">S</span><div><strong>SSIOS</strong>"
+        f"<p class=\"status\">{html.escape(status)} · {model}</p></div></div>"
+        "<div class=\"tabs\" role=\"tablist\">"
+        "<button type=\"button\" role=\"tab\" id=\"tab-overview\" aria-selected=\"true\" aria-controls=\"panel-overview\">Overview</button>"
+        "<button type=\"button\" role=\"tab\" id=\"tab-approvals\" aria-selected=\"false\" aria-controls=\"panel-approvals\">Approvals</button>"
+        "<button type=\"button\" role=\"tab\" id=\"tab-files\" aria-selected=\"false\" aria-controls=\"panel-files\">Files</button>"
+        "</div>"
+        "<div id=\"panel-overview\" role=\"tabpanel\" aria-labelledby=\"tab-overview\">" + overview + "".join(blocks) + "</div>"
+        "<div id=\"panel-approvals\" role=\"tabpanel\" aria-labelledby=\"tab-approvals\" hidden>" + approvals + "</div>"
+        "<div id=\"panel-files\" role=\"tabpanel\" aria-labelledby=\"tab-files\" hidden>" + library + "</div>"
+        "</aside>"
+    )
 
 
 def _chat_page(plane, session, conversation_id: str) -> str:
@@ -1173,21 +1374,31 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         for text in suggestions
     )
     body = (
+        "<div class=\"workspace\">"
         "<section class=\"thread\" aria-label=\"Conversation\">"
+        "<header class=\"thread-head\"><h1>Chat</h1>"
+        "<button type=\"button\" id=\"info-toggle\" aria-controls=\"info-pane\" aria-expanded=\"true\">Details</button></header>"
         "<div id=\"chat-log\" class=\"log\"><div class=\"column\">"
         "<div class=\"empty\" id=\"empty\"><span class=\"mark\" aria-hidden=\"true\">S</span>"
         "<h1>How can I help?</h1><p>Ask about your calendar, mail, or a file on this Mac.</p>"
         "<div class=\"chips\">" + chips + "</div></div></div></div>"
-        "<div class=\"composer\"><form id=\"chat-form\" class=\"composer-box\" method=\"post\" action=\"/ui/chat/send\">"
+        "<div class=\"composer\"><form id=\"chat-form\" class=\"composer-box\" method=\"post\" action=\"/ui/chat/send\" enctype=\"multipart/form-data\">"
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"conversation\" value=\"{conv}\">"
+        "<input type=\"hidden\" name=\"quote\" value=\"\">"
+        "<p id=\"quote-bar\" class=\"quote-bar\" hidden></p>"
         "<textarea name=\"message\" rows=\"1\" aria-label=\"Message\" placeholder=\"Message SSIOS…\" required></textarea>"
-        "<div class=\"composer-bar\"><label class=\"route-chip\"><select name=\"override\" aria-label=\"Route\">"
+        "<div class=\"composer-bar\">"
+        "<label class=\"attach\" aria-label=\"Attach an image\">+<input name=\"image\" type=\"file\" accept=\"image/png,image/jpeg,image/gif,image/webp\"></label>"
+        "<button type=\"button\" id=\"mic\" aria-label=\"Dictate\">Mic</button>"
+        "<label class=\"route-chip\"><select name=\"override\" aria-label=\"Route\">"
         "<option value=\"auto\">Auto</option><option value=\"force_direct\">Local</option>"
         "<option value=\"force_vm\">VM</option></select></label>"
         "<button type=\"submit\" class=\"send primary\" aria-label=\"Send\">"
         "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M3 11.5 21 3l-8.5 18-2.2-7.3z\"/></svg>"
         "</button></div></form>"
         "<p class=\"hint\">Enter to send, Shift+Enter for a new line</p></div></section>"
+        + _info_pane(plane, session, state)
+        + "</div>"
         + "<link rel=\"stylesheet\" href=\"/ui/vendor/katex/katex.min.css\">"
         + "<script type=\"application/json\" id=\"chat-data\">" + blob + "</script>"
         + "<script src=\"/ui/vendor/katex/katex.min.js\"></script>"

@@ -1302,6 +1302,33 @@ form { display: grid; gap: 12px; }
 .badge { display: inline-block; min-width: 1.2em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: 12px; text-align: center; }
 pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .app { height: 100%; display: flex; min-height: 0; }
+.rail { width: 64px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 6px; border-right: 1px solid var(--line); background: var(--bg); }
+.rail a, .rail button { width: 44px; min-height: 36px; display: grid; place-items: center; border-radius: 12px; text-decoration: none; color: var(--ink); font-size: 12px; padding: 4px; }
+.rail a:hover, .rail a:focus-visible, .rail button:hover, .rail button:focus-visible { background: var(--panel); }
+.rail form { margin: 0; }
+.rail-gap { flex: 1; }
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
+.finder { display: grid; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.pin { display: block; padding: 8px 12px; border-radius: 12px; text-decoration: none; color: var(--ink); font-weight: 600; }
+.side-head { display: flex; align-items: center; justify-content: space-between; }
+.plus { text-decoration: none; color: var(--ink); border: 1px solid var(--line); border-radius: 999px; width: 28px; height: 28px; display: grid; place-items: center; }
+.muted { color: var(--muted); font-size: 13px; }
+.threads { list-style: none; margin: 0; padding: 0; }
+.workspace { flex: 1; min-height: 0; display: flex; }
+.thread-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
+.thread-head h1 { margin: 0; font-size: 1rem; }
+.info { width: 300px; flex: none; border-left: 1px solid var(--line); overflow: auto; padding: 16px; background: var(--bg); }
+.who { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tabs button { border-radius: 999px; }
+.tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
+.routines, .activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.routines li, .activity li { display: flex; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+.quote, .quote-bar { border-left: 3px solid var(--line); margin: 0 0 6px; padding: 4px 8px; color: var(--muted); font-size: 13px; }
+.thumb { display: block; max-width: 180px; border-radius: 12px; margin-top: 6px; }
+.day { align-self: center; color: var(--muted); font-size: 12px; }
+.attach input { width: 1px; height: 1px; opacity: 0; position: absolute; }
+.attach { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
 .sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
 .brand { font-weight: 650; color: var(--ink); text-decoration: none; }
 .new-chat { display: block; margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
@@ -1400,8 +1427,11 @@ td, th { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px
 body.sidebar-closed .sidebar { display: none; }
 @media (max-width: 800px) {
   .menu-btn { display: inline-flex; }
-  .sidebar { display: none; position: fixed; inset: 0 auto 0 0; z-index: 4; width: min(260px, 86vw); }
+  .sidebar { display: none; position: fixed; inset: 0 auto 0 64px; z-index: 4; width: min(260px, 86vw); }
   body.sidebar-open .sidebar { display: flex; }
+  .info { display: none; }
+  body.info-open .info { display: block; position: fixed; inset: 0 0 0 64px; z-index: 5; width: auto; }
+  .rail { width: 52px; }
 }
 """
 
@@ -1440,6 +1470,33 @@ NOTICES_JS = r"""
   }
   poll();
   setInterval(poll, 15000);
+  var search = document.getElementById("thread-search");
+  if (search) {
+    search.addEventListener("input", function () {
+      var needle = search.value.trim().toLowerCase();
+      document.querySelectorAll(".conv, .pin").forEach(function (row) {
+        var title = (row.getAttribute("data-title") || row.textContent || "").toLowerCase();
+        row.hidden = needle && title.indexOf(needle) < 0;
+      });
+    });
+  }
+  document.querySelectorAll(".tabs [role=tab]").forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      document.querySelectorAll(".tabs [role=tab]").forEach(function (other) {
+        var on = other === tab;
+        other.setAttribute("aria-selected", String(on));
+        var panel = document.getElementById(other.getAttribute("aria-controls"));
+        if (panel) panel.hidden = !on;
+      });
+    });
+  });
+  var infoToggle = document.getElementById("info-toggle");
+  if (infoToggle) {
+    infoToggle.addEventListener("click", function () {
+      var open = document.body.classList.toggle("info-open");
+      infoToggle.setAttribute("aria-expanded", String(open || window.matchMedia("(min-width: 801px)").matches));
+    });
+  }
 })();
 """
 NOTICES_PATH = "/ui/assets/notices-" + _asset_hash(NOTICES_JS) + ".js"
@@ -1522,17 +1579,44 @@ def _login_page(code: str) -> str:
     )
 
 
+def _rail(session: dict) -> str:
+    csrf = html.escape(str(session.get("csrf") or ""))
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    admin = "<a href=\"/ui/admin\" title=\"Admin\" aria-label=\"Admin\">A</a>" if account.get("role") == "admin" else ""
+    return (
+        "<nav class=\"rail\" aria-label=\"Sections\">"
+        "<a href=\"/ui/chat\" title=\"Chat\" aria-label=\"Chat\">C</a>"
+        "<a href=\"#thread-search\" title=\"Search\" aria-label=\"Search\">S</a>"
+        "<a href=\"/ui/vault\" title=\"Notes\" aria-label=\"Notes\">N</a>"
+        "<a href=\"/ui/memory?project_id=local-summary\" title=\"Memory\" aria-label=\"Memory\">M</a>"
+        "<a href=\"/ui/tasks\" title=\"Tasks\" aria-label=\"Tasks\">T</a>"
+        "<a href=\"/ui/connections\" title=\"Connections\" aria-label=\"Connections\">K</a>"
+        "<a class=\"new-chat\" href=\"/ui/chat\" title=\"New chat\" aria-label=\"New chat\"><span class=\"sr\">New chat</span>+</a>"
+        "<span class=\"rail-gap\"></span>"
+        "<a href=\"/ui/settings\" title=\"Settings\" aria-label=\"Settings\">Set</a>"
+        + admin
+        + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button type=\"submit\" title=\"Sign out\" aria-label=\"Sign out\">Out</button></form>"
+        "</nav>"
+    )
+
+
 def _shell(session: dict, main: str, conversations: str = "") -> str:
     csrf = html.escape(str(session.get("csrf") or ""))
     account = session.get("account") if isinstance(session.get("account"), dict) else {}
     who = html.escape(str(account.get("username") or ""))
     initial = html.escape((str(account.get("username") or "?")[:1] or "?").upper())
     admin = "<a href=\"/ui/admin\">Admin</a>" if account.get("role") == "admin" else ""
+    threads = conversations or (
+        "<section><h2>Main</h2><a class=\"pin\" href=\"/ui/chat\">Main chat</a></section>"
+        "<section><h2>Channels</h2><p class=\"muted\">No channels yet.</p></section>"
+        "<section class=\"side-head\"><h2>Side chats</h2><a class=\"plus\" href=\"/ui/chat\" aria-label=\"New chat\">+</a></section>"
+    )
     return (
-        "<div class=\"app\"><aside id=\"sidebar\" class=\"sidebar\">"
+        "<div class=\"app\">" + _rail(session) + "<aside id=\"sidebar\" class=\"sidebar\">"
         "<a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
-        "<a class=\"new-chat\" href=\"/ui/chat\">New chat</a>"
-        + conversations
+        "<label class=\"finder\">Search<input id=\"thread-search\" type=\"search\" placeholder=\"Search\" aria-label=\"Search threads\"></label>"
+        + threads
         + "<div class=\"dock\"><details class=\"account\"><summary><span class=\"account-row\"><span class=\"avatar\">"
         + initial
         + "</span><span>Signed in as "

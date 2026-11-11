@@ -42,7 +42,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
-| Result cards, per-query time range, technical details | Done earlier | Calendar card tests | 88 |
+| Result cards, per-query time range, technical details | The chat page is three panes: an icon rail, thread list, and a collapsible info pane. Overview lists scheduled tasks and an activity timeline built from the audit log | `tests/test_workspace_ui.py`; screenshots `chat-after-1280.png` and `chat-after-mobile.png` | 90 |
 | Sanitized Markdown and KaTeX, local files only | Vendored renderer. The chat screenshot shows a heading, a list, `$12.50`, the formula, and escaped script text | `tests/test_render.py`; screenshot `chat-render-1280.png` | 90 |
 | Approval page shows status, time, outcome, and a conversation link. Approve disables after click. Expired memory approvals can be retried | Retry stages a new approval. The expired one does not write | `test_expired_memory_approval_can_be_retried` | 90 |
 | README matches `./scripts/ssios` and a test checks the commands | Done | `tests/test_readme_commands.py` | 90 |
@@ -57,9 +57,9 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 ## Total
 
-Mean of the 28 rows above: **90 / 100** (2521 / 28).
+Mean of the 28 rows above: **90 / 100** (2523 / 28).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 227 ran, 220 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 242 ran, 235 passed, 7 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 

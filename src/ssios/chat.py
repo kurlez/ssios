@@ -29,7 +29,7 @@ _SYSTEM = (
 _MAX_MESSAGE = 8000
 
 
-def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conversation_id: str = "") -> Iterator[dict]:
+def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conversation_id: str = "", quote: str = "", image: str = "") -> Iterator[dict]:
     scope = AccountScope(plane, account)
     message = " ".join(str(text or "").split())
     if not message or len(message) > _MAX_MESSAGE:
@@ -48,7 +48,13 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
         record = store.get(conversation_id)
     else:
         record = store.create(message)
-    store.append(record["id"], {"role": "user", "text": message, "route": decision.public()})
+    user_message = {"role": "user", "text": message, "route": decision.public()}
+    quoted = " ".join(str(quote or "").split())[:180]
+    if quoted:
+        user_message["quote"] = quoted
+    if str(image or "").startswith("/ui/chat/file/img-"):
+        user_message["image"] = str(image)
+    store.append(record["id"], user_message)
     yield {"event": "conversation", "data": {"id": record["id"]}}
     yield {"event": "route", "data": decision.public()}
     try:
@@ -1536,6 +1542,11 @@ def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> lis
         if item.get("role") not in ("user", "assistant"):
             continue
         text = str(item.get("text") or "")
+        quoted = str(item.get("quote") or "")
+        if quoted:
+            text = "Quoted message: " + quoted[:180] + "\n" + text
+        if item.get("image"):
+            text = (text + "\nThe user attached an image.").strip()
         if text:
             tail.append({"role": item["role"], "content": text[:2000]})
     return messages + tail[-6:]
