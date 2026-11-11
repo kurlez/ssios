@@ -281,11 +281,11 @@ def _password_form(session, notice: str) -> str:
 
 
 def _signup_page(notice: str) -> str:
-    from ssios.ui import _STYLE
+    from ssios.ui import _style_link
 
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Request an account</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Request an account</h1><p>"
         + html.escape(notice)
         + "</p><form method=\"post\" action=\"/ui/signup\">"
@@ -297,11 +297,11 @@ def _signup_page(notice: str) -> str:
 
 
 def _join_page(code: str, notice: str) -> str:
-    from ssios.ui import _STYLE
+    from ssios.ui import _style_link
 
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Join</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Join with an invite</h1><p>"
         + html.escape(notice)
         + "</p><form method=\"post\" action=\"/ui/join\">"

@@ -1245,6 +1245,17 @@ class HouseholdTest(PlaneTest):
         self.assertIn("How can I help?", page)
         self.assertIn("Message SSIOS", page)
         self.assertIn("Enter to send, Shift+Enter for a new line", page)
+        self.assertNotIn("<details class=\"more\"", page)
+        self.assertIn("menu-label\">More", page)
+        href = page.split('rel="stylesheet" href="', 1)[1].split('"', 1)[0]
+        with urllib.request.urlopen(self.base + href, timeout=5) as response:
+            css = response.read()
+            content_type = response.headers.get("Content-Type", "")
+            self.assertEqual(response.status, 200)
+        self.assertTrue(content_type.startswith("text/css"))
+        self.assertIn(b"text-decoration: none", css)
+        self.assertIn(b"summary::-webkit-details-marker", css)
+        self.assertIn(b".menu-btn { display: none", css)
         _status, owner_view = _get(self.base, "/ui/chat?conversation=" + conv, self.owner)
         self.assertNotIn("What is a microVM?", owner_view)
         status, renamed, _cookie = _form(

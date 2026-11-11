@@ -6,6 +6,7 @@ connection flags. It does not read another account's mail, memory, or tokens.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import time
@@ -502,6 +503,8 @@ CHAT_JS = r"""
 
 """
 
+CHAT_PATH = "/ui/assets/chat-" + hashlib.sha256(CHAT_JS.encode("utf-8")).hexdigest()[:12] + ".js"
+
 
 def handle_household(plane, method: str, path: str, session: dict | None, body: dict, query: dict, peer_ip: str, headers):
     from ssios.ui import Page, _csrf, _page
@@ -525,8 +528,8 @@ def handle_household(plane, method: str, path: str, session: dict | None, body: 
         return None
     if session.get("must_change_password") and path not in {"/ui/password", "/ui/logout"}:
         return Page(200, _page(session, "Change password", _password_form(session, "")))
-    if path == "/ui/assets/chat.js" and method == "GET":
-        return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8")
+    if path == CHAT_PATH and method == "GET":
+        return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control="public, max-age=31536000, immutable")
     if headers.get("Upgrade", "").lower() == "websocket":
         return Page(404, _page(session, "Not available", "<p>WebSocket is not enabled. Chat uses a same-origin event stream.</p>"))
     if path == "/ui/chat" and method == "GET":
@@ -857,7 +860,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "</button></div></form>"
         "<p class=\"hint\">Enter to send, Shift+Enter for a new line</p></div></section>"
         + "<script type=\"application/json\" id=\"chat-data\">" + blob + "</script>"
-        + "<script src=\"/ui/assets/chat.js\"></script>"
+        + "<script src=\"" + CHAT_PATH + "\"></script>"
         + "<noscript><p>The form still sends the message when the script does not run.</p></noscript>"
     )
     return _page(session, "Chat", body, chat=True, conversations=_conversation_nav(conversations, csrf))

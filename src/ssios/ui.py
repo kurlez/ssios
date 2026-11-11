@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from ssios.errors import SsiosError
 from ssios.ingest import _reject_secrets
-from ssios.util import read_json, secure_mkdir, write_json
+from ssios.util import read_json, secure_mkdir, sha256_bytes, write_json
 
 SESSION_COOKIE = "ssios_session"
 CODE_TTL = 120
@@ -31,6 +31,7 @@ class Page:
         stream=None,
         content_type: str = "text/html; charset=utf-8",
         location: str | None = None,
+        cache_control: str | None = None,
     ) -> None:
         self.status = status
         self.body = body
@@ -39,6 +40,7 @@ class Page:
         self.stream = stream
         self.content_type = content_type
         self.location = location
+        self.cache_control = cache_control
 
 
 def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
@@ -48,6 +50,9 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     rejected = _check_origin(plane, headers, method)
     if rejected is not None:
         return rejected
+    asset = _static_asset(method, path)
+    if asset is not None:
+        return asset
     if method == "GET" and path == "/ui/login":
         if _session(plane, headers) is not None:
             return Page(302, "", location="/ui/chat")
@@ -248,7 +253,7 @@ def browser_error_page(detail: str, status: int) -> Page:
     safe = html.escape(detail or "The page could not be shown.")
     body = (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Something went wrong</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Something went wrong</h1><p>"
         + safe
         + "</p><p><a href=\"/ui/login\">Sign in</a> <a href=\"/ui/chat\">Chat</a> "
@@ -312,7 +317,7 @@ def _origin_rejection(received: str, allowed: set[str]) -> Page:
     expected = ", ".join(html.escape(item) for item in sorted(allowed))
     body = (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Origin rejected</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Origin rejected</h1>"
         + f"<p>Origin received: {shown}</p>"
         + f"<p>Allowed origins: {expected}</p>"
@@ -679,8 +684,7 @@ def _settings(plane, session: dict) -> str:
     return _page(session, "Settings", f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
 
 
-_STYLE = """
-<style>
+APP_CSS = """
 :root {
   color-scheme: light dark;
   --bg: #fafafa; --ink: #171717; --muted: #525252; --panel: #ffffff; --line: #e7e7e7;
@@ -696,10 +700,18 @@ _STYLE = """
     --code: #1c1c1f;
   }
 }
+*, *::before, *::after { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; overflow: auto; font: 15px/1.6 -apple-system, "SF Pro", "PingFang SC", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--bg); }
 body.app-body { overflow: hidden; }
-a { color: var(--accent); }
+h1, h2, h3, p, ul, ol, figure { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+a { color: inherit; text-decoration: none; }
+summary { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+button, input, textarea, select { font: inherit; color: inherit; }
+.page a, main a, .msg a { color: var(--accent); }
+.msg ul { list-style: disc; padding-left: 1.25rem; margin: 8px 0; }
 h1 { font-weight: 600; font-size: 1.35rem; margin: 0 0 16px; }
 main, .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
@@ -715,26 +727,29 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .app { height: 100%; display: flex; min-height: 0; }
 .sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
 .brand { font-weight: 650; color: var(--ink); text-decoration: none; }
-.new-chat { margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
+.new-chat { display: block; margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
 .convs { flex: 1; overflow: auto; min-height: 0; }
-.convs h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 8px 4px; }
+.convs h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 12px 4px; }
+.convs ul { margin: 0; padding: 0; list-style: none; }
 .conv { display: flex; align-items: center; gap: 4px; border-radius: 12px; }
-.conv a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; padding: 8px; }
+.conv a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; padding: 8px 12px; }
 .conv:hover, .conv:focus-within { background: var(--panel); }
 .kebab { position: relative; }
 .kebab summary { list-style: none; cursor: pointer; opacity: 0; border-radius: 8px; padding: 4px 8px; }
 .conv:hover .kebab summary, .kebab[open] summary, .kebab summary:focus { opacity: 1; }
 .conv .kebab form { position: absolute; right: 0; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; width: 200px; }
 tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
-.more { margin-top: 8px; }
-.more summary, .dock summary { cursor: pointer; }
-.dock { margin-top: auto; position: relative; padding-top: 8px; }
-.dock summary { display: flex; align-items: center; gap: 8px; }
-.avatar, .mark { width: 28px; height: 28px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--user); font-size: 13px; }
-.popover { position: absolute; bottom: 40px; left: 0; right: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; display: grid; }
-.popover a, .popover button { text-align: left; }
+.dock { margin-top: auto; position: relative; }
+.account-row { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; }
+.account-row:hover { background: var(--panel); }
+.avatar, .mark { width: 28px; height: 28px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--user); font-size: 13px; flex: none; }
+.popover { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); z-index: 5; display: grid; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+.popover a, .popover button { display: block; width: 100%; box-sizing: border-box; margin: 0; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); text-align: left; text-decoration: none; }
+.popover a:hover, .popover button:hover, .popover a:focus-visible, .popover button:focus-visible { background: var(--bg); }
+.popover form { display: block; }
+.menu-label { margin: 8px 12px 4px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.menu-btn { margin: 8px 16px 0; width: max-content; }
+.menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow: auto; }
 .column { max-width: 760px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
@@ -785,18 +800,43 @@ table { width: 100%; border-collapse: collapse; background: var(--panel); }
 td, th { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--line); }
 body.sidebar-closed .sidebar { display: none; }
 @media (max-width: 800px) {
+  .menu-btn { display: inline-flex; }
   .sidebar { display: none; position: fixed; inset: 0 auto 0 0; z-index: 4; width: min(260px, 86vw); }
   body.sidebar-open .sidebar { display: flex; }
 }
-</style>
 """
+
+
+def _asset_hash(text: str) -> str:
+    return sha256_bytes(text.encode("utf-8"))[:12]
+
+
+STYLE_PATH = "/ui/assets/app-" + _asset_hash(APP_CSS) + ".css"
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+def _style_link() -> str:
+    return f'<link rel="stylesheet" href="{STYLE_PATH}">'
+
+
+def _static_asset(method: str, path: str) -> Page | None:
+    if method != "GET":
+        return None
+    if path == STYLE_PATH:
+        return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path.startswith("/ui/assets/chat-") and path.endswith(".js"):
+        from ssios.ui_household import CHAT_JS, CHAT_PATH
+
+        if path == CHAT_PATH:
+            return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    return None
 
 
 def _login_page(code: str) -> str:
     value = html.escape(code)
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sign in</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Sign in</h1><form method=\"post\" action=\"/ui/login\">"
         "<label>Username <input name=\"username\" autocomplete=\"username\"></label>"
         "<label>Password <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>"
@@ -819,16 +859,18 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         "<a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
         "<a class=\"new-chat\" href=\"/ui/chat\">New chat</a>"
         + conversations
-        + "<details class=\"more\"><summary>More</summary>"
+        + "<div class=\"dock\"><details class=\"account\"><summary><span class=\"account-row\"><span class=\"avatar\">"
+        + initial
+        + "</span><span>Signed in as "
+        + who
+        + "</span></span></summary><div class=\"popover\" role=\"menu\">"
+        "<a href=\"/ui/connections\">Connections</a>"
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
+        "<a href=\"/ui/settings\">Settings</a>"
+        + admin
+        + "<p class=\"menu-label\">More</p>"
         "<a href=\"/ui\">Console</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
         "<a href=\"/ui/ingest\">Ingest</a><a href=\"/ui/summary\">Summary</a><a href=\"/ui/approvals\">Approvals</a>"
-        "</details><div class=\"dock\"><details><summary><span class=\"avatar\">"
-        + initial
-        + "</span>Signed in as "
-        + who
-        + "</summary><div class=\"popover\"><a href=\"/ui/connections\">Connections</a>"
-        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a><a href=\"/ui/settings\">Settings</a>"
-        + admin
         + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button type=\"submit\">Sign out</button></form></div></details></div></aside>"
         "<div class=\"stage\"><button type=\"button\" class=\"menu-btn\" id=\"sidebar-toggle\" aria-controls=\"sidebar\" aria-expanded=\"true\">Menu</button>"
@@ -841,6 +883,6 @@ def _page(session: dict, title: str, body: str, *, chat: bool = False, conversat
     main = body if chat else f"<div class=\"page\"><h1>{html.escape(title)}</h1>{body}</div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<title>" + html.escape(title) + "</title>" + _STYLE
+        "<title>" + html.escape(title) + "</title>" + _style_link()
         + "<body class=\"app-body\">" + _shell(session, main, conversations) + "</body></html>"
     )
