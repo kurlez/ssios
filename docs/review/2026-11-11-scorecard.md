@@ -6,7 +6,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
-| Personal-data answers come from tool results | Done for mail, calendar, and Drive reads | `tests/test_chat_accounts.py` `test_failed_or_empty_gmail_never_invents_mail` | 92 |
+| Personal-data answers come from tool results | Done for mail, calendar, and Drive reads. A report uses only the fetched items and is checked before it is shown | `tests/test_chat_accounts.py` `test_failed_or_empty_gmail_never_invents_mail`; `tests/test_read_report.py` | 92 |
 | Failed or empty connector reads do not call the model | Done | Same test: a 403 and an empty inbox leave `complete_chat` uncalled | 95 |
 | Summaries that name a sender, subject, or date outside the results are dropped | Done | `_mentions_are_in_results`; the same test drops Jane Doe / 2023 | 90 |
 | Host clock in every prompt and deterministic date answers | Done earlier | `test_pure_date_questions_use_the_host_clock` | 94 |
@@ -32,7 +32,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | --- | --- | --- | --- |
 | One MemFS repo per account, shared by conversations and routes | Done | `test_saved_name_is_recalled_in_a_new_conversation` checks a new conversation, git log, and the other account | 88 |
 | Core blocks including human.md, plus topic keyword retrieval | Done in `memory_context` | The recall test sees `Used memory: human.md`. `test_a_saved_topic_is_loaded_by_keyword` loads a topic note | 90 |
-| Explicit facts become one approval | Regex facts plus a JSON extract. A value is kept only when the user stated it | `tests/test_memory_panel.py` drops Jane Doe and a page phrase that was not in the message | 90 |
+| Explicit facts become one approval | Regex facts plus a JSON extract. A value is kept only when the user stated it. `记住我叫Kent` writes `human.md`, including when there is no space after 我叫 | `tests/test_memory_panel.py`; `test_chinese_name_is_saved_to_human_and_recalled` | 90 |
 | Auto-commit with undo | Default remains approve-each. Auto writes and undo restores the previous file | `test_auto_saves_and_undo_restores_without_logging_the_fact` | 90 |
 | Chinese remember and forget cues, distinct note files | Done | `test_memory_is_not_written_until_the_owner_approves` rejects `topics/chat/note.md` | 88 |
 | Memory panel lists, searches, renders, and shows history and trust | Edit and forget are on the page. Approve-each stays the default | `test_panel_edit_and_forget` | 90 |

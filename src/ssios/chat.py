@@ -54,6 +54,8 @@ def iter_turn(plane, account: dict, text: str, override: str, peer_ip: str, conv
     try:
         if clock_answer(message, *host_clock(plane, scope.account)):
             yield from _clock_turn(plane, scope, record["id"], message, decision)
+        elif _saved_name_answer(scope, message):
+            yield from _name_turn(scope, record["id"], message)
         elif decision.route == "direct":
             yield from _direct(plane, scope, record["id"], decision)
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
@@ -146,6 +148,30 @@ def _track_goals(plane, scope: AccountScope, conversation_id: str, message: str,
     )
     for chip in chips:
         yield {"event": "goal", "data": chip}
+
+
+def _saved_name_answer(scope: AccountScope, message: str) -> str:
+    from ssios.account_memory import name_question, stored_name
+
+    if not name_question(message):
+        return ""
+    name = stored_name(scope)
+    return f"Your name is {name}." if name else ""
+
+
+def _name_turn(scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
+    from ssios.scope import memory_excerpt
+
+    memory_excerpt(scope, message)
+    answer = _saved_name_answer(scope, message)
+    scope.chat().append(
+        conversation_id,
+        {"role": "assistant", "text": answer, "route": {"route": "direct", "reason": "The saved name answered.", "source": "rule"}},
+    )
+    yield {"event": "outcome", "data": {"text": answer}}
+    files = list(getattr(scope, "_last_memory_files", []) or [])
+    if files:
+        yield {"event": "memory", "data": {"files": files}}
 
 
 def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:
@@ -450,6 +476,11 @@ def _memory(plane, scope: AccountScope, conversation_id: str, message: str, peer
 
     facts = collect_facts(message, plane.llm)
     files = files_for_facts(scope, facts)
+    if facts and not files:
+        text = "Already saved in human.md. Nothing new was written."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
     if not files:
         files = [note_document(reminder_text(message), now)]
     yield from _propose_files(scope, conversation_id, files, peer_ip, forget=False)
@@ -493,8 +524,9 @@ def _propose_files(scope, conversation_id: str, files: list[dict], peer_ip: str,
     store = scope.memory()
     proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
     approval = scope.create_memory_approval(proposal)
-    preview = "Save to memory?\n" + "\n".join(item["path"] for item in files) + "\nNothing is written until you approve it.\n\n" + files[0]["content"]
-    scope.chat().append(conversation_id, {"role": "assistant", "text": "Memory is staged. It is not written until you approve it.", "approval_id": approval["id"]})
+    paths = ", ".join(item["path"] for item in files)
+    preview = f"Waiting for your approval to save {paths}.\nNothing is written until you approve it.\n\n" + files[0]["content"]
+    scope.chat().append(conversation_id, {"role": "assistant", "text": f"Waiting for your approval to save {paths}. Nothing is written until you approve it.", "approval_id": approval["id"]})
     yield _approval_event(approval, preview)
     del peer_ip, forget
 
@@ -521,7 +553,7 @@ def _auto_commit(scope, conversation_id: str, files: list[dict], peer_ip: str) -
     )
     undo_id = push_undo(scope.home, before)
     paths = ", ".join(str(item["path"]) for item in files)
-    text = "Saved to memory: " + paths + "."
+    text = "Saved to memory (" + paths + ")."
     scope.chat().append(conversation_id, {"role": "assistant", "text": text})
     scope.plane.security_audit.write(actor=scope.account_id, ip=peer_ip or "127.0.0.1", action="memory.auto", target=undo_id, result="ok")
     yield {"event": "outcome", "data": {"text": text}}
@@ -698,7 +730,14 @@ def _read_tool(scope, conversation_id: str, tool: str, arguments: dict, limits: 
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     count = _result_count(blocks)
     reply = ""
-    if count and not followup and not follow_vm:
+    report = str(arguments.get("view") or "") == "report"
+    if count and report and not followup and not follow_vm:
+        reply = _sourced_report(scope.plane, blocks, arguments)
+        if reply:
+            blocks[0]["collapsed"] = True
+        elif blocks:
+            blocks[0]["note"] = "The report was not accepted, so this is the list."
+    elif count and not followup and not follow_vm:
         reply = _grounded_reply(scope.plane, user_message, summary, blocks, scope.account)
     stored = {"role": "assistant", "text": summary, "results": blocks, "route": {"route": "connector", "reason": "Read without an approval.", "source": "policy"}}
     if reply:
@@ -830,6 +869,31 @@ def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], accou
     return reply[:500]
 
 
+def _sourced_report(plane, blocks: list[dict], arguments: dict) -> str:
+    from ssios.read_report import compose_report
+
+    items = []
+    for block in blocks:
+        for event in block.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            items.append(
+                {
+                    "sender": event.get("meta") or event.get("location") or "",
+                    "subject": event.get("title") or "",
+                    "date": event.get("when") or "",
+                    "body": event.get("description") or "",
+                }
+            )
+    intent = {
+        "mode": "report",
+        "capped": bool(arguments.get("capped")),
+        "target": arguments.get("target") if isinstance(arguments.get("target"), dict) else {"unit": "chars", "n": 400},
+        "language": arguments.get("language") or "en",
+    }
+    return compose_report(plane.llm, items, intent) or ""
+
+
 def _reply_fits(reply: str, count: int) -> bool:
     folded = reply.casefold()
     empty_claim = ("no events", "no event", "nothing on", "没有日程", "没有安排", "没有任何", "没有会")
@@ -843,18 +907,20 @@ def _reply_fits(reply: str, count: int) -> bool:
 def _mail_blocks(arguments: dict, text: str) -> list[dict]:
     messages = [_mail_card(item) for item in _marked_rows(text, "mail-header")]
     query = str(arguments.get("q") or "")
-    header = "Inbox, last 7 days" if "newer_than:7d" in query else "Inbox, latest 50"
+    limit = int(arguments.get("limit") or 50)
+    header = "Inbox, last 7 days" if "newer_than:7d" in query else f"Inbox, latest {limit}"
     if "is:unread" in query:
         header = "Unread, " + header
     if not messages:
         query = " ".join(query.split()) or "in:inbox"
         return [{"kind": "mail", "header": header, "summary": f"No messages matched {query}", "events": []}]
+    note = "The maximum is 100." if arguments.get("capped") else ""
     if str(arguments.get("view") or "") == "senders":
         senders = _sender_rows(messages)
         summary = _count_line(header, len(senders), "sender")
-        return [{"kind": "mail", "header": header, "summary": summary, "events": senders}]
+        return [{"kind": "mail", "header": header, "summary": summary, "note": note, "events": senders}]
     summary = _count_line(header, len(messages), "message")
-    return [{"kind": "mail", "header": header, "summary": summary, "events": messages}]
+    return [{"kind": "mail", "header": header, "summary": summary, "note": note, "events": messages}]
 
 
 def _drive_blocks(arguments: dict, text: str, zone_name: str) -> list[dict]:
@@ -889,7 +955,8 @@ def _marked_rows(text: str, marker: str) -> list[dict]:
 def _mail_card(item: dict) -> dict:
     subject = str(item.get("subject") or "").strip() or "(no subject)"
     sender = str(item.get("from") or "").strip()
-    return {"title": subject, "meta": sender, "when": _mail_when(str(item.get("date") or "")), "location": "", "description": ""}
+    snippet = str(item.get("snippet") or "").strip()[:400]
+    return {"title": subject, "meta": sender, "when": _mail_when(str(item.get("date") or "")), "location": "", "description": snippet}
 
 
 def _sender_rows(messages: list[dict]) -> list[dict]:
@@ -1078,13 +1145,47 @@ def _fetch_plan(plane, message: str, service: str, account: dict | None = None) 
         "max_calls": int(plane.settings.connector_max_calls),
     }
     if service == "gmail":
-        return "gmail.search", plan_mail(message), wide, None
+        planned = plan_mail(message)
+        return "gmail.search", planned, _sized(plane, wide, planned), None
     if service == "calendar":
-        return _calendar_plan(plane, message, limits, account)
+        tool, arguments, chosen, followup = _calendar_plan(plane, message, limits, account)
+        arguments = _with_report(message, arguments)
+        return tool, arguments, _sized(plane, chosen, arguments), followup
     planned = plan_drive(message)
+    planned = _with_report(message, planned)
     if planned.get("mode") == "folder_id":
         wide = {**wide, "folder_ids": [planned["folder_id"]]}
-    return "drive.search", planned, wide, None
+    return "drive.search", planned, _sized(plane, wide, planned), None
+
+
+def _with_report(message: str, arguments: dict) -> dict:
+    from ssios.read_report import output_intent
+
+    intent = output_intent(message)
+    merged = dict(arguments)
+    if intent["mode"] == "report":
+        merged["view"] = "report"
+        merged["target"] = intent["target"]
+        merged["language"] = intent["language"]
+        merged["capped"] = intent["capped"]
+    if intent["count"]:
+        merged["limit"] = intent["count"]
+        merged["capped"] = intent["capped"]
+    return merged
+
+
+def _sized(plane, limits: dict, arguments: dict) -> dict:
+    explicit = arguments.get("limit")
+    asked = int(explicit or limits.get("max_items") or 5)
+    asked = max(1, min(asked, 100))
+    room = max(1, int(plane.settings.connector_max_calls) - 1)
+    used = min(asked, room)
+    if explicit is not None and used < int(explicit):
+        arguments["limit"] = used
+    sized = {**limits, "max_items": used, "max_calls": min(int(plane.settings.connector_max_calls), used + 1)}
+    if arguments.get("view") == "report":
+        sized["max_bytes"] = min(int(plane.settings.connector_max_bytes), max(int(limits.get("max_bytes") or 4096), used * 800))
+    return sized
 
 
 def _calendar_plan(plane, message: str, limits: dict, account: dict | None = None) -> tuple[str, dict, dict, dict | None]:

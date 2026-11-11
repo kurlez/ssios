@@ -170,9 +170,11 @@ CHAT_JS = r"""
         reply.className = "reply";
         reply.textContent = message.reply;
         content.appendChild(reply);
+      } else if (!(message.results && message.results.length) && (message.error_code || String(message.text || "").indexOf("Error code:") >= 0)) {
+        showError(content, message.text || "");
+      } else if (!(message.results && message.results.length)) {
+        renderMarkdown(content, message.text || "");
       }
-      else if (message.error_code || String(message.text || "").indexOf("Error code:") >= 0) showError(content, message.text || "");
-      else renderMarkdown(content, message.text || "");
       body.appendChild(content);
       var tools = document.createElement("div");
       tools.className = "tools";
@@ -220,6 +222,15 @@ CHAT_JS = r"""
         note.textContent = block.note;
         section.appendChild(note);
       }
+      var stack = section;
+      if (block.collapsed) {
+        var folder = document.createElement("details");
+        var label = document.createElement("summary");
+        label.textContent = "Messages";
+        folder.appendChild(label);
+        section.appendChild(folder);
+        stack = folder;
+      }
       (block.events || []).forEach(function (item) {
         var card = document.createElement("article");
         card.className = "event-card";
@@ -266,7 +277,7 @@ CHAT_JS = r"""
           details.appendChild(body);
           card.appendChild(details);
         }
-        section.appendChild(card);
+        stack.appendChild(card);
       });
       target.appendChild(section);
     });
@@ -816,8 +827,12 @@ def _events_html(session, events: list[dict]) -> str:
         elif name == "isolation":
             technical.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
         elif name == "results":
-            parts.append("<p class=\"outcome\">" + html.escape(str(data.get("text") or "")) + "</p>")
-            parts.append(_result_blocks_html(data.get("blocks") or []))
+            blocks = data.get("blocks") or []
+            text = str(data.get("text") or "")
+            summaries = [str(block.get("summary") or "") for block in blocks if isinstance(block, dict)]
+            if text and text not in summaries:
+                parts.append("<p class=\"outcome\">" + html.escape(text) + "</p>")
+            parts.append(_result_blocks_html(blocks))
             if data.get("reply"):
                 parts.append("<p class=\"reply\">" + html.escape(str(data.get("reply") or "")) + "</p>")
         elif name == "outcome":
@@ -887,8 +902,11 @@ def _result_blocks_html(blocks) -> str:
             cards.append(f"<article class=\"event-card\"><h3>{title}</h3>{extra}</article>")
         note = html.escape(str(block.get("note") or ""))
         note_html = f"<p class=\"hint\">{note}</p>" if note else ""
+        body = "".join(cards)
+        if block.get("collapsed"):
+            body = f"<details><summary>Messages</summary>{body}</details>"
         chunks.append(
-            f"<section class=\"result-block\"><h2><time datetime=\"{start}\"></time><time datetime=\"{end}\"></time>{summary or header}</h2>{note_html}{''.join(cards)}</section>"
+            f"<section class=\"result-block\"><h2><time datetime=\"{start}\"></time><time datetime=\"{end}\"></time>{summary or header}</h2>{note_html}{body}</section>"
         )
     return "".join(chunks)
 

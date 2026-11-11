@@ -558,6 +558,14 @@ class MockLLM:
         if cancel_event.is_set() or time.monotonic() >= deadline:
             raise FlowInterrupt("timeout")
         blob = json.dumps(messages, ensure_ascii=False)
+        if "REPORT-REQUEST" in blob:
+            script = getattr(self, "report_script", None)
+            if script:
+                item = script.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                return str(item)
+            return ""
         if "FACT-EXTRACT" in blob:
             script = getattr(self, "fact_script", None)
             if script:

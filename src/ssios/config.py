@@ -181,7 +181,7 @@ def load_settings(
     if not isinstance(raw_enabled, list) or any(item not in ("drive", "gmail", "calendar") for item in raw_enabled):
         raise SsiosError("config_invalid", "connectors.enabled must list drive, gmail, and/or calendar", 500)
     connectors_enabled = tuple(str(item) for item in raw_enabled)
-    connector_max_calls = int(connectors.get("max_calls", 20))
+    connector_max_calls = int(connectors.get("max_calls", 40))
     connector_max_bytes = int(connectors.get("max_bytes", 200000))
     if not 1 <= connector_max_calls <= 100 or not 1 <= connector_max_bytes <= 2000000:
         raise SsiosError("config_invalid", "connector budget is out of range", 500)

@@ -1090,7 +1090,7 @@ class HouseholdTest(PlaneTest):
         self.assertNotIn("HARBOR", owner)
         again = self._approve(self.ada, pending)
         self.assertIn("Approved", again)
-        self.assertIn("Saved to memory:", again)
+        self.assertIn("Saved to memory", again)
         self.assertIn("topics/chat/", again)
         self.assertIn("Back to the conversation", again)
         self.assertNotIn("no longer pending", again)
@@ -1748,6 +1748,55 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Tomorrow — no reminders.", tomorrow)
         self.assertNotIn("Chase", tomorrow)
         self.assertIn("Calendar is not connected.", tomorrow)
+
+    def test_chinese_name_is_saved_to_human_and_recalled(self) -> None:
+        phrases = (
+            "记住我叫Kent",
+            "记住：我叫Kent",
+            "我叫Kent，记住",
+            "请记住我的名字是Kent",
+            "remember my name is Kent",
+        )
+        first = self._send(self.ada, phrases[0])
+        self.assertIn("Waiting for your approval", first)
+        self.assertIn("human.md", first)
+        self.assertIn("- name: Kent", first)
+        self.assertIn("Nothing is written until you approve", first)
+        _status, before = _get(self.base, "/ui/memory?path=human.md", self.ada)
+        self.assertNotIn("Kent", before)
+        self.assertIn("ssios seed account memory", before)
+        approved = self._approve(self.ada, first)
+        self.assertIn("Saved to memory (human.md)", approved)
+        _status, panel = _get(self.base, "/ui/memory?path=human.md", self.ada)
+        self.assertIn("- name: Kent", panel)
+        self.assertIn("ssios approved memory", panel)
+        self.assertNotIn("Kent", (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8"))
+        repo = self.state / "accounts" / self._ada_id() / "memory" / "notes" / "repo"
+        shown = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:human.md"], text=True)
+        self.assertIn("- name: Kent", shown)
+        log = subprocess.check_output(["git", "-C", str(repo), "log", "--oneline"], text=True)
+        self.assertGreaterEqual(len(log.splitlines()), 2)
+        for index, phrase in enumerate(phrases[1:], start=2):
+            self.plane.accounts.add_member(f"ada{index}", OTHER)
+            cookie = self._login(f"ada{index}", OTHER)
+            page = self._send(cookie, phrase)
+            self.assertIn("Waiting for your approval to save human.md", page, phrase)
+            self.assertIn("- name: Kent", page)
+            self._approve(cookie, page)
+            _status, member_panel = _get(self.base, "/ui/memory?path=human.md", cookie)
+            self.assertIn("- name: Kent", member_panel)
+        asked = self._send(self.ada, "我叫什么？")
+        self.assertIn("Your name is Kent.", asked)
+        self.assertIn("Used memory: human.md", asked)
+        from ssios.chat import _messages
+        from ssios.scope import AccountScope
+
+        scope = AccountScope(self.plane, self.plane.accounts.users[self._ada_id()])
+        conversation = asked.split('class="conversation">', 1)[1].split("<", 1)[0]
+        prompt = json.dumps(_messages(scope, conversation, ""), ensure_ascii=False)
+        self.assertIn("MEMORY-CONTEXT", prompt)
+        self.assertIn("human.md", prompt)
+        self.assertIn("Kent", prompt)
 
     def test_expired_memory_approval_can_be_retried(self) -> None:
         pending = self._send(self.ada, "remember the fixture code is QUAY")

@@ -84,6 +84,29 @@ _STATEMENT = re.compile(
 )
 
 
+def stored_name(scope) -> str:
+    """The name bullet in human.md, or empty when the account has not saved one."""
+    text = _read(scope.memory(), scope.project_id(), "human.md")
+    for line in _body(text).splitlines():
+        match = re.match(r"^-\s+name:\s*(.+)$", line.strip(), re.IGNORECASE)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
+
+
+def name_question(message: str) -> bool:
+    folded = str(message or "").casefold().rstrip("？?").strip()
+    return folded in {
+        "我叫什么",
+        "我叫什么名字",
+        "我的名字是什么",
+        "我的名字叫什么",
+        "what is my name",
+        "what's my name",
+        "whats my name",
+    }
+
+
 def collect_facts(message: str, llm=None) -> list[dict]:
     """Regex facts plus a validated model extract. Only the user message is passed in."""
     facts = explicit_facts(message)
@@ -195,8 +218,12 @@ def explicit_facts(message: str) -> list[dict]:
     """Facts the user stated. Tool text is never passed here."""
     text = " ".join(str(message or "").split())
     facts = []
-    name = re.search(r"(?:my name is|i am called|我叫|我的名字是)\s+([A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff ._-]{0,40})", text, re.IGNORECASE)
-    if name:
+    name = re.search(
+        r"(?:my name is|i am called|我的名字是|我叫)\s*([A-Za-z][A-Za-z0-9'_-]{0,40}|[\u4e00-\u9fff]{1,8})",
+        text,
+        re.IGNORECASE,
+    )
+    if name and name.group(1).casefold() not in {"what", "who", "什么", "啥"}:
         facts.append({"path": "human.md", "key": "name", "value": name.group(1).strip(" .")})
     prefer = re.search(r"(?:i prefer|i like|我喜欢|我偏好)\s+([^。.]{1,80})", text, re.IGNORECASE)
     if prefer:

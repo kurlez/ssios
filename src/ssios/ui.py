@@ -720,7 +720,7 @@ def _approval_outcome(scope, record: dict, result: dict | None) -> str:
         except SsiosError:
             paths = ""
         if paths:
-            return "Saved to memory: " + paths
+            return "Saved to memory (" + paths + ")."
         return "Saved to memory."
     if action == "vault.clip":
         return "Saved the clip."

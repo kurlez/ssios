@@ -51,7 +51,7 @@ class MemoryWriteTest(unittest.TestCase):
         set_write_mode(self.scope.home, "auto")
         events = list(iter_turn(self.case.plane, self.account, "remember that my name is Harbor", "auto", "127.0.0.1"))
         saved = "\n".join(str((event.get("data") or {}).get("text") or "") for event in events)
-        self.assertIn("Saved to memory: human.md", saved)
+        self.assertIn("Saved to memory (human.md)", saved)
         self.assertNotIn("Synthetic local answer", saved)
         self.assertIn("- name: Harbor", self._human())
         undo = next(event["data"]["id"] for event in events if event.get("event") == "memory_undo")
@@ -84,7 +84,7 @@ class MemoryWriteTest(unittest.TestCase):
             json.dumps({"facts": [{"path": "human.md", "key": "works", "value": "Harbor Desk"}, {"path": "human.md", "key": "name", "value": "Jane Doe"}]})
         ]
         saved = self._say("I work at Harbor Desk")
-        self.assertIn("Saved to memory: human.md", saved)
+        self.assertIn("Saved to memory (human.md)", saved)
         text = self._human()
         self.assertIn("- works: Harbor Desk", text)
         self.assertNotIn("Jane", text)

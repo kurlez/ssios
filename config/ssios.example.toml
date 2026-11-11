@@ -72,7 +72,7 @@ core_token_budget = 2000
 # Read-only Google connectors. Empty means every fetch is denied.
 # enabled = ["drive", "gmail", "calendar"]
 enabled = []
-max_calls = 20
+max_calls = 40
 max_bytes = 200000
 
 [skills]

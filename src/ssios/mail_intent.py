@@ -11,10 +11,16 @@ _CN_WEEK = ("最近7天", "最近七天", "过去7天", "过去一周", "最近�
 
 
 def plan_mail(message: str) -> dict:
-    """``in:inbox`` and the latest 50. A named week adds ``newer_than:7d``. Senders are counted later."""
+    """``in:inbox`` and a requested count. A report asks for a sourced summary, not only cards."""
+    from ssios.read_report import output_intent
+
     text = str(message or "")
     folded = text.casefold()
-    view = "senders" if ("发件人" in text or "寄件人" in text or _SENDERS.search(folded)) else "list"
+    intent = output_intent(text)
+    if "发件人" in text or "寄件人" in text or _SENDERS.search(folded):
+        view = "senders"
+    else:
+        view = intent["mode"]
     parts = ["in:inbox"]
     if "未读" in text or _UNREAD.search(folded):
         parts.append("is:unread")
@@ -22,4 +28,15 @@ def plan_mail(message: str) -> dict:
         parts.append("newer_than:7d")
     elif "今天" in text or re.search(r"\btoday\b", folded):
         parts.append("newer_than:1d")
-    return {"q": " ".join(parts), "view": view}
+    planned = {
+        "q": " ".join(parts),
+        "view": view,
+        "capped": bool(intent["capped"]),
+        "target": intent["target"],
+        "language": intent["language"],
+    }
+    if intent["count"]:
+        planned["limit"] = intent["count"]
+    elif view == "report":
+        planned["limit"] = 20
+    return planned

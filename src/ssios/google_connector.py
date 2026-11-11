@@ -1263,20 +1263,21 @@ class GoogleConnector:
         if status >= 400:
             self._raise_oauth(account_id, "gmail", "gmail.list", status, raw, "")
         lines = []
+        full = str(arguments.get("view") or "") == "report"
         for item in messages[: limits["max_items"]]:
-            header = self._gmail_metadata(account_id, str(item.get("id")), access)
+            header = self._gmail_metadata(account_id, str(item.get("id")), access, full=full)
             lines.append(_mail_line(header))
         return _bounded("\n".join(lines), limits)
 
-    def _gmail_metadata(self, account_id: str, message_id: str, access: str) -> dict:
+    def _gmail_metadata(self, account_id: str, message_id: str, access: str, *, full: bool = False) -> dict:
         from ssios.logsafe import log_read
 
         if not message_id or "/" in message_id:
             raise SsiosError("connector_grant_denied", "message id rejected", 403)
         url = self.endpoints.api_base + "/gmail/v1/users/me/messages/" + urllib.parse.quote(message_id, safe="")
-        params = {"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]}
+        params = {"format": "full" if full else "metadata", "metadataHeaders": ["From", "Subject", "Date"]}
         status, raw = self._exchange("GET", url, access, params, None)
-        header = {"from": "", "subject": "", "date": ""}
+        header = {"from": "", "subject": "", "date": "", "snippet": ""}
         if status < 400:
             try:
                 payload = json.loads(raw.decode("utf-8"))
@@ -1284,6 +1285,7 @@ class GoogleConnector:
                 payload = {}
             if isinstance(payload, dict):
                 header = _mail_header(payload)
+                header["snippet"] = _mail_snippet(payload)[:400]
         log_read(account_id=account_id, service="gmail", endpoint="gmail.metadata", status=status, query="format:metadata", count=1 if status < 400 else 0)
         if status >= 400:
             self._raise_oauth(account_id, "gmail", "gmail.metadata", status, raw, "")
@@ -1426,7 +1428,7 @@ def _normalize_limits(limits: dict, settings) -> dict:
         max_calls = int(limits.get("max_calls", settings.connector_max_calls))
     except (TypeError, ValueError) as exc:
         raise SsiosError("connector_grant_denied", "grant rejected", 400) from exc
-    if not 1 <= max_items <= 50 or not 1 <= max_bytes <= int(settings.connector_max_bytes):
+    if not 1 <= max_items <= 100 or not 1 <= max_bytes <= int(settings.connector_max_bytes):
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
     if not 1 <= max_calls <= int(settings.connector_max_calls):
         raise SsiosError("connector_grant_denied", "grant limit rejected", 400)
@@ -1540,11 +1542,37 @@ def _mail_header(payload: dict) -> dict:
     return found
 
 
+def _mail_snippet(payload: dict) -> str:
+    snippet = str(payload.get("snippet") or "")
+    body = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    plain = _plain_text(body)
+    return plain or snippet
+
+
+def _plain_text(part: dict) -> str:
+    if str(part.get("mimeType") or "") == "text/plain":
+        data = part.get("body") if isinstance(part.get("body"), dict) else {}
+        raw = data.get("data")
+        if isinstance(raw, str) and raw:
+            import base64
+            try:
+                return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+            except (ValueError, UnicodeError):
+                return ""
+    for child in part.get("parts") or []:
+        if isinstance(child, dict):
+            found = _plain_text(child)
+            if found:
+                return found
+    return ""
+
+
 def _mail_line(header: dict) -> str:
     payload = {
         "from": str(header.get("from") or ""),
         "subject": str(header.get("subject") or ""),
         "date": str(header.get("date") or ""),
+        "snippet": str(header.get("snippet") or "")[:400],
     }
     title = payload["subject"] or "(no subject)"
     return title + " || mail-header " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
