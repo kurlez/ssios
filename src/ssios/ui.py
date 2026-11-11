@@ -558,6 +558,7 @@ def _approval_status_page(plane, session, scope, approval_id: str, result: dict 
         "<h2>" + html.escape(label) + "</h2>"
         + (f"<p>When: <time datetime=\"{html.escape(when)}\">{html.escape(when)}</time> ({html.escape(zone_name)})</p>" if when else "")
         + f"<p>{html.escape(outcome)}</p>"
+        + f"<p>Stored status: {html.escape(status)}</p>"
         + retry
         + extra
         + f"<p><a href=\"{back}\">Back to the conversation</a></p>",
