@@ -106,24 +106,30 @@ class DropImportTest(PlaneTest):
                 source="drag",
                 peer_ip="127.0.0.1",
             )
-            self.assertIn("已拒绝", chinese["reason"])
+            self.assertEqual(chinese["reason"], "不支持拖入文件夹，请拖入文件。")
+            from ssios.library import add_folder, list_items, metadata
+
+            placed = add_folder(self.plane, self.account["id"], self.library_id, "Harbor", "127.0.0.1")
+            filed = import_relative(
+                self.plane,
+                self.account["id"],
+                self.library_id,
+                day / "harbor.png",
+                relative="harbor.png",
+                source="drag",
+                peer_ip="127.0.0.1",
+                folder_id=placed["id"],
+            )
+            self.assertEqual(filed["status"], "saved", filed)
+            items = list_items(self.plane, self.account["id"], self.library_id, folder=placed["id"])
+            self.assertEqual(items[0]["name"], "harbor.png")
+            folders = metadata(self.plane, self.account["id"], self.library_id)["folders"]
+            self.assertEqual({row["name"] for row in folders}, {"Harbor"})
         saved = [row for row in results if row["status"] == "saved"]
         rejected = [row for row in results if row["status"] == "rejected"]
-        self.assertEqual([row["path"] for row in saved], ["Album/Day/harbor.png"])
+        self.assertEqual(saved, [])
+        self.assertTrue(any(row["code"] == "drop_directory" for row in rejected))
         self.assertTrue(any(row["path"].endswith(".secret.png") for row in rejected))
-        self.assertTrue(any(row["path"].endswith("notes.zip") for row in rejected))
-        from ssios.library import metadata
-
-        folders = metadata(self.plane, self.account["id"], self.library_id)["folders"]
-        names = {row["name"] for row in folders}
-        self.assertEqual(names, {"Album", "Day"})
-        album = next(row for row in folders if row["name"] == "Album")
-        day_row = next(row for row in folders if row["name"] == "Day")
-        self.assertEqual(day_row["parent_id"], album["id"])
-        from ssios.library import list_items
-
-        items = list_items(self.plane, self.account["id"], self.library_id, folder=day_row["id"])
-        self.assertEqual(items[0]["name"], "harbor.png")
 
     def test_streamed_reimport_is_a_version_and_oversize_stops(self) -> None:
         import tempfile
@@ -175,7 +181,8 @@ class PlaywrightDropTest(PlaneTest):
             self.skipTest("Chrome is not installed")
         from test_ui import _form
 
-        self.plane.accounts.add_member("ada", "other-horse-stable")
+        account = self.plane.accounts.add_member("ada", "other-horse-stable")
+        self.plane.skills.set_account(account["id"], language="zh")
         status, _page, cookie = _form(self.base, "/ui/login", {"username": "ada", "password": "other-horse-stable"})
         self.assertEqual(status, 200, _page)
         token = cookie.split(";", 1)[0].split("=", 1)[1]
@@ -226,17 +233,18 @@ class PlaywrightDropTest(PlaneTest):
                 }""",
                 [_b64(PNG), _b64(PNG_B), _b64(b"PK\x03\x04notes")],
             )
-            page.evaluate("() => window.__drop(['one.png', 'two.png'])")
-            page.wait_for_selector("#drop-summary")
-            page.wait_for_function("() => document.querySelectorAll('#drop-log li.ok').length >= 2")
-            page.evaluate("() => window.__drop(['Album'])")
-            page.wait_for_function("() => (document.getElementById('drop-log').innerText || '').includes('notes.zip')")
+            page.evaluate("() => window.__drop(['one.png', 'Album', 'two.png'])")
+            page.wait_for_function(
+                "() => document.querySelectorAll('#drop-log li.ok').length >= 2"
+                " && (document.getElementById('drop-log').innerText || '').includes('不支持拖入文件夹')"
+            )
             text = page.inner_text("#drop-log")
             self.assertIn("one.png", text)
             self.assertIn("two.png", text)
-            self.assertIn("Album/harbor.png", text)
-            self.assertIn("notes.zip", text)
-            self.assertIn("Saved", text)
+            self.assertIn("Album", text)
+            self.assertIn("不支持拖入文件夹，请拖入文件。", text)
+            self.assertNotIn("harbor.png", text)
+            self.assertNotIn("notes.zip", text)
             browser.close()
 
 

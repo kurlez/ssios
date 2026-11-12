@@ -45,31 +45,18 @@ LIBRARY_JS = r"""
     for (var i = 0; i < types.length; i += 1) if (types[i] === "Files") return true;
     return false;
   }
-  function walk(entry, prefix) {
+  function oneEntry(entry) {
     return new Promise(function (resolve) {
       if (!entry) { resolve([]); return; }
-      if (entry.isFile) {
-        entry.file(function (file) { resolve([{file: file, path: prefix + entry.name}]); });
+      if (entry.isDirectory) {
+        resolve([{path: entry.name || "", directory: true}]);
         return;
       }
-      if (!entry.isDirectory || !entry.createReader) { resolve([]); return; }
-      var reader = entry.createReader();
-      var pending = [];
-      function read() {
-        reader.readEntries(function (batch) {
-          if (!batch.length) {
-            Promise.all(pending.map(function (child) { return walk(child, prefix + entry.name + "/"); })).then(function (groups) {
-              var flat = [];
-              groups.forEach(function (group) { flat = flat.concat(group); });
-              resolve(flat);
-            });
-            return;
-          }
-          pending = pending.concat(Array.prototype.slice.call(batch));
-          read();
-        });
+      if (entry.isFile) {
+        entry.file(function (file) { resolve([{file: file, path: file.name || entry.name}]); });
+        return;
       }
-      read();
+      resolve([]);
     });
   }
   function fromTransfer(dataTransfer) {
@@ -80,7 +67,7 @@ LIBRARY_JS = r"""
       if (entry) entries.push(entry);
     });
     if (entries.length) {
-      return Promise.all(entries.map(function (entry) { return walk(entry, ""); })).then(function (groups) {
+      return Promise.all(entries.map(oneEntry)).then(function (groups) {
         var flat = [];
         groups.forEach(function (group) { flat = flat.concat(group); });
         return flat;
@@ -93,6 +80,12 @@ LIBRARY_JS = r"""
     var line = document.createElement("li");
     line.textContent = row.path + " — 0%";
     log.appendChild(line);
+    if (row.directory) {
+      var reason = app.getAttribute("data-directory") || "";
+      line.textContent = row.path + " — " + reason;
+      line.className = "bad";
+      return Promise.resolve({path: row.path, status: "rejected", reason: reason});
+    }
     return new Promise(function (resolve) {
       var data = new FormData();
       data.set("csrf", csrf);
@@ -372,6 +365,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         notice
         + f'<div class="library" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
         + f'data-overlay="{html.escape(say(lang, "drop_overlay"), quote=True)}" '
+        + f'data-directory="{html.escape(say(lang, "drop_directory"), quote=True)}" '
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
         + "<div>"

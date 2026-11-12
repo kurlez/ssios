@@ -230,16 +230,16 @@ def import_relative(
     peer_ip: str,
     folder_id: str = "",
 ) -> dict:
-    """Import one dropped path. Hidden names are skipped. A folder prefix becomes Files folders."""
+    """Import one dropped file. A directory path is rejected and is not walked."""
     lang = _lang(plane, account_id)
     parts = [part for part in str(relative or "").replace("\\", "/").split("/") if part not in {"", "."}]
     shown = "/".join(parts) or str(relative or "")
+    if len(parts) > 1 or shown.endswith("/"):
+        return {"path": shown.rstrip("/"), "status": "rejected", "code": "drop_directory", "reason": say(lang, "drop_directory"), "id": ""}
     if not parts or any(part in {"..", ".git"} or part.startswith(".") for part in parts):
         return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "library_rejected"), "id": ""}
     try:
         parent = folder_id or ""
-        if len(parts) > 1:
-            parent = _folder_chain(plane, account_id, library_id, parts[:-1], parent, peer_ip)
         saved = import_path(
             plane,
             account_id,
@@ -475,24 +475,6 @@ def _captured(raw: bytes) -> str:
 
 def _limit_for(kind: dict) -> int:
     return {"image": IMAGE_LIMIT, "video": MEDIA_LIMIT, "audio": MEDIA_LIMIT}.get(kind["group"], DOCUMENT_LIMIT)
-
-
-def _folder_chain(plane, account_id: str, library_id: str, names: list[str], parent_id: str, peer_ip: str) -> str:
-    current = parent_id or ""
-    for name in names:
-        data = _metadata(plane, account_id, library_id, create=False, name="")
-        found = next(
-            (
-                row
-                for row in data.get("folders") or []
-                if isinstance(row, dict) and row.get("name") == name and str(row.get("parent_id") or "") == current
-            ),
-            None,
-        )
-        if found is None:
-            found = add_folder(plane, account_id, library_id, name, peer_ip, parent_id=current)
-        current = str(found["id"])
-    return current
 
 
 def _record_item(

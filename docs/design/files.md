@@ -69,7 +69,7 @@ Originals are immutable. Importing the same file name again appends a version. I
 
 ### M1 — library shell
 
-Personal libraries, more than one per account, each with its own folders, tags, ratings, and trash. Migrate existing file-library objects into the default personal library without removing the chat copies. Import by paste, drag, and the file picker through one pipeline: identify, strip image metadata, hash, store, version. Three panes: library switcher and trees, thumbnail grid, inspector. Image and PDF tiles. Personal badge: one-person icon and the localized word for personal (`个人` when the account language is Chinese). No AI. No sharing. No smart folders. No watch folder.
+Personal libraries, more than one per account, each with its own folders, tags, ratings, and trash. Migrate existing file-library objects into the default personal library without removing the chat copies. Import by paste, drag, and the file picker through one pipeline: identify, strip image metadata, hash, store, version. Drag accepts files only. A dropped directory is skipped with a localized reason and is not walked. Other files in the same drop are still imported. Dropping onto a folder in the left pane files those items there. Three panes: library switcher and trees, thumbnail grid, inspector. Image and PDF tiles. Personal badge: one-person icon and the localized word for personal (`个人` when the account language is Chinese). No AI. No sharing. No smart folders. No watch folder.
 
 ### M2 — preview, search, more doors
 
