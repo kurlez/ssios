@@ -293,7 +293,16 @@ def iter_turn(
     except Exception as exc:
         yield remember_failure(scope, record["id"], "chat_failed", f"The turn stopped because of {exc.__class__.__name__}.", 500)
         return
-    if decision.route not in {"tasks", "reminders", "memory"}:
+    from ssios.calendar_intent import account_zone
+    from ssios.goals import explicit_goal
+    from ssios.reminders import reminder_schedule
+
+    scheduled = False
+    if decision.route == "reminders":
+        now, _zone_name = host_clock(plane, scope.account)
+        zone, _name = account_zone(plane.settings, scope.account)
+        scheduled = reminder_schedule(message, now, zone) is not None
+    if not scheduled and decision.route != "tasks" and (decision.route not in {"reminders", "memory"} or explicit_goal(message)):
         yield from _track_goals(plane, scope, record["id"], message, peer_ip)
     yield {"event": "done", "data": {"ok": True}}
 

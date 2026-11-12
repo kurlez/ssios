@@ -1852,7 +1852,7 @@ class HouseholdTest(PlaneTest):
         self.assertIn("QUAY", note)
 
     def test_explicit_goal_shows_a_chip_and_the_tasks_page(self) -> None:
-        page = self._send(self.ada, "please call the harbor desk")
+        page = self._send(self.ada, "add a goal: call the harbor desk")
         self.assertIn("Added goal: call the harbor desk", page)
         self.assertIn(">Undo</button>", page)
         _status, tasks = _get(self.base, "/ui/tasks", self.ada)
