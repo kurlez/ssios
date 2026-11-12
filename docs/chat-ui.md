@@ -26,7 +26,7 @@ Ollama stays on `127.0.0.1:11434`. `./scripts/ssios` uses `$HOME/Library/Applica
 ./scripts/ssios setup
 ```
 
-`setup` creates `.venv` if needed, installs `keyring`, and copies `config/ssios.example.toml` only when the config is missing or empty. Edit the copy: set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. `qwen2.5-coder:7b` remains a good local model for other chat. Set `[ui] time_zone` to an IANA name such as `America/Los_Angeles`. An empty value uses the computer's local zone. Do not put an OAuth client secret in the file.
+`setup` creates `.venv` if needed, installs `keyring`, and copies `config/ssios.example.toml` only when the config is missing or empty. Edit the copy: set `provider` to `ollama` and `ollama_model` to a local name. There is no cloud fallback. On a 24GB M4, `qwen2.5:7b` is the model to use for calendar sentences in Chinese and English. The guest default is `qwen3:14b`. Set `[ui] time_zone` to an IANA name such as `America/Los_Angeles`. An empty value uses the computer's local zone. Do not put an OAuth client secret in the file.
 
 ```bash
 ./scripts/ssios user add --admin --username owner

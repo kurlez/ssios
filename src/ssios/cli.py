@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("task_id")
         if name == "gc":
             command.add_argument("--dry-run", action="store_true")
+        if name == "model-bench":
+            command.add_argument("--model", default="", help="Ollama model name, such as qwen3:14b or muse-glimmer:30b-mlx")
         if name == "ui":
             command.add_argument("--lan", action="store_true")
             command.add_argument("--check", action="store_true", help="print chat guest prerequisites and exit")
@@ -165,6 +167,17 @@ def main(argv: list[str] | None = None) -> int:
         report = vm_diagnose(settings)
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0 if report.get("prerequisites", {}).get("ok") else 1
+    if args.command == "model-bench":
+        from ssios.model_bench import run_bench
+
+        model = str(getattr(args, "model", "") or "") or settings.codex_model
+        try:
+            report = run_bench(model=model, base_url=settings.ollama_base_url, num_ctx=int(settings.codex_num_ctx))
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        return 0
     if args.command == "gc":
         return run_gc(settings, dry_run=args.dry_run)
     if args.command == "diagnose":

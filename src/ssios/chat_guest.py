@@ -41,7 +41,7 @@ class ProductionChatGuest:
         on_status({"phase": "booting", "backend": backend})
         root = guest_root(request.account_home, request.task_id)
         on_status({"phase": "running", "backend": backend})
-        outcome = _boot(plane, request, root, backend)
+        outcome = _boot(plane, request, root, backend, getattr(request, "tools", None))
         checks = read_checks(root)
         on_status({"phase": "isolation", "backend": backend, "checks": checks})
         if not _checks_pass(checks) or not outcome.isolated:
@@ -214,7 +214,7 @@ def _checks_pass(checks: dict) -> bool:
     )
 
 
-def _boot(plane, request: ChatGuestRequest, root: Path, backend: str):
+def _boot(plane, request: ChatGuestRequest, root: Path, backend: str, tool_handler=None):
     from ssios.codex_guest import prepared_binary
     from ssios.vmguest import _prepare_codex
 
@@ -244,7 +244,17 @@ def _boot(plane, request: ChatGuestRequest, root: Path, backend: str):
         runtime = MacOSVZRuntime(plane.settings)
         runtime.plane = plane
         upstream = _upstream(plane)
-        return boot_vfkit(runtime, session, "", cancel, deadline, prepared_kernel(plane.settings.state_dir), prepared_initramfs(plane.settings.state_dir), upstream)
+        return boot_vfkit(
+            runtime,
+            session,
+            "",
+            cancel,
+            deadline,
+            prepared_kernel(plane.settings.state_dir),
+            prepared_initramfs(plane.settings.state_dir),
+            upstream,
+            tool_handler,
+        )
     from ssios.codex_guest import _boot_codex
     from ssios.linux_guest import build_codex_initramfs
     from ssios.runtime import CloudHypervisorRuntime
@@ -254,7 +264,7 @@ def _boot(plane, request: ChatGuestRequest, root: Path, backend: str):
     initramfs = plane.settings.state_dir / "storage" / "codex-initrd.img"
     if not initramfs.is_file():
         build_codex_initramfs(initramfs)
-    return _boot_codex(runtime, session, "", cancel, deadline, initramfs, _upstream(plane))
+    return _boot_codex(runtime, session, "", cancel, deadline, initramfs, _upstream(plane), tool_handler)
 
 
 def vm_diagnose(settings) -> dict:
@@ -278,6 +288,8 @@ def vm_diagnose(settings) -> dict:
         "task_timeout_seconds": settings.task_timeout_seconds,
         "ollama_model": settings.ollama_model,
         "codex_model": settings.codex_model,
+        "guest_model": settings.codex_model,
+        "guest_num_ctx": int(getattr(settings, "codex_num_ctx", 16384) or 16384),
         "ollama": ollama,
         "files": {
             "vfkit": {"present": bool(vfkit), "path": vfkit or ""},

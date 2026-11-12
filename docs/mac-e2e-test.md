@@ -15,7 +15,7 @@ agent = "codex"
 memory_mb = 2048
 
 [agent.codex]
-model = "qwen2.5-coder:7b"
+model = "qwen3:14b"
 num_ctx = 16384
 
 [limits]
@@ -28,7 +28,7 @@ enabled = ["drive", "gmail", "calendar"]
 time_zone = "America/Los_Angeles"
 ```
 
-Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback. Pull both local models if they are not already installed: `ollama pull qwen2.5:7b` and `ollama pull qwen2.5-coder:7b`. Install vfkit with `brew install vfkit`.
+Ollama stays on `127.0.0.1:11434`. There is no cloud model fallback. Pull both local models if they are not already installed: `ollama pull qwen2.5:7b` and `ollama pull qwen3:14b`. `muse-glimmer:30b-mlx` is an optional Apple Silicon candidate and is not the default. Install vfkit with `brew install vfkit`.
 
 From a current checkout of this repository:
 

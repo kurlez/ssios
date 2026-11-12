@@ -39,6 +39,52 @@ WRITE_TOOLS = {
     "web.clip": "",
 }
 TOOL_NAMES = tuple(READ_TOOLS) + tuple(WRITE_TOOLS)
+
+
+def normalize_tool_name(name: str) -> str:
+    """Accept gmail.search and the underscore form some models print."""
+    text = str(name or "").strip()
+    if text in TOOL_NAMES:
+        return text
+    dotted = text.replace("-", ".").replace("_", ".")
+    if dotted in TOOL_NAMES:
+        return dotted
+    return text
+
+
+def text_only_tool_calls(text: str) -> list[dict] | None:
+    """Tool calls when the whole reply is one JSON object or a single fence. None if there is other prose."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+    body = fenced.group(1).strip() if fenced else raw
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    items = parsed if isinstance(parsed, list) else [parsed]
+    calls = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        name = normalize_tool_name(str(item.get("name") or ""))
+        if name not in TOOL_NAMES:
+            return None
+        arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else item.get("args")
+        if not isinstance(arguments, dict):
+            return None
+        calls.append({"name": name, "arguments": _alias_args(name, arguments)})
+    return calls or None
+
+
+def _alias_args(name: str, arguments: dict) -> dict:
+    args = dict(arguments)
+    if name == "gmail.search" and not args.get("q") and args.get("query"):
+        args["q"] = args.pop("query")
+    if name == "gmail.search" and str(args.get("q") or "").strip().casefold() == "inbox":
+        args["q"] = "in:inbox"
+    return args
 _PREFIX = {
     "gmail.search": "m",
     "gmail.read": "m",
@@ -93,10 +139,10 @@ class ToolSession:
 
 
 def call_tool(plane, account: dict, name: str, arguments: dict, peer_ip: str = "127.0.0.1", index: int = 1) -> dict:
-    tool = str(name or "")
+    tool = normalize_tool_name(str(name or ""))
     if tool not in TOOL_NAMES:
         raise SsiosError("mcp_tool_denied", "That tool is not available to the guest.", 403)
-    args = _arguments(arguments)
+    args = _alias_args(tool, _arguments(arguments))
     _bound_account(account, args)
     args.pop("account_id", None)
     result_id = f"{_PREFIX.get(tool, 'x')}{int(index)}"

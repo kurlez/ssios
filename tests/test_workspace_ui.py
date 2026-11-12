@@ -73,7 +73,7 @@ class WorkspaceUiTest(unittest.TestCase):
         self.assertNotIn("Desk thread", deleted)
 
     def test_activity_timeline_comes_from_the_audit_log(self) -> None:
-        now = datetime(2026, 11, 11, 18, 0, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
         self.case.plane.security_audit.write(
             actor=self.account["id"],
             ip="127.0.0.1",

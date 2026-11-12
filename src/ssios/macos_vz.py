@@ -655,7 +655,7 @@ def supervise_process(command: list[str], proxy, deadline: float, connect_grace:
     return completed, connect_timeout
 
 
-def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None):
+def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None, tool_handler=None):
     del cancel
     import time
 
@@ -679,6 +679,7 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
         max_output_tokens=runtime.settings.max_output_tokens,
         listen_path=vsock,
         num_ctx=int(getattr(runtime.settings, "codex_num_ctx", 16384)),
+        tool_handler=tool_handler,
     )
     before = _snapshot(session.root / "workspace")
     records: list[dict] = []

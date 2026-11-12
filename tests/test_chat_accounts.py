@@ -2236,7 +2236,7 @@ class AdapterTest(PlaneTest):
         checked = chat_guest_report(self.plane.settings)
         self.assertFalse(checked["ok"])
         self.assertTrue(checked["models_independent"])
-        self.assertEqual(checked["codex_model"], "qwen2.5-coder:7b")
+        self.assertEqual(checked["codex_model"], "qwen3:14b")
         buffer = StringIO()
         self.plane.settings = replace(self.plane.settings, runtime_backend="dev-guard", runtime_agent="summary")
         with redirect_stdout(buffer):

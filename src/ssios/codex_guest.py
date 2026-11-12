@@ -169,7 +169,121 @@ def codex_config_text(port: int, model: str) -> str:
         "network_access = false\n"
         "exclude_slash_tmp = true\n"
         "exclude_tmpdir_env_var = true\n"
+        "\n"
+        "[mcp_servers.ssios]\n"
+        'command = "python3"\n'
+        'args = ["/tools/ssios_mcp.py"]\n'
+        "enabled_tools = [\n"
+        '  "gmail.search",\n'
+        '  "gmail.read",\n'
+        '  "drive.list",\n'
+        '  "drive.read",\n'
+        '  "calendar.list",\n'
+        '  "weather",\n'
+        '  "web.fetch",\n'
+        "]\n"
     )
+
+
+def mcp_bridge_source(port: int) -> str:
+    """Stdio MCP server inside the guest. It lists the host tools and forwards calls over vsock."""
+    names = [
+        "gmail.search",
+        "gmail.read",
+        "drive.list",
+        "drive.read",
+        "calendar.list",
+        "weather",
+        "web.fetch",
+        "tasks.add",
+        "reminders.add",
+    ]
+    listed = ", ".join(json.dumps(name) for name in names)
+    return f'''import json, os, socket, struct, sys
+PORT = {int(port)}
+NAMES = [{listed}]
+
+def tools():
+    found = []
+    for name in NAMES:
+        props = {{"q": {{"type": "string"}}}} if name == "gmail.search" else {{"place": {{"type": "string"}}}} if name == "weather" else {{}}
+        found.append({{"name": name, "description": name, "inputSchema": {{"type": "object", "properties": props}}}})
+    return found
+
+def vsock_call(name, arguments):
+    family = 40
+    libc = __import__("ctypes").CDLL(None, use_errno=True)
+    libc.socket.argtypes = [__import__("ctypes").c_int, __import__("ctypes").c_int, __import__("ctypes").c_int]
+    libc.socket.restype = __import__("ctypes").c_int
+    libc.connect.argtypes = [__import__("ctypes").c_int, __import__("ctypes").c_void_p, __import__("ctypes").c_uint]
+    libc.connect.restype = __import__("ctypes").c_int
+    fd = libc.socket(family, socket.SOCK_STREAM, 0)
+    address = struct.pack("<HHIIB3x", family, 0, PORT & 0xFFFFFFFF, 2, 0)
+    buf = __import__("ctypes").create_string_buffer(address)
+    if fd < 0 or libc.connect(fd, buf, len(address)) < 0:
+        return {{"error": "vsock"}}
+    body = json.dumps({{"name": name, "arguments": arguments}}).encode()
+    header = ("POST /mcp/tools/call HTTP/1.1\\r\\nHost: ssios\\r\\nContent-Type: application/json\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n" % len(body)).encode()
+    os.write(fd, header + body)
+    data = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        data += chunk
+    os.close(fd)
+    raw = data.split(b"\\r\\n\\r\\n", 1)[-1]
+    try:
+        return json.loads(raw.decode())
+    except Exception:
+        return {{"error": "bad_response"}}
+
+def reply(msg, result):
+    if msg.get("id") is None:
+        return
+    payload = json.dumps({{"jsonrpc": "2.0", "id": msg.get("id"), "result": result}}).encode()
+    sys.stdout.buffer.write(("Content-Length: %d\\r\\n\\r\\n" % len(payload)).encode() + payload)
+    sys.stdout.buffer.flush()
+
+def handle(msg):
+    method = msg.get("method")
+    if method == "initialize":
+        return {{"protocolVersion": "2024-11-05", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "ssios", "version": "1"}}}}
+    if method == "tools/list":
+        return {{"tools": tools()}}
+    if method == "tools/call":
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {{}}
+        result = vsock_call(str(params.get("name") or ""), params.get("arguments") if isinstance(params.get("arguments"), dict) else {{}})
+        return {{"content": [{{"type": "text", "text": json.dumps(result)}}]}}
+    return {{}}
+
+def main():
+    buf = b""
+    while True:
+        chunk = sys.stdin.buffer.read(1)
+        if not chunk:
+            return
+        buf += chunk
+        while b"\\r\\n\\r\\n" in buf:
+            head, rest = buf.split(b"\\r\\n\\r\\n", 1)
+            length = 0
+            for line in head.split(b"\\r\\n"):
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1].strip() or b"0")
+            if len(rest) < length:
+                buf = head + b"\\r\\n\\r\\n" + rest
+                break
+            raw, buf = rest[:length], rest[length:]
+            try:
+                msg = json.loads(raw.decode())
+            except Exception:
+                continue
+            if isinstance(msg, dict):
+                reply(msg, handle(msg))
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 def guest_entry_source(port: int) -> str:
@@ -328,6 +442,12 @@ def codex_items_from_ollama(raw: bytes) -> tuple[list[dict], int]:
             if isinstance(parts, list):
                 texts.append("".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)))
     if not calls:
+        from ssios.mcp_host import text_only_tool_calls
+
+        for text in texts:
+            for call in text_only_tool_calls(text) or []:
+                calls.append({"name": call["name"], "arguments": json.dumps(call["arguments"], separators=(",", ":"))})
+    if not calls:
         for text in texts:
             for cmd in exec_commands_from_text(text):
                 calls.append({"name": "exec_command", "arguments": json.dumps({"cmd": cmd}, separators=(",", ":"))})
@@ -349,7 +469,7 @@ def render_codex_sse(items: list[dict]) -> bytes:
         rendered = {
             "id": f"fc_{index}",
             "type": "function_call",
-            "name": "exec_command",
+            "name": str(item.get("name") or "exec_command"),
             "call_id": call_id,
             "arguments": item["arguments"],
             "status": "completed",
@@ -465,6 +585,8 @@ def responses_to_chat(payload: dict, num_ctx: int, num_predict: int) -> dict:
     }
     if tools:
         chat["tools"] = tools
+        # qwen3 spends the turn in thinking unless this is set. A 400 that names think is retried once without it.
+        chat["think"] = False
     if payload.get("tool_choice"):
         chat["tool_choice"] = payload["tool_choice"]
     return chat
@@ -513,10 +635,18 @@ def items_from_ollama_chat(raw: bytes) -> tuple[list[dict], int]:
             name = str(function.get("name") or "")
             arguments = function.get("arguments")
             rendered = json.dumps(arguments, separators=(",", ":")) if isinstance(arguments, dict) else str(arguments or "")
-            if name == "exec_command":
-                calls.append({"name": "exec_command", "arguments": clean_tool_arguments(rendered)})
+            from ssios.mcp_host import TOOL_NAMES, normalize_tool_name
+
+            tool_name = normalize_tool_name(name)
+            if tool_name == "exec_command" or tool_name in TOOL_NAMES:
+                calls.append({"name": tool_name, "arguments": clean_tool_arguments(rendered) if tool_name == "exec_command" else rendered})
         if chunk.get("done") is True and isinstance(chunk.get("eval_count"), int):
             tokens = int(chunk["eval_count"])
+    if not calls:
+        from ssios.mcp_host import text_only_tool_calls
+
+        for call in text_only_tool_calls("".join(content)) or []:
+            calls.append({"name": call["name"], "arguments": json.dumps(call["arguments"], separators=(",", ":"))})
     if not calls:
         for cmd in exec_commands_from_text("".join(content)):
             calls.append({"name": "exec_command", "arguments": json.dumps({"cmd": cmd}, separators=(",", ":"))})
@@ -556,7 +686,7 @@ def fetch_ollama_responses(url: str, payload: dict, timeout: float) -> tuple[int
 
 def ollama_smoke_preflight(
     base_url: str = "http://127.0.0.1:11434",
-    model: str = "qwen2.5-coder:7b",
+    model: str = "qwen3:14b",
     timeout: float = 180,
     num_ctx: int = 16384,
 ) -> dict:
@@ -593,7 +723,8 @@ def ollama_smoke_preflight(
 
 def _context_failure(model: str, loaded: int | None, num_ctx: int) -> str:
     seen = "missing" if loaded is None else str(loaded)
-    derived = "ssios-qwen2.5-coder-7b-16k"
+    slug = "".join(char if char.isalnum() else "-" for char in model).strip("-")
+    derived = f"ssios-{slug}-{int(num_ctx)}"[:80]
     return (
         f"Ollama loaded {model} with context {seen}; Codex needs {num_ctx}. "
         "The proxy already sends options.num_ctx on POST /api/chat and does not modify the installed model. "
@@ -882,18 +1013,28 @@ class ResponsesProxy:
         try:
             status, raw = fetch_ollama_responses(self.upstream or "", chat, 120)
         except SsiosError as exc:
-            self._note_upstream(
-                "upstream_error",
-                model,
-                body,
-                digest,
-                getattr(exc, "upstream_status", None),
-                started,
-                0,
-                exc.detail,
-            )
-            conn.sendall(error_response(502, "upstream_error"))
-            return
+            if chat.get("think") is False and getattr(exc, "upstream_status", None) == 400 and "think" in str(exc.detail).casefold():
+                chat = dict(chat)
+                chat.pop("think", None)
+                try:
+                    status, raw = fetch_ollama_responses(self.upstream or "", chat, 120)
+                except SsiosError as retry_exc:
+                    exc = retry_exc
+                else:
+                    exc = None
+            if exc is not None:
+                self._note_upstream(
+                    "upstream_error",
+                    model,
+                    body,
+                    digest,
+                    getattr(exc, "upstream_status", None),
+                    started,
+                    0,
+                    exc.detail,
+                )
+                conn.sendall(error_response(502, "upstream_error"))
+                return
         latency_ms = int((time.monotonic() - started) * 1000)
         items, tokens = items_from_upstream(raw)
         if _upstream_output_empty(items):
@@ -1151,7 +1292,7 @@ def _hypervisor_ready(runtime) -> dict:
     return {"ok": not missing, "detail": "; ".join(missing) if missing else "codex guest can start"}
 
 
-def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs: Path, upstream: str | None = None):
+def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs: Path, upstream: str | None = None, tool_handler=None):
     from ssios.runtime import cloud_hypervisor_guest_command, virtiofsd_share_command
     from ssios.vmguest import GuestOutcome, _ms, _read_json, _run, _wait_sockets
 
@@ -1167,6 +1308,7 @@ def _boot_codex(runtime, session, text: str, cancel, deadline: float, initramfs:
         allow_models=tuple(getattr(runtime.settings, "codex_allow_models", (runtime.settings.codex_model,))),
         max_output_tokens=runtime.settings.max_output_tokens,
         num_ctx=int(getattr(runtime.settings, "codex_num_ctx", 16384)),
+        tool_handler=tool_handler,
     )
     before = _snapshot(session.root / "workspace")
     sockets = []

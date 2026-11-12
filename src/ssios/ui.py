@@ -1417,6 +1417,9 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }
+.steps .fail::before { content: "\\2717  "; color: var(--danger); }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.choices .choice { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
 .codex-steps { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .codex-step { margin: 0; color: var(--muted); font-size: 13px; }
 .badge.read, .badge.write { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }

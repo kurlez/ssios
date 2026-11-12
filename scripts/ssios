@@ -22,6 +22,7 @@ Usage: ./scripts/ssios <command> [args]
   logs       Follow the UI log
   fg         Run the UI in this terminal
   diagnose   Run vm-diagnose and ui --check
+  model-bench  Score one local Ollama model on synthetic tool choices. Nothing is saved.
 
 Any other SSIOS command is passed through with --state and --config filled in.
 Example: ./scripts/ssios oauth-install-client --account kent

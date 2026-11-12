@@ -28,11 +28,11 @@ provider = "ollama"
 ollama_model = "qwen2.5:7b"
 ```
 
-`qwen2.5:7b` is the chat model used for Chinese and English calendar sentences. `[agent.codex] model` is a different name, `qwen2.5-coder:7b`, and is used only inside the guest. Pull both by hand. This program does not pull models and has no telemetry.
+`qwen2.5:7b` is the chat model used for Chinese and English calendar sentences. `[agent.codex] model` is a different name, `qwen3:14b`, and is used only inside the guest. `qwen2.5-coder:7b` and `qwen3-coder:30b` are alternatives. `muse-glimmer:30b-mlx` is a candidate on Apple Silicon and is not the default. Pull models by hand. This program does not pull models and has no telemetry.
 
 ```bash
 ollama pull qwen2.5:7b
-ollama pull qwen2.5-coder:7b
+ollama pull qwen3:14b
 ```
 
 On a Mac set the guest pair in the same file:

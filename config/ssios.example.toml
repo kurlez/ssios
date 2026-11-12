@@ -57,8 +57,12 @@ guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e3
 
 [agent.codex]
 # The provider name inside the guest config is fixed as ssios, not ollama. This field is only the model name.
-model = "qwen2.5-coder:7b"
-allow_models = ["qwen2.5-coder:7b", "qwen2.5:7b", "llama3.1:8b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
+# qwen3:14b is the guest default. qwen2.5-coder:7b and qwen3-coder:30b are smaller and larger alternatives.
+# To try Meta Muse Glimmer on Apple Silicon: ollama pull muse-glimmer:30b-mlx (Ollama >= 0.32.8, MLX, about 19GB, Apache 2.0).
+# On a 24GB Mac set model = "muse-glimmer:30b-mlx" and num_ctx = 16384. The model can use 128K, but that plus the 2GB guest leaves little free RAM.
+# No Muse Glimmer timing is recorded here. Run ./scripts/ssios model-bench --model muse-glimmer:30b-mlx on the Mac before treating it as the default.
+model = "qwen3:14b"
+allow_models = ["qwen3:14b", "qwen2.5-coder:7b", "qwen3-coder:30b", "muse-glimmer:30b-mlx", "qwen2.5:7b", "llama3.1:8b"]
 max_requests = 4
 max_request_bytes = 200000
 # Codex's system prompt plus tools is about 4098 tokens. Ollama's /v1/responses ignores request options and keeps the 4096 default.

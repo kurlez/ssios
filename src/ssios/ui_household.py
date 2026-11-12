@@ -222,6 +222,7 @@ CHAT_JS = r"""
         return reader.read().then(function (chunk) {
           if (chunk.done) {
             typing.remove();
+            finishSteps(stepsHolder);
             if (!turnFailed && !String(raw || "").trim() && !sawResult && answer.dataset.answered !== "1") {
               showError(answer.querySelector(".content"), "The turn ended with no answer.\n\nError code: chat_empty\nHint: Reload the chat. If it is still empty, run ssios vm-diagnose.");
             } else if (!turnFailed && String(raw || "").trim()) renderMarkdown(answer.querySelector(".content"), raw);
@@ -345,6 +346,7 @@ CHAT_JS = r"""
       } else if (!(message.results && message.results.length)) {
         renderMarkdown(content, message.text || "");
       }
+      if (message.choices && message.choices.length) content.appendChild(choiceButtons(message.choices));
       body.appendChild(content);
       var tools = document.createElement("div");
       tools.className = "tools";
@@ -683,6 +685,7 @@ CHAT_JS = r"""
     if (name === "route") pill(payload.route || "route", payload.reason || "");
     if (name === "status") {
       if (payload.phase === "planning" || payload.phase === "tool" || payload.phase === "writing") addCodexStep(answer, payload);
+      else if (payload.phase === "isolation") markStep(stepsHolder, "checks", payload.checks || {});
       else markStep(stepsHolder, payload.phase || "");
     }
     if (name === "isolation") markStep(stepsHolder, "checks", payload);
@@ -732,7 +735,9 @@ CHAT_JS = r"""
       if (typingNode) typingNode.remove();
       var note = document.createElement("p");
       note.textContent = payload.visible || payload.text;
-      answer.querySelector(".content").appendChild(note);
+      var content = answer.querySelector(".content");
+      content.appendChild(note);
+      if (payload.choices && payload.choices.length) content.appendChild(choiceButtons(payload.choices));
     }
     return raw;
   }
@@ -791,6 +796,34 @@ CHAT_JS = r"""
       });
       column.appendChild(list);
     }
+  }
+
+  function choiceButtons(labels) {
+    var row = document.createElement("div");
+    row.className = "choices";
+    labels.forEach(function (label) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "choice";
+      button.textContent = label;
+      button.addEventListener("click", function () {
+        var box = document.querySelector("textarea[name=message]");
+        if (!box) return;
+        box.value = label;
+        box.dispatchEvent(new Event("input", {bubbles: true}));
+        var send = document.querySelector("button.send");
+        if (send) send.click();
+      });
+      row.appendChild(button);
+    });
+    return row;
+  }
+
+  function finishSteps(holder) {
+    if (!holder || !holder.node) return;
+    holder.node.querySelectorAll("li").forEach(function (li) {
+      if (!li.className) li.className = "fail";
+    });
   }
 
   function stepsFor(checks) {
@@ -1388,7 +1421,13 @@ def _events_html(session, events: list[dict]) -> str:
         elif name == "outcome":
             full = str(data.get("text") or "")
             visible = str(data.get("visible") or full)
-            parts.append("<p class=\"outcome\">" + html.escape(visible) + "</p>")
+            buttons = ""
+            labels = data.get("choices") if isinstance(data.get("choices"), list) else []
+            if labels:
+                buttons = "<div class=\"choices\">" + "".join(
+                    f"<button type=\"button\" class=\"choice\">{html.escape(str(label))}</button>" for label in labels if str(label)
+                ) + "</div>"
+            parts.append("<p class=\"outcome\">" + html.escape(visible) + "</p>" + buttons)
             if full and full != visible:
                 technical.append("<p>" + html.escape(full) + "</p>")
         elif name == "approval":
@@ -1558,6 +1597,8 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
             }
         if message.get("reply"):
             item["reply"] = str(message.get("reply") or "")
+        if isinstance(message.get("choices"), list) and message.get("choices"):
+            item["choices"] = [str(choice) for choice in message.get("choices") if str(choice)][:6]
         if message.get("approval_id"):
             item["approval"] = _approval_view(plane, account, str(message["approval_id"]), item["text"])
         results = message.get("results")

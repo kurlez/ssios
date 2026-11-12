@@ -139,7 +139,7 @@ Limits for one chat turn:
 
 ## 6. Models and latency on the M4 24GB
 
-Two local models are already named in the docs. `qwen2.5:7b` answers host chat and calendar sentences. `qwen2.5-coder:7b` is the guest model. `[agent.codex] num_ctx` is 16384. The proxy sends that on native `/api/chat` because Ollama's `/v1/responses` path ignores `options` and stays at 4096, and the Codex prompt plus tools is about 4098 tokens. That 4096 failure is a property of the proxy, recorded in [macos-vz.md](macos-vz.md). It is not an M4 speed measurement.
+Two local models are already named in the docs. `qwen2.5:7b` answers host chat and calendar sentences. The guest default is now `qwen3:14b`. The table below is the earlier `qwen2.5-coder:7b` planning budget and is not a measurement of `qwen3:14b` or `muse-glimmer:30b-mlx`. `[agent.codex] num_ctx` is 16384. The proxy sends that on native `/api/chat` because Ollama's `/v1/responses` path ignores `options` and stays at 4096, and the Codex prompt plus tools is about 4098 tokens. That 4096 failure is a property of the proxy, recorded in [macos-vz.md](macos-vz.md). It is not an M4 speed measurement.
 
 No tool-calling accuracy and no tokens-per-second figure in this repository was measured on the M4. The table is a planning budget. Treat every duration as an estimate.
 

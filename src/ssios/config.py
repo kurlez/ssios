@@ -152,10 +152,13 @@ def load_settings(
         codex = {}
     if not isinstance(codex, dict):
         raise SsiosError("config_invalid", "agent.codex must be a table", 500)
-    codex_model = str(codex.get("model", "qwen2.5-coder:7b"))
+    codex_model = str(codex.get("model", "qwen3:14b"))
     if codex_model == "ollama" or any(char in codex_model for char in "\n\r\"/"):
         raise SsiosError("config_invalid", "codex model name is rejected", 500)
-    raw_allow = codex.get("allow_models", [codex_model])
+    raw_allow = codex.get(
+        "allow_models",
+        ["qwen3:14b", "qwen2.5-coder:7b", "qwen3-coder:30b", "muse-glimmer:30b-mlx"],
+    )
     if isinstance(raw_allow, str):
         raw_allow = [raw_allow]
     if not isinstance(raw_allow, list) or not raw_allow:

@@ -575,6 +575,9 @@ def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> 
 
     (home / "config.toml").write_text(codex_config_text(VSOCK_PORT, plane.settings.codex_model), encoding="utf-8")
     (scratch / "entry.py").write_text(guest_entry_source(VSOCK_PORT), encoding="utf-8")
+    from ssios.codex_guest import mcp_bridge_source
+
+    (tools / "ssios_mcp.py").write_text(mcp_bridge_source(VSOCK_PORT), encoding="utf-8")
     destination = tools / "codex"
     shutil.copy2(binary, destination)
     destination.chmod(0o755)

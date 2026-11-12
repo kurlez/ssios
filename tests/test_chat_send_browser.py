@@ -394,6 +394,50 @@ class ChatSendBrowserTest(unittest.TestCase):
         )
         self.assertEqual(self.page.errors, [])
 
+    def test_checks_resolve_and_a_text_tool_call_is_not_the_answer(self) -> None:
+        from ssios.google_connector import GoogleConnector, GoogleEndpoints
+        from ssios.secret_store import MemorySecretStore
+
+        self.case.plane._google = GoogleConnector(self.case.plane, MemorySecretStore(), GoogleEndpoints())
+        self.case.plane.llm.report_script = ["Harbor Desk said the studio plan is on the desk. [1]"]
+
+        def read_now(session, *, project_id, tool, arguments, limits, peer_ip="127.0.0.1"):
+            del session, limits, peer_ip
+            row = {"from": "Harbor Desk", "subject": "Studio plan", "date": "Nov 10", "snippet": "The studio plan is on the desk."}
+            return {"tool": tool, "text": "Note || mail-header " + __import__("json").dumps(row), "arguments": arguments, "item_count": 1, "project_id": project_id}
+
+        self.case.plane.google.read_now = read_now
+
+        class _Guest:
+            orchestrator_ready = True
+
+            def run(self, plane, request, on_status):
+                del plane, request
+                on_status({"phase": "booting", "backend": "macos-vz"})
+                on_status({"phase": "running", "backend": "macos-vz"})
+                on_status({"phase": "isolation", "checks": {"nic": ["lo"], "outbound": False, "marker": True, "sandbox_denied": True, "outside_write": False}})
+                return {
+                    "text": '```json\n{ "name": "gmail.search", "arguments": { "query": "inbox" } }\n```',
+                    "isolated": True,
+                    "boot_ms": 1,
+                    "backend": "macos-vz",
+                    "checks": {},
+                }
+
+        self.case.plane.chat_guest = _Guest()
+        self._open("/ui/chat")
+        self._type_and_send("帮我总结一下最近的邮件")
+        self.page.wait(
+            "document.querySelectorAll('.typing').length === 0"
+            " && document.querySelector('.steps [data-step=checks]')"
+            " && document.querySelector('.steps [data-step=checks]').className === 'done'"
+            " && document.body.innerText.includes('Harbor Desk said the studio plan')"
+            " && !document.body.innerText.includes('Sources (none)')"
+            " && !document.body.innerText.includes('Assistant is writing')",
+            timeout=20,
+        )
+        self.assertEqual(self.page.errors, [])
+
     def _shot(self, name: str) -> None:
         import base64
 

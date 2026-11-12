@@ -29,12 +29,24 @@ _STATED = re.compile(
 _NOT_A_PLACE = set("想看做说听写吃走读")
 
 
-def fresh(skill: str, slot: str, *, origin: str = "", choices: list[str] | None = None, now: float | None = None) -> dict:
+def fresh(
+    skill: str,
+    slot: str,
+    *,
+    origin: str = "",
+    choices: list[str] | None = None,
+    candidates: list[dict] | None = None,
+    query: str = "",
+    now: float | None = None,
+) -> dict:
     return {
         "skill": skill,
         "slot": slot,
         "origin": " ".join(str(origin or "").split())[:240],
         "choices": [str(item) for item in (choices or []) if str(item)][:6],
+        "candidates": [item for item in (candidates or []) if isinstance(item, dict)][:6],
+        "query": " ".join(str(query or "").split())[:80],
+        "rounds": 1 if choices else 0,
         "expires_at": (time.time() if now is None else now) + TTL_SECONDS,
         "turns_left": TURNS,
     }
@@ -51,6 +63,13 @@ def consume(slot: dict | None, message: str, now: float | None = None) -> dict:
         return {"action": "clear"}
     value = _fill(message, slot)
     if value:
+        picked = _candidate(value, list(slot.get("candidates") or []))
+        bare = " ".join(str(message or "").split()).casefold()
+        query_city = str(slot.get("query") or "").split(",", 1)[0].strip().casefold()
+        assumed = bool(picked and bare == query_city and len(slot.get("candidates") or []) > 1)
+        if isinstance(picked, dict) and assumed:
+            picked = dict(picked)
+            picked["assumed"] = True
         return {
             "action": "resume",
             "skill": str(slot.get("skill") or ""),
@@ -58,6 +77,9 @@ def consume(slot: dict | None, message: str, now: float | None = None) -> dict:
             "value": value,
             "origin": str(slot.get("origin") or ""),
             "composed": _compose(slot, value),
+            "candidate": picked,
+            "rounds": int(slot.get("rounds") or 0),
+            "assumed": assumed,
         }
     left = int(slot.get("turns_left") or 0) - 1
     if left <= 0:
@@ -90,7 +112,7 @@ def _topic_changed(message: str, slot: dict) -> bool:
 def _fill(message: str, slot: dict) -> str:
     kind = str(slot.get("slot") or "")
     if kind == "place":
-        return _choice(message, list(slot.get("choices") or []))
+        return _choice(message, list(slot.get("choices") or []), query=str(slot.get("query") or ""))
     if kind == "location":
         return _place(message)
     if kind == "date":
@@ -124,7 +146,7 @@ def _place(message: str) -> str:
     return ""
 
 
-def _choice(message: str, choices: list[str]) -> str:
+def _choice(message: str, choices: list[str], query: str = "") -> str:
     text = " ".join(str(message or "").split())
     if re.fullmatch(r"[1-9]", text):
         index = int(text) - 1
@@ -132,14 +154,49 @@ def _choice(message: str, choices: list[str]) -> str:
             return choices[index]
     folded = text.casefold()
     for choice in choices:
-        label = choice.casefold()
-        if folded == label or label in folded or folded in label:
+        if folded == choice.casefold():
             return choice
-    for choice in choices:
-        parts = [part.strip() for part in choice.split(",") if part.strip()]
-        if any(len(part) >= 2 and re.search(rf"\b{re.escape(part)}\b", text, re.IGNORECASE) for part in parts[1:]):
-            return choice
-    return _place(text)
+    city, regions = _split_label(text)
+    if city and regions:
+        for choice in choices:
+            choice_city, choice_regions = _split_label(choice)
+            if choice_city.casefold() == city.casefold() and _region_hit(regions, choice_regions):
+                return choice
+    if city and not regions:
+        exact = [choice for choice in choices if _split_label(choice)[0].casefold() == city.casefold()]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1 and query and city.casefold() == query.split(",", 1)[0].strip().casefold():
+            return exact[0]
+    region_hits = [choice for choice in choices if _region_hit([text], _split_label(choice)[1])]
+    if len(region_hits) == 1:
+        return region_hits[0]
+    if len(region_hits) > 1 and query:
+        wanted = query.split(",", 1)[0].strip().casefold()
+        named = [choice for choice in region_hits if _split_label(choice)[0].casefold() == wanted]
+        if len(named) == 1:
+            return named[0]
+    return ""
+
+
+def _split_label(value: str) -> tuple[str, list[str]]:
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    if not parts:
+        return "", []
+    return parts[0], parts[1:]
+
+
+def _region_hit(wanted: list[str], have: list[str]) -> bool:
+    left = {part.casefold() for part in wanted}
+    right = {part.casefold() for part in have}
+    return bool(left and left & right)
+
+
+def _candidate(label: str, candidates: list[dict]) -> dict | None:
+    for item in candidates:
+        if str(item.get("label") or "").casefold() == str(label or "").casefold():
+            return dict(item)
+    return None
 
 
 def _compose(slot: dict, value: str) -> str:

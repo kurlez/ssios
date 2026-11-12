@@ -107,7 +107,11 @@ def present_answer(text: str, results: list[dict]) -> str:
         label = str(item.get("tool") or item.get("id") or "")
         lines.append(f"[{item.get('id')}] {label}".strip())
     if not results:
-        lines.append("(none)")
+        from ssios.mcp_host import text_only_tool_calls
+
+        if text_only_tool_calls(cleaned):
+            return ""
+        return (cleaned.strip() + "\n") if cleaned.strip() else ""
     return "\n".join(lines).strip() + "\n"
 
 

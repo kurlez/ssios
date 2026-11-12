@@ -45,15 +45,28 @@ def _apply_slot(scope, conversation_id: str, slot: dict | None, message: str) ->
     return None
 
 
-def _hold_slot(scope, conversation_id: str, skill: str, slot: str, prompt: str, origin: str, choices: list[str] | None = None) -> Iterator[dict]:
+def _hold_slot(
+    scope,
+    conversation_id: str,
+    skill: str,
+    slot: str,
+    prompt: str,
+    origin: str,
+    choices: list[str] | None = None,
+    candidates: list[dict] | None = None,
+    query: str = "",
+) -> Iterator[dict]:
     from ssios.pending_slot import fresh
 
-    scope.chat().set_slot(conversation_id, fresh(skill, slot, origin=origin, choices=choices))
-    scope.chat().append(
+    scope.chat().set_slot(
         conversation_id,
-        {"role": "assistant", "text": prompt, "route": {"route": "skill", "reason": prompt, "source": "rule"}},
+        fresh(skill, slot, origin=origin, choices=choices, candidates=candidates, query=query),
     )
-    yield {"event": "outcome", "data": {"text": prompt}}
+    stored = {"role": "assistant", "text": prompt, "route": {"route": "skill", "reason": prompt, "source": "rule"}}
+    if choices:
+        stored["choices"] = list(choices)
+    scope.chat().append(conversation_id, stored)
+    yield {"event": "outcome", "data": {"text": prompt, "choices": list(choices or [])}}
 
 
 def _note_missing_slot(scope, conversation_id: str, message: str, exc: SsiosError) -> None:
@@ -103,9 +116,14 @@ def iter_turn(
             scope.chat().set_slot(conversation_id, None)
             resumed = outcome
     place = ""
+    resolved = None
+    asked_place = False
     acted = message
     if resumed and str(resumed.get("skill") or "") == "weather":
         place = str(resumed.get("value") or "")
+        if isinstance(resumed.get("candidate"), dict):
+            resolved = resumed.get("candidate")
+        asked_place = int(resumed.get("rounds") or 0) > 0 and resolved is None
         decision = RouteDecision(
             route="skill",
             reason="The previous question asked for a place, so the weather skill continues.",
@@ -183,7 +201,7 @@ def iter_turn(
         elif decision.route == "codex":
             yield from _codex(plane, scope, record["id"], message, peer_ip, place=place)
         elif decision.route == "skill":
-            yield from _skill(plane, scope, record["id"], message, peer_ip, place=place)
+            yield from _skill(plane, scope, record["id"], message, peer_ip, place=place, resolved=resolved, asked=asked_place)
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
@@ -434,7 +452,34 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         decision, _ignored = choose_route(message, guest_ready=False, llm=plane.llm)
         yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, decision, place)
         return
-    answer = present_answer(str(outcome.get("text") or ""), session.results)
+    raw_text = str(outcome.get("text") or "")
+    from ssios.mcp_host import text_only_tool_calls
+
+    calls = text_only_tool_calls(raw_text) or []
+    for call in calls:
+        try:
+            result = session.call(call["name"], call["arguments"])
+        except SsiosError:
+            break
+        yield {
+            "event": "status",
+            "data": {
+                "phase": "tool",
+                "name": call["name"],
+                "kind": "write" if result.get("status") == "pending" else "read",
+            },
+        }
+    if calls and any(item.get("status") == "pending" for item in session.results):
+        yield from _codex_approvals(scope, conversation_id, session.results)
+        return
+    answer = present_answer("" if calls else raw_text, session.results)
+    if calls or not answer.strip():
+        note = "The guest did not produce an answer, so this stayed on this computer. Run ssios vm-diagnose for the details."
+        scope.chat().append(conversation_id, {"role": "assistant", "text": note})
+        yield {"event": "outcome", "data": {"text": note}}
+        decision, _ignored = choose_route(message, guest_ready=False, llm=plane.llm)
+        yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, decision, place)
+        return
     scope.chat().append(
         conversation_id,
         {
@@ -488,12 +533,22 @@ def _codex_approvals(scope, conversation_id: str, results: list[dict]) -> Iterat
         yield _approval_event(approval, preview)
 
 
-def _dispatch_host(plane, scope, conversation_id: str, message: str, peer_ip: str, decision: RouteDecision, place: str) -> Iterator[dict]:
+def _dispatch_host(
+    plane,
+    scope,
+    conversation_id: str,
+    message: str,
+    peer_ip: str,
+    decision: RouteDecision,
+    place: str,
+    resolved: dict | None = None,
+    asked: bool = False,
+) -> Iterator[dict]:
     if decision.route == "direct":
         yield from _direct(plane, scope, conversation_id, decision)
         yield from _propose_explicit(plane, scope, conversation_id, message, peer_ip)
     elif decision.route == "skill":
-        yield from _skill(plane, scope, conversation_id, message, peer_ip, place=place)
+        yield from _skill(plane, scope, conversation_id, message, peer_ip, place=place, resolved=resolved, asked=asked)
         yield from _propose_explicit(plane, scope, conversation_id, message, peer_ip)
     elif decision.route == "connector":
         yield from _stage_fetch(scope, conversation_id, message, decision, follow_vm=False, peer_ip=peer_ip)
@@ -513,7 +568,16 @@ def _dispatch_host(plane, scope, conversation_id: str, message: str, peer_ip: st
         yield from _vm(plane, scope, conversation_id, message, peer_ip)
 
 
-def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, place: str = "") -> Iterator[dict]:
+def _skill(
+    plane,
+    scope: AccountScope,
+    conversation_id: str,
+    message: str,
+    peer_ip: str,
+    place: str = "",
+    resolved: dict | None = None,
+    asked: bool = False,
+) -> Iterator[dict]:
     from ssios.account_memory import stored_location
     from ssios.site_session import warnings
 
@@ -529,6 +593,8 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
             skill="weather" if place else "",
             place=place,
             default_location=saved if saved else None,
+            resolved=resolved,
+            asked=asked,
         )
     except SsiosError as exc:
         if exc.reason == "session_expired":
@@ -553,6 +619,8 @@ def _skill(plane, scope: AccountScope, conversation_id: str, message: str, peer_
             str(need.get("prompt") or "Which place do you mean?"),
             message,
             choices=list(need.get("choices") or []),
+            candidates=list(need.get("candidates") or []),
+            query=str(need.get("query") or ""),
         )
         return
     blocks = result["blocks"]
