@@ -138,6 +138,16 @@ def _place(message: str) -> str:
         return ""
     if text in _DATE_WORDS:
         return ""
+    if any(mark in text for mark in ("?", "？", "吗")):
+        return ""
+    if any(word in text for word in ("邮件", "邮箱", "收件箱", "日历", "日程", "网盘")):
+        return ""
+    from ssios.skill_broker import split_place
+
+    city, _quals = split_place(text)
+    if city and len(text) <= 80 and len(text.split()) <= 6:
+        if re.search(r"[\u4e00-\u9fff]", city) or len(city) >= 3:
+            return text[:80]
     if _PLACE.fullmatch(text):
         return text
     # A bare place in another script, such as Москва or 東京. A question was already cleared.

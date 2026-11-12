@@ -69,6 +69,12 @@ def _hold_slot(
     yield {"event": "outcome", "data": {"text": prompt, "choices": list(choices or [])}}
 
 
+def _keep_weather_context(message: str) -> bool:
+    from ssios.skill_broker import live_weather, place_only
+
+    return live_weather(message) or place_only(message)
+
+
 def _note_missing_slot(scope, conversation_id: str, message: str, exc: SsiosError) -> None:
     from ssios.pending_slot import fresh
 
@@ -98,9 +104,11 @@ def iter_turn(
 
     resumed = None
     fallback = ""
+    weather_place = ""
     ready = guest_ready(plane)
     if conversation_id:
         stored_conv = scope.chat().get(conversation_id)
+        weather_place = str(stored_conv.get("weather_place") or "")
         pending = stored_conv.get("pending_pick")
         if isinstance(pending, dict):
             if re.fullmatch(r"[1-9]", message):
@@ -112,8 +120,11 @@ def iter_turn(
             scope.chat().set_slot(conversation_id, outcome.get("slot"))
         elif outcome.get("action") == "clear":
             scope.chat().set_slot(conversation_id, None)
+            if not _keep_weather_context(message):
+                scope.chat().set_weather_place(conversation_id, "")
+                weather_place = ""
         elif outcome.get("action") == "resume":
-            scope.chat().set_slot(conversation_id, None)
+            # Keep the question until the weather skill resolves it, or the user changes topic.
             resumed = outcome
     place = ""
     resolved = None
@@ -154,6 +165,27 @@ def iter_turn(
             services=decision.services,
             skill=decision.skill,
         )
+    from ssios.skill_broker import asks_web_weather, live_weather, place_only
+
+    if not resumed and weather_place and place_only(message):
+        place = message
+        decision = RouteDecision(
+            route="skill",
+            reason="The last answer was weather, so this place stays on the weather skill.",
+            reason_code="rule_pending",
+            source="rule",
+            skill="weather",
+        )
+    elif decision.route == "direct" and live_weather(message):
+        decision = RouteDecision(
+            route="skill",
+            reason="Weather is read on this computer. The local model is not asked.",
+            reason_code="rule_skill",
+            source="rule",
+            skill="weather",
+        )
+    if decision.skill == "weather" and asks_web_weather(message) and not place and weather_place:
+        place = weather_place
     _audit_route(plane, account["id"], peer_ip, decision)
     store = scope.chat()
     if conversation_id:
@@ -322,20 +354,23 @@ def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, 
 
 def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDecision | None, cloud_text: str = "") -> Iterator[dict]:
     if not cloud_text:
-        from ssios.skill_broker import match_skill
+        from ssios.skill_broker import asks_web_weather, live_weather, match_skill, place_only
 
+        record = scope.chat().get(conversation_id)
+        known = str(record.get("weather_place") or "")
         last = ""
-        for item in reversed(scope.chat().get(conversation_id).get("messages") or []):
+        for item in reversed(record.get("messages") or []):
             if item.get("role") == "user":
                 last = str(item.get("text") or "")
                 break
-        if match_skill(last):
+        if live_weather(last) or match_skill(last) or (known and place_only(last)):
             if not plane.skills.policy().get("enabled"):
                 text = "Web skills are off; an admin can turn them on"
                 scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "skill", "reason": text, "source": "policy"}})
                 yield {"event": "outcome", "data": {"text": text}}
                 return
-            yield from _skill(plane, scope, conversation_id, last, "127.0.0.1")
+            follow = last if place_only(last) else (known if asks_web_weather(last) else "")
+            yield from _skill(plane, scope, conversation_id, last, "127.0.0.1", place=follow)
             return
     messages = _messages(scope, conversation_id, cloud_text)
     files = list(getattr(scope, "_last_memory_files", []) or [])
@@ -353,6 +388,20 @@ def _direct(plane, scope: AccountScope, conversation_id: str, decision: RouteDec
     answer = "".join(pieces).strip()
     if not answer:
         raise SsiosError("model_output_empty", "model returned no answer content", 502)
+    if not cloud_text and re.search(r"don'?t have real-?time|do not have real-?time|no real-?time|没有实时|无法获取实时", answer, re.IGNORECASE):
+        from ssios.skill_broker import asks_web_weather, live_weather, place_only
+
+        record = scope.chat().get(conversation_id)
+        known = str(record.get("weather_place") or "")
+        last = ""
+        for item in reversed(record.get("messages") or []):
+            if item.get("role") == "user":
+                last = str(item.get("text") or "")
+                break
+        if live_weather(last) or (known and place_only(last)):
+            follow = last if place_only(last) else (known if asks_web_weather(last) else "")
+            yield from _skill(plane, scope, conversation_id, last, "127.0.0.1", place=follow)
+            return
     scope.chat().append(
         conversation_id,
         {
@@ -623,6 +672,16 @@ def _skill(
             query=str(need.get("query") or ""),
         )
         return
+    if str(result.get("skill") or "") == "weather":
+        header = ""
+        for block in result.get("blocks") or []:
+            if isinstance(block, dict) and block.get("header"):
+                header = str(block.get("header") or "")
+                break
+        city = header.split(",", 1)[0].strip()
+        if city:
+            scope.chat().set_weather_place(conversation_id, city)
+        scope.chat().set_slot(conversation_id, None)
     blocks = result["blocks"]
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     reply = _grounded_reply(plane, message, summary, blocks, scope.account)
@@ -1799,6 +1858,7 @@ def failure_hint(code: str) -> str:
         "skill_disabled": "An admin turns web skills on from the admin page. The guest is not used.",
         "skill_ssrf": "That address is not a public web site. Nothing was fetched.",
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
+        "city_not_found": "No city matched that name. Try a city and a region, such as Bellevue, WA. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
         "skill_upstream": "The site may block automated readers. Open the page in your browser and use the clipper, or paste the text or HTML.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",

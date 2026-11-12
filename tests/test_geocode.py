@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from ssios.pending_slot import consume, fresh
-from ssios.skill_broker import _choose_place
+from ssios.skill_broker import _choose_place, geocode_attempts, split_place
 from support import PlaneTest
 from test_ui import _form
 
@@ -154,3 +154,22 @@ class ChoosePlaceTest(PlaneTest):
             now=1_010,
         )
         self.assertEqual(numbered["value"], "Springfield, MO")
+
+    def test_freeform_place_strings_keep_the_city_and_the_region(self) -> None:
+        self.assertEqual(split_place("Bellevue Washington USA"), ("Bellevue", ["Washington", "USA"]))
+        self.assertEqual(split_place("Bellevue, WA"), ("Bellevue", ["WA"]))
+        self.assertEqual(split_place("Bellevue, Washington"), ("Bellevue", ["Washington"]))
+        self.assertEqual(split_place("Bellevue, WA, USA")[0], "Bellevue")
+        self.assertEqual(split_place("上海"), ("上海", []))
+        self.assertEqual(split_place("上海中国"), ("上海", ["中国"]))
+        attempts = geocode_attempts("Bellevue Washington USA")
+        self.assertEqual(attempts[0], ("Bellevue", "Bellevue, Washington, USA"))
+        self.assertIn(("Bellevue Washington USA", "Bellevue, Washington, USA"), attempts)
+        hit, ambiguous, note = _choose_place("Bellevue, Washington, USA", BELLEVUE)
+        self.assertEqual(ambiguous, [])
+        self.assertEqual(hit["admin1"], "Washington")
+        self.assertNotIn("Nebraska", note)
+        hit, ambiguous, note = _choose_place("Bellevue, WA", BELLEVUE)
+        self.assertEqual(ambiguous, [])
+        self.assertEqual(hit["admin1"], "Washington")
+        self.assertEqual(note, "")

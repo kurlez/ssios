@@ -114,6 +114,16 @@ class ChatStore:
         record["updated_at"] = time.time()
         self._write(record)
 
+    def set_weather_place(self, conv_id: str, place: str) -> None:
+        record = self.get(conv_id)
+        text = " ".join(str(place or "").split())[:80]
+        if text:
+            record["weather_place"] = text
+        else:
+            record.pop("weather_place", None)
+        record["updated_at"] = time.time()
+        self._write(record)
+
     def append(self, conv_id: str, message: dict) -> dict:
         record = self.get(conv_id)
         message = dict(message)
