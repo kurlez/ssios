@@ -77,6 +77,12 @@ MESSAGES = {
         "watch_rejected": "That folder is not on this computer.",
         "watch_waiting": "Waiting for the file to finish changing.",
         "watch_saved": "Saved the watch folder.",
+        "analyze": "Analyze",
+        "analyze_saved": "Saved the description on this file.",
+        "analyze_unavailable": "The local model is not available. Nothing was sent to a cloud service.",
+        "ocr_label": "Text in the file",
+        "memory_core": "Copy to core memory",
+        "memory_pending": "Waiting for approval before core memory changes.",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -147,6 +153,12 @@ MESSAGES = {
         "watch_rejected": "这个文件夹不在这台电脑上。",
         "watch_waiting": "等文件不再变化。",
         "watch_saved": "已保存监视文件夹。",
+        "analyze": "分析",
+        "analyze_saved": "已把说明记在这个文件上。",
+        "analyze_unavailable": "本地模型不可用。没有把内容发到云端。",
+        "ocr_label": "文件里的文字",
+        "memory_core": "复制到核心记忆",
+        "memory_pending": "核心记忆要等你批准后才会改。",
     },
 }
 

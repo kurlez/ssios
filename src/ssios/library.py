@@ -570,6 +570,9 @@ def _record_item(
             match["mime"] = kind["mime"]
             match["group"] = kind["group"]
             match["modified_at"] = stamp
+            match["description"] = ""
+            match["ocr"] = ""
+            match["analysis_model"] = ""
             if captured:
                 match["captured_at"] = captured
             if folder_id and folder_id not in (match.get("folder_ids") or []):

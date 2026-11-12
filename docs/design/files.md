@@ -81,7 +81,7 @@ Read-only copy of a synthetic Eagle 4.x `.library`: folder tree, multi-folder me
 
 ### M4 — local analysis and memory
 
-Background captions, OCR, summaries, and tags from the local models. One large model resident at a time. Vectors and semantic search. Asking about a selection stays inside that selection. Extracted facts go to `topics/library/<item-id>.md` and are what chat can recall. Originals stay out of MemFS. Edits, trash, and "leave out of memory" update that note. Promotion into core memory (`human.md` and the like) still follows the account's approval mode. Whisper for movie audio stays off unless a later decision turns it on.
+Analysis is on demand, not a background job. Text uses `qwen3:14b`. Images use `qwen2.5vl:7b`. The host must be loopback. There is no cloud fallback. The description, tags, and OCR text are stored on the item. A note is saved under `topics/library/<item-id>.md` with the item, the library, who added the file, and the model name. Originals stay out of MemFS. Copying that note into core memory (`human.md`) stages the existing approval and does not write until it is accepted. Vectors, asking about a selection, and movie transcription are not in this branch. Whisper stays off.
 
 ### M5 — household sharing
 

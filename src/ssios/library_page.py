@@ -367,6 +367,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
             + "<label>Tag <input name=\"tag\" maxlength=\"40\"></label>"
             + "<button name=\"op\" value=\"tag-item\" type=\"submit\">Add tag</button></form>"
+            + _analysis_block(selected, lang, csrf, library_id, ident)
         )
         if selected.get("trashed"):
             inspector += (
@@ -497,6 +498,16 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         if found.get("imported"):
             note += " " + say(_language(plane, account_id), "drop_saved")
         return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(note)}</p>"))
+    if op == "analyze":
+        from ssios.library_analyze import analyze_item
+
+        analyzed = analyze_item(plane, account_id, library_id, str(body.get("item") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id, "item": analyzed["id"]}, f"<p>{html.escape(say(_language(plane, account_id), 'analyze_saved'))}</p>"))
+    if op == "remember":
+        from ssios.library_analyze import stage_core_memory
+
+        stage_core_memory(plane, account_id, library_id, str(body.get("item") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id, "item": str(body.get("item") or "")}, f"<p>{html.escape(say(_language(plane, account_id), 'memory_pending'))}</p>"))
     if op == "folder":
         add_folder(plane, account_id, library_id, str(body.get("name") or ""), peer_ip)
     elif op == "tag":
@@ -540,6 +551,30 @@ def _upload(body: dict) -> tuple[bytes, str, str]:
     if uploads and isinstance(uploads[0], dict) and isinstance(uploads[0].get("bytes"), (bytes, bytearray)):
         return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker"} else "picker"
     return b"", str(body.get("name") or ""), source
+
+
+def _analysis_block(selected: dict, lang: str, csrf: str, library_id: str, ident: str) -> str:
+    description = str(selected.get("description") or "")
+    ocr = str(selected.get("ocr") or "")
+    shown = ""
+    if description:
+        shown += f"<p>{html.escape(description)}</p>"
+    if ocr:
+        shown += f"<p>{html.escape(say(lang, 'ocr_label'))}: {html.escape(ocr)}</p>"
+    forms = (
+        f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<input type="hidden" name="item" value="{ident}">'
+        f'<button name="op" value="analyze" type="submit">{html.escape(say(lang, "analyze"))}</button></form>'
+    )
+    if description:
+        forms += (
+            f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+            f'<input type="hidden" name="item" value="{ident}">'
+            f'<button name="op" value="remember" type="submit">{html.escape(say(lang, "memory_core"))}</button></form>'
+        )
+    return shown + forms
 
 
 def _smart_block(meta: dict, base: str, lang: str, csrf: str, library_id: str) -> str:
