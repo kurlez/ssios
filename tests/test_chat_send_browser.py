@@ -204,6 +204,10 @@ PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"
     "de0000000c4944415408d763f8ffff3f0005fe02fe33d32f0000000049454e44ae426082"
 )
+BMP = bytes.fromhex(
+    "424d3a00000000000000360000002800000001000000010000000100180000000000"
+    "04000000000000000000000000000000000000000000ff00"
+)
 
 
 class ChatSendBrowserTest(unittest.TestCase):
@@ -301,7 +305,7 @@ class ChatSendBrowserTest(unittest.TestCase):
         )
         self.assertIn("1 file ready", ready or "")
         self._type_and_send("See the desk photo")
-        self.page.wait("document.body.innerText.includes('See the desk photo') && document.body.innerText.includes('Synthetic local answer')")
+        self.page.wait("document.body.innerText.includes('See the desk photo') && document.body.innerText.includes('Synthetic caption of the attached image')")
         self.assertEqual(self.page.errors, [])
 
     def test_clipboard_items_attach_images_and_text_paste_still_works(self) -> None:
@@ -357,6 +361,64 @@ class ChatSendBrowserTest(unittest.TestCase):
         rows = FileLibrary(self.case.plane).list(self.ada["id"], role="image")
         self.assertTrue(rows)
         self.assertTrue(all(item["url"].startswith("/ui/files/file-") for item in rows))
+
+    def test_bmp_and_empty_type_paste_do_not_insert_a_file_url(self) -> None:
+        self._open("/ui/chat")
+        png = json.dumps(list(PNG))
+        bmp = json.dumps(list(BMP))
+        script = (
+            "var pngBytes = new Uint8Array(" + png + ");"
+            "var bmpBytes = new Uint8Array(" + bmp + ");"
+            "var html = '<html><body><img src=\"file:///C:/Users/Public/snip.png\"></body></html>';"
+            "function paste(items, files) {"
+            "  var data = {files: files || [], items: items, getData: function (kind) { return kind === 'text/html' ? html : ''; }};"
+            "  var event = new Event('paste', {bubbles: true, cancelable: true});"
+            "  Object.defineProperty(event, 'clipboardData', {value: data});"
+            "  document.querySelector('textarea[name=message]').dispatchEvent(event);"
+            "  return event.defaultPrevented;"
+            "}"
+            "var empty = new File([pngBytes], 'snip.png', {type: ''});"
+            "var bmpFile = new File([bmpBytes], 'snip.bmp', {type: 'image/bmp'});"
+            "var prevented = paste(["
+            "  {kind: 'string', type: 'text/html', getAsFile: function () { return null; }},"
+            "  {kind: 'file', type: '', getAsFile: function () { return empty; }}"
+            "], []);"
+            "paste([{kind: 'file', type: 'image/bmp', getAsFile: function () { return bmpFile; }}], []);"
+            "JSON.stringify({prevented: prevented, value: document.querySelector('textarea[name=message]').value})"
+        )
+        state = json.loads(self.page.eval(script))
+        self.assertTrue(state["prevented"])
+        self.assertNotIn("file:///", state["value"])
+        self.page.wait("document.querySelectorAll('#paste-preview img').length >= 2 && Array.prototype.every.call(document.querySelectorAll('#paste-preview img'), function (img) { return img.naturalWidth > 0; })")
+        self.page.eval(
+            "var box = document.querySelector('textarea[name=message]');"
+            "box.value = 'Pasted from the clipboard';"
+            "box.dispatchEvent(new Event('input', {bubbles: true}));"
+            "document.querySelector('button.send').click(); true"
+        )
+        self.page.wait(
+            "document.body.innerText.includes('Synthetic caption of the attached image')"
+            " && document.querySelector('.msg.user .thumb')"
+            " && document.querySelector('.msg.user .thumb').getAttribute('src').indexOf('/ui/files/') === 0"
+            " && document.querySelector('.msg.user .thumb').src.indexOf('localhost') < 0"
+            " && document.querySelector('.msg.user .thumb').src.indexOf('file:') < 0"
+        )
+        self.page.eval(
+            "window.__served = '';"
+            "var src = document.querySelector('.msg.user .thumb').getAttribute('src');"
+            "fetch(src, {credentials: 'same-origin'}).then(function (response) {"
+            "  return response.arrayBuffer().then(function (buf) {"
+            "    var bytes = new Uint8Array(buf);"
+            "    window.__served = JSON.stringify({status: response.status, type: response.headers.get('content-type'), png: bytes[0] === 137 && bytes[1] === 80});"
+            "  });"
+            "}); true"
+        )
+        self.page.wait("window.__served")
+        body = json.loads(self.page.eval("window.__served"))
+        self.assertEqual(body["status"], 200)
+        self.assertEqual(body["type"], "image/png")
+        self.assertTrue(body["png"])
+        self.assertEqual(self.page.errors, [])
 
     def test_a_failed_guest_clears_the_writing_indicator(self) -> None:
         import ssios.chat_guest as guests

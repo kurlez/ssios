@@ -204,14 +204,26 @@ def iter_turn(
     from ssios.files import FileLibrary, screenshot_request
 
     library = FileLibrary(plane)
+    image_urls = []
     for file_id in user_message.get("file_ids") or []:
         library.attach(account["id"], file_id, thread_id=record["id"], message_id=str(stored.get("id") or ""))
+        try:
+            row = library.get(account["id"], file_id)
+        except SsiosError:
+            continue
+        if row.get("role") == "image" and str(row.get("url") or "").startswith("/ui/"):
+            image_urls.append(str(row["url"]))
     yield {"event": "conversation", "data": {"id": record["id"]}}
+    if image_urls:
+        yield {"event": "uploads", "data": {"images": image_urls}}
     yield {"event": "route", "data": decision.public()}
     try:
         filing = screenshot_request(message)
         if filing is not None:
             yield from _file_screenshot(plane, scope, record["id"], message, filing, user_message.get("file_ids") or [], peer_ip)
+            return
+        if image_urls:
+            yield from _vision_turn(plane, scope, record["id"], message, image_urls)
             return
         if clock_answer(message, *host_clock(plane, scope.account)):
             yield from _clock_turn(plane, scope, record["id"], message, decision)
@@ -337,6 +349,44 @@ def _name_turn(scope: AccountScope, conversation_id: str, message: str) -> Itera
     files = list(getattr(scope, "_last_memory_files", []) or [])
     if files:
         yield {"event": "memory", "data": {"files": files}}
+
+
+def _vision_turn(plane, scope: AccountScope, conversation_id: str, message: str, image_urls: list[str]) -> Iterator[dict]:
+    """Read attached images with the configured local vision model. Text chat stays on its own model."""
+    import base64
+
+    from ssios.files import FileLibrary
+
+    model = str(getattr(plane.settings, "vision_model", "") or "qwen2.5vl:7b")
+    library = FileLibrary(plane)
+    images = []
+    for url in image_urls:
+        file_id = url.strip("/").split("/")[-2] if url.endswith("/raw") else ""
+        if not file_id.startswith("file-"):
+            continue
+        raw, content_type, _name = library.bytes(scope.account_id, file_id)
+        if not str(content_type).startswith("image/"):
+            continue
+        images.append(base64.b64encode(raw).decode("ascii"))
+    if not images:
+        text = f"The vision model {model} did not receive an image. Run: ollama pull {model}"
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "direct", "reason": text, "source": "rule"}})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    try:
+        answer = plane.llm.describe_image(message or "Describe this image.", images, model=model, deadline=time.monotonic() + 60)
+    except SsiosError as exc:
+        if exc.code != "vision_unavailable":
+            raise
+        text = str(exc.detail or f"The vision model {model} is not installed. Run: ollama pull {model}")
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "direct", "reason": text, "source": "rule"}})
+        yield {"event": "outcome", "data": {"text": text}}
+        return
+    text = " ".join(str(answer or "").split())
+    if not text:
+        text = f"The vision model {model} returned no caption. Run: ollama pull {model}"
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "direct", "reason": "A local vision model read the image.", "source": "rule"}})
+    yield {"event": "outcome", "data": {"text": text}}
 
 
 def _clock_turn(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:

@@ -125,23 +125,64 @@ CHAT_JS = r"""
     }
     if (note) note.textContent = pending.length ? String(pending.length) + " file ready to send." : "";
   }
+  function imageFile(file, type) {
+    if (!file) return false;
+    var kind = String(type || file.type || "").toLowerCase();
+    if (kind.indexOf("image/") === 0) return true;
+    if (kind === "" || kind === "application/octet-stream") return true;
+    return false;
+  }
   function clipboardImages(data) {
     var found = [];
     var items = data && data.items;
     if (items && items.length) {
       for (var i = 0; i < items.length; i++) {
         var item = items[i];
-        var type = (item && item.type) || "";
-        if (type.indexOf("image/") === 0 && item.getAsFile) {
+        if (!item || !item.getAsFile) continue;
+        var type = String(item.type || "");
+        var kind = String(item.kind || "");
+        if (kind === "file" || type.toLowerCase().indexOf("image/") === 0 || type === "") {
           var image = item.getAsFile();
-          if (image) found.push(image);
+          if (imageFile(image, type)) found.push(image);
         }
       }
     }
     if (data && data.files && data.files.length) {
-      Array.prototype.forEach.call(data.files, function (file) { if (file) found.push(file); });
+      Array.prototype.forEach.call(data.files, function (file) {
+        if (imageFile(file, file && file.type)) found.push(file);
+      });
     }
     return found;
+  }
+  function htmlFileImage(data) {
+    var html = "";
+    try { html = String(data.getData ? data.getData("text/html") : ""); } catch (err) { html = ""; }
+    return /<img\b[^>]*\bsrc\s*=\s*["']?\s*file:/i.test(html);
+  }
+  function toPng(file) {
+    var type = String(file.type || "").toLowerCase();
+    if (type === "image/png" || type === "image/jpeg" || type === "image/gif" || type === "image/webp") {
+      return Promise.resolve(file);
+    }
+    return new Promise(function (resolve) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width || 1;
+        canvas.height = img.naturalHeight || img.height || 1;
+        var context = canvas.getContext("2d");
+        if (!context) { URL.revokeObjectURL(url); resolve(null); return; }
+        context.drawImage(img, 0, 0);
+        canvas.toBlob(function (blob) {
+          URL.revokeObjectURL(url);
+          if (!blob) { resolve(null); return; }
+          resolve(new File([blob], "pasted.png", {type: "image/png"}));
+        }, "image/png");
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
   }
   form.addEventListener("dragover", function (event) { event.preventDefault(); });
   form.addEventListener("drop", function (event) {
@@ -159,9 +200,27 @@ CHAT_JS = r"""
     var data = event.clipboardData;
     if (!data) return;
     var images = clipboardImages(data);
-    if (!images.length) return;
+    var brokenHtml = htmlFileImage(data);
+    if (!images.length && !brokenHtml) return;
     event.preventDefault();
-    takeFiles(images);
+    if (!images.length) {
+      if (note) note.textContent = "That clipboard image could not be read.";
+      return;
+    }
+    var direct = [];
+    var convert = [];
+    images.forEach(function (file) {
+      var type = String(file.type || "").toLowerCase();
+      if (type === "image/png" || type === "image/jpeg" || type === "image/gif" || type === "image/webp") direct.push(file);
+      else convert.push(file);
+    });
+    if (direct.length) takeFiles(direct);
+    if (!convert.length) return;
+    Promise.all(convert.map(toPng)).then(function (files) {
+      var ready = files.filter(function (file) { return file; });
+      if (!ready.length && !direct.length && note) note.textContent = "That clipboard image could not be read.";
+      if (ready.length) takeFiles(ready);
+    });
   });
   form.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -700,6 +759,18 @@ CHAT_JS = r"""
     if (name === "conversation" && payload.id) {
       var hidden = form.querySelector("input[name=conversation]");
       if (hidden) hidden.value = payload.id;
+    }
+    if (name === "uploads" && payload.images && payload.images.length) {
+      var thumbs = document.querySelectorAll(".msg.user .thumb");
+      var start = thumbs.length - payload.images.length;
+      if (start < 0) start = 0;
+      payload.images.forEach(function (src, index) {
+        if (String(src || "").indexOf("/ui/") !== 0) return;
+        var thumb = thumbs[start + index];
+        if (!thumb) return;
+        if (String(thumb.src || "").indexOf("blob:") === 0) URL.revokeObjectURL(thumb.src);
+        thumb.src = src;
+      });
     }
     if (name === "results") {
       if (onResult) onResult();

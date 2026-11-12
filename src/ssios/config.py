@@ -18,6 +18,7 @@ class Settings:
     llm_provider: str
     ollama_base_url: str
     ollama_model: str
+    vision_model: str
     llm_timeout_seconds: float
     report_base_seconds: float
     report_batch_seconds: float
@@ -69,6 +70,13 @@ class Settings:
     codex_turn_timeout_seconds: float
     state_dir: Path
     config_path: Path | None
+
+
+def _model_name(value: str, label: str) -> str:
+    name = str(value or "").strip()
+    if not name or name == "ollama" or any(char in name for char in "\n\r\"/"):
+        raise SsiosError("config_invalid", f"{label} name is rejected", 500)
+    return name
 
 
 def _section(data: dict, name: str) -> dict:
@@ -229,6 +237,7 @@ def load_settings(
         llm_provider=provider,
         ollama_base_url=ollama_base.rstrip("/"),
         ollama_model=str(llm.get("ollama_model", "llama3.1:8b")),
+        vision_model=_model_name(str(llm.get("vision_model", "qwen2.5vl:7b")), "vision model"),
         llm_timeout_seconds=float(llm.get("request_timeout_seconds", 60)),
         report_base_seconds=float(llm.get("report_base_seconds", 45)),
         report_batch_seconds=float(llm.get("report_batch_seconds", 20)),

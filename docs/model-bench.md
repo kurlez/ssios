@@ -19,3 +19,5 @@ ollama pull muse-glimmer:30b-mlx
 That model needs Ollama >= 0.32.8 and the MLX engine. The weights are about 19GB. On a 24GB Mac, set `[agent.codex] num_ctx` to 16384 before using it as the guest. The bench warns when `/api/ps` `size` or `size_vram`, plus a 2GB guest, would leave under about 3GB free on a 24GB machine. No Muse Glimmer result is stored in this repository.
 
 The JSON report has `valid_tool_call_rate`, `correct_tool_rate`, `argument_validity_rate`, `tool_call_as_text_count`, `median_seconds`, `max_seconds`, and `peak_memory`. A write prompt is scored only as "this tool would wait for approval". `vm-diagnose` prints the active guest model as `guest_model`.
+
+`--vision` adds one synthetic image caption on the configured vision model, `qwen2.5vl:7b` by default. Text turns stay on the model you named, which is `qwen3:14b` for the guest. If that vision model is not installed, the report says `ollama pull qwen2.5vl:7b` and does not invent a caption. No vision measurement is stored in this repository.

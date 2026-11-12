@@ -6,6 +6,7 @@ and a write is not turned into an approval.
 
 from __future__ import annotations
 
+import base64
 import json
 import statistics
 import time
@@ -19,6 +20,12 @@ from ssios.mcp_host import WRITE_TOOLS, normalize_tool_name, text_only_tool_call
 MACHINE_BYTES = 24 * 1024**3
 GUEST_BYTES = 2 * 1024**3
 FREE_FLOOR = 3 * 1024**3
+_SYNTHETIC_PNG = base64.b64encode(
+    bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"
+        "de0000000c4944415408d763f8ffff3f0005fe02fe33d32f0000000049454e44ae426082"
+    )
+).decode("ascii")
 
 TURNS = (
     {"id": "gmail-search", "user": "Search the inbox for mail from Harbor Desk.", "tool": "gmail.search", "required": ("q",), "write": False},
@@ -59,7 +66,7 @@ def tool_schemas() -> list[dict]:
     ]
 
 
-def run_bench(*, model: str, base_url: str, opener=None, num_ctx: int = 16384) -> dict:
+def run_bench(*, model: str, base_url: str, opener=None, num_ctx: int = 16384, vision: bool = False, vision_model: str = "qwen2.5vl:7b") -> dict:
     """Score one local model. opener(url, payload) returns (status, body). payload None is a GET."""
     host = (urlsplit(base_url).hostname or "").lower()
     if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -92,7 +99,7 @@ def run_bench(*, model: str, base_url: str, opener=None, num_ctx: int = 16384) -
     memory = _memory(post, base_url)
     counted = [row for row in rows if row["http_status"] == 200]
     total = len(TURNS)
-    return {
+    report = {
         "model": model,
         "turns": total,
         "valid_tool_call_rate": _rate(sum(row["valid"] for row in counted), total),
@@ -107,6 +114,39 @@ def run_bench(*, model: str, base_url: str, opener=None, num_ctx: int = 16384) -
         "synthetic": True,
         "rows": rows,
     }
+    if vision:
+        report["vision"] = _vision_probe(post, base_url, vision_model)
+    return report
+
+
+def _vision_probe(post, base_url: str, model: str) -> dict:
+    """One synthetic image. Nothing is saved. A missing model names the pull command."""
+    try:
+        status, raw = post(
+            base_url.rstrip("/") + "/api/chat",
+            {
+                "model": model,
+                "stream": False,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Read the text in this synthetic image. Reply with one word.",
+                        "images": [_SYNTHETIC_PNG],
+                    }
+                ],
+            },
+        )
+    except SsiosError:
+        return {"ok": False, "installed": False, "model": model, "detail": f"The vision model {model} is not installed. Run: ollama pull {model}"}
+    if status == 404:
+        return {"ok": False, "installed": False, "model": model, "detail": f"The vision model {model} is not installed. Run: ollama pull {model}"}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        payload = {}
+    message = payload.get("message") if isinstance(payload, dict) else {}
+    caption = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+    return {"ok": bool(caption), "installed": status == 200, "model": model, "caption": caption[:200]}
 
 
 def _score(turn: dict, status: int, raw: bytes, elapsed: float) -> dict:

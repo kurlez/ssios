@@ -235,7 +235,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", page.cache_control or "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
         for key, value in (getattr(page, "extra_headers", None) or {}).items():
             self.send_header(str(key), str(value))
@@ -277,7 +277,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
         for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
             self.send_header("Set-Cookie", item)

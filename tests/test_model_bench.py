@@ -68,3 +68,30 @@ class ModelBenchTest(unittest_case := __import__("unittest").TestCase):
         self.assertIn("gmail.search", json.dumps(seen[0][1]["tools"]))
         with self.assertRaises(SsiosError):
             run_bench(model="muse-glimmer:30b-mlx", base_url="https://example.com", opener=opener)
+
+    def test_optional_vision_check_uses_a_synthetic_image(self) -> None:
+        def opener(url, payload):
+            if payload is None:
+                return 200, json.dumps({"models": [{"size": 1, "size_vram": 1}]}).encode()
+            images = (payload.get("messages") or [{}])[0].get("images")
+            if images:
+                self.assertEqual(payload["model"], "qwen2.5vl:7b")
+                self.assertTrue(images[0].startswith("iVBOR"))
+                return 200, json.dumps({"message": {"content": "HARBOR"}}).encode()
+            return 200, _reply("gmail.search", {"q": "in:inbox"})
+
+        report = run_bench(model="qwen3:14b", base_url="http://127.0.0.1:11434", opener=opener, vision=True)
+        self.assertEqual(report["model"], "qwen3:14b")
+        self.assertEqual(report["vision"]["caption"], "HARBOR")
+        self.assertTrue(report["vision"]["ok"])
+
+        def missing(url, payload):
+            if payload is None:
+                return 200, json.dumps({"models": []}).encode()
+            if (payload.get("messages") or [{}])[0].get("images"):
+                return 404, b'{"error":"model not found"}'
+            return 200, _reply("gmail.search", {"q": "in:inbox"})
+
+        absent = run_bench(model="qwen3:14b", base_url="http://127.0.0.1:11434", opener=missing, vision=True, vision_model="qwen2.5vl:7b")
+        self.assertFalse(absent["vision"]["installed"])
+        self.assertIn("ollama pull qwen2.5vl:7b", absent["vision"]["detail"])

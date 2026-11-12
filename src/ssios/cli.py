@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
         if name == "model-bench":
             command.add_argument("--model", default="", help="Ollama model name, such as qwen3:14b or muse-glimmer:30b-mlx")
+            command.add_argument("--vision", action="store_true", help="also score one synthetic image caption")
+            command.add_argument("--vision-model", default="", help="vision model, default qwen2.5vl:7b")
         if name == "ui":
             command.add_argument("--lan", action="store_true")
             command.add_argument("--check", action="store_true", help="print chat guest prerequisites and exit")
@@ -172,7 +174,13 @@ def main(argv: list[str] | None = None) -> int:
 
         model = str(getattr(args, "model", "") or "") or settings.codex_model
         try:
-            report = run_bench(model=model, base_url=settings.ollama_base_url, num_ctx=int(settings.codex_num_ctx))
+            report = run_bench(
+                model=model,
+                base_url=settings.ollama_base_url,
+                num_ctx=int(settings.codex_num_ctx),
+                vision=bool(getattr(args, "vision", False)),
+                vision_model=str(getattr(args, "vision_model", "") or "") or settings.vision_model,
+            )
         except SsiosError as exc:
             print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
             return 1

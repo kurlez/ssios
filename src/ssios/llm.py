@@ -343,6 +343,17 @@ def _chat_payload(
     return payload
 
 
+def _vision_installed(base_url: str, model: str, timeout: float) -> bool:
+    request = urllib.request.Request(base_url.rstrip("/") + "/api/tags", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, UnicodeError):
+        return False
+    names = [str(item.get("name") or "") for item in (body.get("models") or []) if isinstance(item, dict)]
+    return any(name == model or name.startswith(model + "-") for name in names)
+
+
 def _post_json(url: str, payload: dict, timeout: float) -> dict:
     request = urllib.request.Request(
         url,
@@ -588,6 +599,19 @@ class MockLLM:
             return "Synthetic local answer using the approved cloud text. No tools were used."
         return "Synthetic local answer. No tools were used."
 
+    def describe_image(self, prompt: str, images: list[str], *, model: str, deadline: float) -> str:
+        """Stand-in vision reply. Tests can set vision_script. No network."""
+        del deadline
+        if not images:
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        script = getattr(self, "vision_script", None)
+        if script:
+            item = script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return str(item)
+        return "Synthetic caption of the attached image."
+
     def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
         text = self.complete_chat(messages, cancel_event=cancel_event, deadline=deadline)
         parts = text.split(" ")
@@ -767,6 +791,30 @@ class OllamaLLM:
         answer = body.get("message") if isinstance(body.get("message"), dict) else {}
         content = answer.get("content") if isinstance(answer.get("content"), str) else ""
         return content
+
+    def describe_image(self, prompt: str, images: list[str], *, model: str, deadline: float) -> str:
+        """Ollama /api/chat with the images field. The text model is not used."""
+        if not images:
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        if not _vision_installed(self.base_url, model, min(10.0, max(0.1, deadline - time.monotonic()))):
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "messages": [{"role": "user", "content": prompt or "Describe this image.", "images": list(images)}],
+            "options": {"temperature": 0, "num_predict": min(self.max_output_tokens, 512)},
+        }
+        try:
+            body = _post_json(self.base_url + "/api/chat", payload, timeout)
+        except SsiosError as exc:
+            if exc.code in {"llm_unavailable", "ollama_rejected"}:
+                raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503) from exc
+            raise
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return content.strip()
 
     def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
         """Stream native /api/chat. There is no cloud fallback."""
