@@ -224,7 +224,7 @@ class SkillTest(PlaneTest):
         self.plane.skills.opener = self._open_one_bellevue
         status, asked, _cookie = self._send("今天天气怎么样")
         self.assertEqual(status, 200, asked)
-        self.assertIn("Which city?", asked)
+        self.assertIn("哪个城市？", asked)
         self.assertIn("Route: skill", asked)
         conversation = self._conversation(asked)
         self.assertEqual(self._slot(conversation)["slot"], "location")
@@ -264,9 +264,10 @@ class SkillTest(PlaneTest):
         )
         status, page, _cookie = self._send("今天天气怎么样")
         self.assertEqual(status, 200, page)
-        self.assertIn("Using Seattle", page)
+        self.assertIn("使用", page)
+        self.assertIn("Seattle", page)
         self.assertIn("12°C", page)
-        self.assertNotIn("Which city?", page)
+        self.assertNotIn("哪个城市？", page)
         self.assertTrue(any("Seattle" in item for item in self.seen))
 
     def test_an_ambiguous_place_asks_and_the_choice_continues(self) -> None:

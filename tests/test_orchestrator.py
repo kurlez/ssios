@@ -298,7 +298,7 @@ class GuestFailureTest(PlaneTest):
         page = self._send("今天天气怎么样")
         self.assertIn("Route: skill", page)
         self.assertNotIn("Route: codex", page)
-        self.assertIn("Which city?", page)
+        self.assertIn("哪个城市？", page)
         self.assertNotIn("AttributeError", page)
         self.assertNotIn("chat_empty", page)
         self.assertEqual(launched, [])

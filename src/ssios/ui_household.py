@@ -23,7 +23,8 @@ CHAT_JS = r"""
   var column = log ? log.querySelector(".column") : null;
   var dataNode = document.getElementById("chat-data");
   var empty = document.getElementById("empty");
-  if (!form || !column) return;
+  if (!form || !column || form.getAttribute("data-chat-bound") === "1") return;
+  form.setAttribute("data-chat-bound", "1");
   var csrf = (form.querySelector("input[name=csrf]") || {}).value || "";
   var turnFailed = false;
   var box = form.querySelector("textarea");
@@ -76,17 +77,50 @@ CHAT_JS = r"""
       }
     });
   }
+  var pendingHashes = [];
+  function fileHash(file) {
+    return file.arrayBuffer().then(function (buf) {
+      if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+        return crypto.subtle.digest("SHA-256", buf).then(function (dig) {
+          return Array.prototype.map.call(new Uint8Array(dig), function (byte) {
+            return ("0" + byte.toString(16)).slice(-2);
+          }).join("");
+        });
+      }
+      return "len:" + String(buf.byteLength);
+    });
+  }
   function takeFiles(list) {
+    var known = pendingHashes.slice();
+    var added = [];
     Array.prototype.forEach.call(list || [], function (file) {
       if (!file || pending.length >= 6) return;
       var key = (file.name || "") + ":" + file.size + ":" + (file.lastModified || 0);
       var duplicate = pending.some(function (item) {
         return (item.name || "") + ":" + item.size + ":" + (item.lastModified || 0) === key;
       });
-      if (!duplicate) pending.push(file);
+      if (!duplicate) {
+        pending.push(file);
+        pendingHashes.push("");
+        added.push(file);
+      }
     });
     showPreviews();
     syncSend();
+    added.forEach(function (file) {
+      fileHash(file).then(function (hash) {
+        var index = pending.indexOf(file);
+        if (index < 0) return;
+        if (hash && known.indexOf(hash) >= 0) {
+          pending.splice(index, 1);
+          pendingHashes.splice(index, 1);
+          showPreviews();
+          syncSend();
+          return;
+        }
+        pendingHashes[index] = hash;
+      });
+    });
   }
   function showPreviews() {
     var strip = document.getElementById("paste-preview");
@@ -116,6 +150,7 @@ CHAT_JS = r"""
         remove.textContent = "\u00d7";
         remove.addEventListener("click", function () {
           pending.splice(index, 1);
+          pendingHashes.splice(index, 1);
           showPreviews();
           syncSend();
         });
@@ -132,27 +167,46 @@ CHAT_JS = r"""
     if (kind === "" || kind === "application/octet-stream") return true;
     return false;
   }
-  function clipboardImages(data) {
+  function clipboardFiles(list, fromItems) {
     var found = [];
-    var items = data && data.items;
-    if (items && items.length) {
-      for (var i = 0; i < items.length; i++) {
-        var item = items[i];
+    if (!list || !list.length) return found;
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      var file = item;
+      var type = "";
+      if (fromItems) {
         if (!item || !item.getAsFile) continue;
-        var type = String(item.type || "");
+        type = String(item.type || "");
         var kind = String(item.kind || "");
-        if (kind === "file" || type.toLowerCase().indexOf("image/") === 0 || type === "") {
-          var image = item.getAsFile();
-          if (imageFile(image, type)) found.push(image);
-        }
+        if (!(kind === "file" || type.toLowerCase().indexOf("image/") === 0 || type === "")) continue;
+        file = item.getAsFile();
+      } else {
+        type = file && file.type;
       }
-    }
-    if (data && data.files && data.files.length) {
-      Array.prototype.forEach.call(data.files, function (file) {
-        if (imageFile(file, file && file.type)) found.push(file);
-      });
+      if (imageFile(file, type)) found.push(file);
     }
     return found;
+  }
+  function oneRepresentation(files) {
+    var grouped = {};
+    files.forEach(function (file) {
+      var type = String(file.type || "").toLowerCase() || "empty";
+      if (!grouped[type]) grouped[type] = [];
+      grouped[type].push(file);
+    });
+    var types = Object.keys(grouped);
+    if (types.length <= 1) return files;
+    var rank = {"image/png": 0, "image/jpeg": 1, "image/webp": 2, "image/gif": 3, "image/bmp": 4, "empty": 5};
+    var bestType = types[0];
+    types.forEach(function (type) {
+      if ((rank[type] === undefined ? 6 : rank[type]) < (rank[bestType] === undefined ? 6 : rank[bestType])) bestType = type;
+    });
+    return grouped[bestType].slice(0, 1);
+  }
+  function clipboardImages(data) {
+    var fromItems = clipboardFiles(data && data.items, true);
+    if (fromItems.length) return oneRepresentation(fromItems);
+    return oneRepresentation(clipboardFiles(data && data.files, false));
   }
   function htmlFileImage(data) {
     var html = "";

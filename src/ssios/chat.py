@@ -167,7 +167,16 @@ def iter_turn(
         )
     from ssios.skill_broker import asks_web_weather, live_weather, place_only
 
-    if not resumed and weather_place and place_only(message):
+    if _correction_place(message):
+        place = _correction_place(message)
+        decision = RouteDecision(
+            route="skill",
+            reason="The message corrects the saved place, so the weather skill updates it.",
+            reason_code="rule_pending",
+            source="rule",
+            skill="weather",
+        )
+    elif not resumed and weather_place and place_only(message):
         place = message
         decision = RouteDecision(
             route="skill",
@@ -245,7 +254,17 @@ def iter_turn(
         elif decision.route == "codex":
             yield from _codex(plane, scope, record["id"], message, peer_ip, place=place)
         elif decision.route == "skill":
-            yield from _skill(plane, scope, record["id"], message, peer_ip, place=place, resolved=resolved, asked=asked_place)
+            yield from _skill(
+                plane,
+                scope,
+                record["id"],
+                message,
+                peer_ip,
+                place=place,
+                resolved=resolved,
+                asked=asked_place,
+                from_slot=bool((resumed and str(resumed.get("skill") or "") == "weather") or _correction_place(message)),
+            )
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
@@ -667,6 +686,86 @@ def _dispatch_host(
         yield from _vm(plane, scope, conversation_id, message, peer_ip)
 
 
+def _turn_language(plane, account_id: str, message: str) -> str:
+    from ssios.locale_messages import reply_language, wants_language_change
+
+    forced = wants_language_change(message)
+    if forced:
+        plane.skills.set_account(account_id, language=forced)
+    elif re.search(r"[\u4e00-\u9fff]", message or ""):
+        plane.skills.set_account(account_id, language="zh")
+    preferred = str(plane.skills.account_prefs(account_id).get("language") or "en")
+    return reply_language(message, preferred)
+
+
+def _stored_weather(scope) -> dict | None:
+    from ssios.account_memory import _read
+
+    text = _read(scope.memory(), scope.project_id(), "preferences.md")
+    bullets = {}
+    for line in text.splitlines():
+        match = re.match(r"^-\s+([A-Za-z0-9_-]+):\s*(.*)$", line.strip())
+        if match:
+            bullets[match.group(1)] = match.group(2).strip()
+    if not bullets.get("WeatherLatitude") or not bullets.get("WeatherLongitude"):
+        return None
+    try:
+        latitude = float(bullets["WeatherLatitude"])
+        longitude = float(bullets["WeatherLongitude"])
+    except ValueError:
+        return None
+    label = bullets.get("Weather") or ""
+    return {
+        "name": label.split(",")[0].strip(),
+        "label": label,
+        "admin1": bullets.get("WeatherAdmin") or "",
+        "country": bullets.get("WeatherCountry") or "",
+        "latitude": latitude,
+        "longitude": longitude,
+        "saved": True,
+    }
+
+
+def _correction_place(message: str) -> str:
+    found = re.search(
+        r"(?:不是这个[,，]?\s*是|不是[,，]\s*是|not this[, ]+(?:it is|it's))\s*([^。.?？!]{1,80})",
+        message or "",
+        re.IGNORECASE,
+    )
+    return found.group(1).strip(" .") if found else ""
+
+
+def _remember_weather(scope, result: dict, message: str, peer_ip: str, lang: str) -> str:
+    from ssios.account_memory import commit_preference_facts
+    from ssios.locale_messages import say
+    from ssios.place_memory import note_use, remember_alias
+
+    record = result.get("resolved_place") if isinstance(result, dict) else None
+    if not isinstance(record, dict) or record.get("latitude") is None:
+        return ""
+    remember_alias(scope.home, [str(result.get("query") or ""), message, str(record.get("label") or ""), _correction_place(message)], record)
+    uses = note_use(scope.home, record) if result.get("explicit") else 0
+    promote = bool(result.get("make_default")) or uses >= 2 or bool(_correction_place(message))
+    if result.get("used_default") and not _correction_place(message):
+        return ""
+    if not promote:
+        return ""
+    facts = [
+        {"path": "preferences.md", "key": "Weather", "value": str(record.get("label") or "")},
+        {"path": "preferences.md", "key": "WeatherLatitude", "value": str(record.get("latitude"))},
+        {"path": "preferences.md", "key": "WeatherLongitude", "value": str(record.get("longitude"))},
+        {"path": "preferences.md", "key": "WeatherAdmin", "value": str(record.get("admin1") or "")},
+        {"path": "preferences.md", "key": "WeatherCountry", "value": str(record.get("country") or "")},
+    ]
+    try:
+        saved = commit_preference_facts(scope, facts, peer_ip)
+    except SsiosError:
+        return ""
+    if not saved:
+        return ""
+    return say(lang, "saved_default", label=str(record.get("label") or ""))
+
+
 def _skill(
     plane,
     scope: AccountScope,
@@ -676,6 +775,7 @@ def _skill(
     place: str = "",
     resolved: dict | None = None,
     asked: bool = False,
+    from_slot: bool = False,
 ) -> Iterator[dict]:
     from ssios.account_memory import stored_location
     from ssios.site_session import warnings
@@ -683,17 +783,40 @@ def _skill(
     for note in warnings(plane, scope.account_id):
         scope.chat().append(conversation_id, {"role": "assistant", "text": note})
         yield {"event": "outcome", "data": {"text": note}}
+    from ssios.locale_messages import reply_language, say, wants_language_change
+    from ssios.place_memory import cached_place
+
+    lang = _turn_language(plane, scope.account_id, message)
+    units = str(plane.skills.account_prefs(scope.account_id).get("units") or "celsius")
+    if re.search(r"换个?城市|换一个城市|change city|different city", message, re.IGNORECASE):
+        yield from _hold_slot(scope, conversation_id, "weather", "location", say(lang, "change_city"), message)
+        return
+    from ssios.skill_broker import _place_name
+
+    saved_place = _stored_weather(scope)
+    explicit = place or _place_name(message) or _correction_place(message)
+    if explicit and resolved is None:
+        place = explicit
+        found = cached_place(scope.home, explicit)
+        if found:
+            resolved = found
+    elif not explicit and saved_place and resolved is None:
+        resolved = dict(saved_place)
+        resolved["saved"] = True
     saved = stored_location(scope)
     try:
         result = plane.skills.run(
             scope.account_id,
             message,
             peer_ip=peer_ip,
-            skill="weather" if place else "",
+            skill="weather" if place or saved_place else "",
             place=place,
-            default_location=saved if saved else None,
+            default_location=saved if saved else (str(saved_place.get("label") or "") if saved_place else None),
             resolved=resolved,
             asked=asked,
+            lang=lang,
+            units=units,
+            make_default=bool(from_slot or _correction_place(message)),
         )
     except SsiosError as exc:
         if exc.reason == "session_expired":
@@ -704,8 +827,8 @@ def _skill(
             scope.chat().append(conversation_id, {"role": "assistant", "text": text, "error_code": exc.reason})
             yield {"event": "outcome", "data": {"text": text}}
             return
-        if exc.code == "skill_denied" and str(exc.detail).startswith("Say a city"):
-            yield from _hold_slot(scope, conversation_id, "weather", "location", "Which city? For example, Seattle or 上海.", message)
+        if exc.code == "skill_denied" and (exc.reason == "need_city" or str(exc.detail).startswith("Say a city") or str(exc.detail).startswith("请说一个城市")):
+            yield from _hold_slot(scope, conversation_id, "weather", "location", say(lang, "which_city"), message)
             return
         raise
     need = result.get("need") if isinstance(result, dict) else None
@@ -732,6 +855,11 @@ def _skill(
         if city:
             scope.chat().set_weather_place(conversation_id, city)
         scope.chat().set_slot(conversation_id, None)
+        saved_line = _remember_weather(scope, result, message, peer_ip, lang)
+        if saved_line:
+            for block in result.get("blocks") or []:
+                if isinstance(block, dict):
+                    block["summary"] = (str(block.get("summary") or "") + " " + saved_line).strip()
     blocks = result["blocks"]
     summary = "\n\n".join(str(block.get("summary") or "") for block in blocks).strip()
     reply = _grounded_reply(plane, message, summary, blocks, scope.account)
@@ -1035,7 +1163,19 @@ def _propose_explicit(plane, scope, conversation_id: str, message: str, peer_ip:
     """Stage facts the user stated. Connector and web text never reach this function."""
     from ssios.account_memory import collect_facts, files_for_facts
 
-    files = files_for_facts(scope, collect_facts(message, plane.llm))
+    from ssios.account_memory import commit_preference_facts
+
+    facts = collect_facts(message, plane.llm)
+    preferences = [item for item in facts if item.get("path") == "preferences.md"]
+    if preferences:
+        try:
+            if commit_preference_facts(scope, preferences, peer_ip):
+                text = "Saved to memory (preferences.md)."
+                scope.chat().append(conversation_id, {"role": "assistant", "text": text})
+                yield {"event": "outcome", "data": {"text": text}}
+        except SsiosError:
+            preferences = []
+    files = files_for_facts(scope, facts)
     if not files:
         return
     yield from _propose_files(scope, conversation_id, files, peer_ip, forget=False)
@@ -1372,6 +1512,8 @@ def _mentions_are_in_results(reply: str, blocks: list[dict]) -> bool:
 
 def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], account: dict | None = None) -> str:
     """One sentence in the user's language. The cards stay the source of the count."""
+    from ssios.locale_messages import say
+
     lines = []
     count = _result_count(blocks)
     if count == 0:
@@ -1386,7 +1528,7 @@ def _grounded_reply(plane, message: str, summary: str, blocks: list[dict], accou
     messages = [
         {
             "role": "system",
-            "content": facts + "\nAnswer in the user's language. Use only these facts. Do not invent events, senders, or dates.",
+            "content": facts + "\n" + say(_turn_language(plane, str((account or {}).get("id") or ""), message), "reply_instruction") + " Use only these facts. Do not invent events, senders, or dates.",
         },
         {"role": "user", "content": message or summary},
     ]
@@ -1891,7 +2033,11 @@ def public_error(exc: SsiosError) -> str:
     return text
 
 
-def failure_hint(code: str) -> str:
+def failure_hint(code: str, lang: str = "en") -> str:
+    if code == "city_not_found":
+        from ssios.locale_messages import say
+
+        return say(lang if lang in {"en", "zh"} else "en", "city_not_found_hint")
     hints = {
         "codex_not_prepared": "The Codex binary for this state directory is missing. Run ssios vm-prepare, then ssios vm-diagnose.",
         "macos_vz_not_prepared": "The kernel or initramfs for this state directory is missing. Run ssios vm-prepare, then ssios vm-diagnose.",
@@ -1923,7 +2069,25 @@ def failure_hint(code: str) -> str:
 
 def remember_failure(scope: AccountScope, conversation_id: str, code: str, detail: str, status: int = 500) -> dict:
     """Save the failure in the account chat so a reload does not show an empty bubble."""
-    hint = failure_hint(code)
+    last = ""
+    try:
+        for item in reversed(scope.chat().get(conversation_id).get("messages") or []):
+            if item.get("role") == "user":
+                last = str(item.get("text") or "")
+                break
+    except SsiosError:
+        last = ""
+    from ssios.locale_messages import reply_language, say
+
+    preferred = "en"
+    try:
+        preferred = str(scope.plane.skills.account_prefs(scope.account_id).get("language") or "en")
+    except Exception:
+        preferred = "en"
+    lang = reply_language(last, preferred)
+    if code == "city_not_found":
+        detail = say(lang, "city_not_found")
+    hint = failure_hint(code, lang)
     text = f"{str(detail or 'The turn failed.').strip()}\n\nError code: {code}\nHint: {hint}"
     try:
         scope.chat().append(conversation_id, {"role": "assistant", "text": text, "error_code": code})
@@ -2123,8 +2287,10 @@ def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> lis
         if item.get("role") == "user":
             last_user = str(item.get("text") or "")
             break
+    from ssios.locale_messages import say
+
     excerpt = memory_excerpt(scope, last_user)
-    system = _SYSTEM + "\n\n" + clock_block(scope.plane, scope.account)
+    system = _SYSTEM + "\n\n" + clock_block(scope.plane, scope.account) + "\n" + say(_turn_language(scope.plane, scope.account_id, last_user), "reply_instruction")
     if excerpt:
         system += "\n\nMEMORY-CONTEXT\n" + excerpt
     if cloud_text:

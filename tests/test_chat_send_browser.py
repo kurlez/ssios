@@ -362,6 +362,34 @@ class ChatSendBrowserTest(unittest.TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(item["url"].startswith("/ui/files/file-") for item in rows))
 
+    def test_one_snipaste_paste_adds_one_image(self) -> None:
+        self._open("/ui/chat")
+        png = json.dumps(list(PNG))
+        bmp = json.dumps(list(BMP))
+        script = (
+            "var pngBytes = new Uint8Array(" + png + ");"
+            "var bmpBytes = new Uint8Array(" + bmp + ");"
+            "var pngFile = new File([pngBytes], 'snip.png', {type: 'image/png'});"
+            "var bmpFile = new File([bmpBytes], 'snip.bmp', {type: 'image/bmp'});"
+            "var pngAgain = new File([pngBytes], 'snip-files.png', {type: 'image/png'});"
+            "function paste() {"
+            "  var items = ["
+            "    {kind: 'file', type: 'image/png', getAsFile: function () { return pngFile; }},"
+            "    {kind: 'file', type: 'image/bmp', getAsFile: function () { return bmpFile; }}"
+            "  ];"
+            "  var data = {items: items, files: [pngAgain], getData: function () { return ''; }};"
+            "  var event = new Event('paste', {bubbles: true, cancelable: true});"
+            "  Object.defineProperty(event, 'clipboardData', {value: data});"
+            "  document.querySelector('textarea[name=message]').dispatchEvent(event);"
+            "}"
+            "paste(); true"
+        )
+        self.page.eval(script)
+        self.page.wait("document.querySelectorAll('#paste-preview img').length === 1")
+        self.page.eval(script.replace("paste(); true", "paste(); true"))
+        self.page.wait("document.querySelectorAll('#paste-preview img').length === 1")
+        self.assertEqual(self.page.eval("document.querySelectorAll('#paste-preview img').length"), 1)
+
     def test_bmp_and_empty_type_paste_do_not_insert_a_file_url(self) -> None:
         self._open("/ui/chat")
         png = json.dumps(list(PNG))

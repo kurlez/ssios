@@ -235,7 +235,7 @@ def explicit_facts(message: str) -> list[dict]:
     )
     if name and name.group(1).casefold() not in {"what", "who", "什么", "啥"}:
         facts.append({"path": "human.md", "key": "name", "value": name.group(1).strip(" .")})
-    prefer = re.search(r"(?:i prefer|i like|我喜欢|我偏好)\s+([^。.]{1,80})", text, re.IGNORECASE)
+    prefer = re.search(r"(?:i prefer|i like|我喜欢|我偏好)\s*([^。.]{1,80})", text, re.IGNORECASE)
     if prefer:
         facts.append({"path": "preferences.md", "key": "prefers", "value": prefer.group(1).strip(" .")})
     home = re.search(r"(?:i live in|i'm in|i am in|我住在|我在)\s*([^。.?？!]{1,80})", text, re.IGNORECASE)
@@ -243,7 +243,68 @@ def explicit_facts(message: str) -> list[dict]:
         value = home.group(1).strip(" .")
         if value and value[0] not in set("想看做说听写吃走读"):
             facts.append({"path": "human.md", "key": "Location", "value": value})
+    called = re.search(r"(?:call me|叫我)\s*([A-Za-z][A-Za-z0-9'_-]{0,40}|[\u4e00-\u9fff]{1,8})", text, re.IGNORECASE)
+    if called:
+        facts.append({"path": "human.md", "key": "name", "value": called.group(1).strip(" .")})
+    from ssios.locale_messages import wants_language_change
+
+    language = wants_language_change(text)
+    if language:
+        facts.append({"path": "preferences.md", "key": "Language", "value": language})
+    folded = text.casefold()
+    if "摄氏" in text or "celsius" in folded:
+        facts.append({"path": "preferences.md", "key": "Units", "value": "celsius"})
+    elif "华氏" in text or "fahrenheit" in folded:
+        facts.append({"path": "preferences.md", "key": "Units", "value": "fahrenheit"})
+    if re.search(r"默认日历|default calendar", text, re.IGNORECASE):
+        calendar = re.search(r"(?:默认日历|default calendar)\s*[:：]?\s*([^。.]{1,40})", text, re.IGNORECASE)
+        if calendar and calendar.group(1).strip():
+            facts.append({"path": "preferences.md", "key": "Calendar", "value": calendar.group(1).strip(" .")})
     return facts
+
+
+def commit_preference_facts(scope, facts: list[dict], peer_ip: str) -> bool:
+    """Write preference facts now. Returns true only after the commit succeeds."""
+    files = files_for_facts(scope, _dated_facts(facts, scope))
+    if not files:
+        return False
+    before = snapshot_files(scope, [str(item["path"]) for item in files])
+    store = scope.memory()
+    proposal = store.propose(scope.project_id(), store.head(scope.project_id()), files, task_id="chat")
+    approval = scope.create_memory_approval(proposal)
+    record = scope.approvals().get(approval["id"])
+    scope.decide(
+        approval["id"],
+        {
+            "decision": "approve",
+            "action": record["action"],
+            "payload_sha256": record["payload_sha256"],
+            "expected_revision": record["expected_revision"],
+            "bound_hash": record["bound_hash"],
+        },
+        peer_ip,
+    )
+    undo_id = push_undo(scope.home, before)
+    scope.plane.security_audit.write(
+        actor=scope.account_id,
+        ip=peer_ip or "127.0.0.1",
+        action="memory.auto",
+        target=undo_id,
+        result="ok",
+    )
+    return True
+
+
+def _dated_facts(facts: list[dict], scope) -> list[dict]:
+    from ssios.calendar_intent import account_zone
+
+    _zone, _name = account_zone(scope.plane.settings, scope.account)
+    when = datetime.now(_zone)
+    dated = []
+    for fact in facts:
+        value = _with_absolute_dates(str(fact.get("value") or ""), when)
+        dated.append({**fact, "value": value.split("\n", 1)[0]})
+    return dated
 
 
 def files_for_facts(scope, facts: list[dict]) -> list[dict]:

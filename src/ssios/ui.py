@@ -1223,6 +1223,12 @@ def _settings(plane, session: dict) -> str:
         f"<label>Default city <input name=\"location\" value=\"{location}\" maxlength=\"80\"></label> "
         "<button type=\"submit\">Save city</button></form>"
         f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Language <select name=\"language\"><option value=\"en\" {'selected' if prefs.get('language') != 'zh' else ''}>English</option>"
+        f"<option value=\"zh\" {'selected' if prefs.get('language') == 'zh' else ''}>中文</option></select></label> "
+        f"<label>Units <select name=\"units\"><option value=\"celsius\" {'selected' if prefs.get('units') != 'fahrenheit' else ''}>Celsius</option>"
+        f"<option value=\"fahrenheit\" {'selected' if prefs.get('units') == 'fahrenheit' else ''}>Fahrenheit</option></select></label> "
+        "<button type=\"submit\">Save language and units</button></form>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         f"<input type=\"hidden\" name=\"auto_save\" value=\"{'off' if prefs.get('auto_save') else 'on'}\">"
         f"<button type=\"submit\">{'Turn auto-save off' if prefs.get('auto_save') else 'Turn auto-save on'}</button></form>"
         "<p>Auto-save is off by default. A clip is written to your vault only after you approve it.</p>"
@@ -1251,6 +1257,23 @@ def _settings_post(plane, session: dict, body: dict) -> Page:
             plane.accounts.set_time_zone(account_id, str(body.get("time_zone") or ""))
         except SsiosError as exc:
             return Page(exc.status, _page(session, "Settings", f"<p>{html.escape(exc.detail)}</p>"))
+    elif body.get("language") in {"en", "zh"} or body.get("units") in {"celsius", "fahrenheit"}:
+        language = body.get("language") if body.get("language") in {"en", "zh"} else None
+        units = body.get("units") if body.get("units") in {"celsius", "fahrenheit"} else None
+        plane.skills.set_account(account_id, language=language, units=units)
+        from ssios.account_memory import commit_preference_facts
+        from ssios.scope import AccountScope
+
+        facts = []
+        if language:
+            facts.append({"path": "preferences.md", "key": "Language", "value": language})
+        if units:
+            facts.append({"path": "preferences.md", "key": "Units", "value": units})
+        if facts:
+            try:
+                commit_preference_facts(AccountScope(plane, session["account"]), facts, "127.0.0.1")
+            except SsiosError:
+                return Page(500, _page(session, "Settings", "<p>The setting was not saved.</p>"))
     elif location is not None:
         plane.skills.set_account(account_id, location=str(location))
     return Page(200, _settings(plane, session))
