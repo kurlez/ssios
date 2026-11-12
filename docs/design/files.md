@@ -1,8 +1,8 @@
-# Eagle-style asset library
+# Files
 
-Source: the approved design page [ss 素材库设计（参考 Eagle）](https://cursor.com/canvas/store-2a23d281-d0e5-4488-9d1e-2d5885d5e221/0c934cb1-621a-474b-b6a0-838f6ac063ae). This document is the English spec. The canvas stays the Chinese review copy. Numbers below are design estimates, not measurements from this machine.
+The product name is Files. Source: the approved design page [ss 素材库设计（参考 Eagle）](https://cursor.com/canvas/store-2a23d281-d0e5-4488-9d1e-2d5885d5e221/0c934cb1-621a-474b-b6a0-838f6ac063ae). Eagle 4.0 is the reference for organization and import. It is not the product name, and it does not appear in the interface. This document is the English spec. The canvas stays the Chinese review copy. Numbers below are design estimates, not measurements from this machine.
 
-The library is a personal drive inside SSIOS, organized the way Eagle 4.0 organizes a `.library`: one immutable original per content hash, virtual folders, tags, and (from M2) smart folders. The Mac mini is the only source of bytes. Other household devices use the existing LAN login. There is no cloud model fallback.
+Files is a personal drive inside SSIOS: one immutable original per content hash, virtual folders, tags, and (from M2) smart folders. The Mac mini is the only source of bytes. Other household devices use the existing LAN login. There is no cloud model fallback.
 
 ## Boundaries that do not change
 
@@ -45,7 +45,7 @@ Item fields used in M1: `id`, `name`, `ext`, `mime`, `size`, `sha256`, `folder_i
 
 ## File rules
 
-A file is stored only when it is a finished Eagle-style asset:
+A file is stored only when it is a finished asset of the kinds listed below:
 
 - Images: PNG, JPEG, GIF, WebP, BMP, TIFF, HEIC/HEIF, AVIF.
 - Video: MOV, MP4 and other `ftyp` movies that are not audio-only.
@@ -61,7 +61,7 @@ Rejected, with a specific error:
 - Executables and libraries (MZ, ELF, Mach-O).
 - Databases (`SQLite format 3`).
 - Hidden and unfinished names: a leading dot, `.DS_Store`, `.part`, `.crdownload`, `.download`, `.tmp`, and any path that contains `.git`.
-- Anything else, including source files. They are not Eagle asset types.
+- Anything else, including source files. They are not asset types Files stores.
 
 Originals are immutable. Importing the same file name again appends a version. If the bytes match a blob already in that library, the blob is not written twice. A different name with the same bytes is a second item pointing at that blob. Trash hides an item. Permanent delete removes the catalog row and the blob only when no remaining item or version still cites that hash. Permanent delete requires the confirmation word `delete`.
 

@@ -50,13 +50,17 @@ class LibraryTest(PlaneTest):
     def test_personal_library_imports_versions_and_stays_private(self) -> None:
         status, page = _get(self.base, "/ui/library", self.cookie)
         self.assertEqual(status, 200, page)
+        self.assertIn("<h1>Files</h1>", page)
         self.assertIn("Personal", page)
+        self.assertNotIn("Eagle", page)
         self.assertIn('class="library"', page)
         self.assertIn('class="lib-grid"', page)
         self.assertIn("No items.", page)
         self.plane.skills.set_account(self.owner["id"], language="zh")
         status, chinese = _get(self.base, "/ui/library", self.cookie)
+        self.assertIn("<h1>文件</h1>", chinese)
         self.assertIn("个人", chinese)
+        self.assertNotIn("Eagle", chinese)
         self.assertNotIn(">Shared<", chinese)
         self.plane.skills.set_account(self.owner["id"], language="en")
 

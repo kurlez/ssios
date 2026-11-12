@@ -59,7 +59,7 @@ def list_libraries(plane, account_id: str) -> list[dict]:
     rows = []
     for row in index.get("libraries") or []:
         if isinstance(row, dict) and _ID.fullmatch(str(row.get("id") or "")):
-            rows.append({"id": row["id"], "name": str(row.get("name") or "Library"), "kind": "personal"})
+            rows.append({"id": row["id"], "name": str(row.get("name") or "Files"), "kind": "personal"})
     return rows
 
 
@@ -67,7 +67,7 @@ def create_library(plane, account_id: str, name: str, peer_ip: str) -> dict:
     ensure_personal(plane, account_id)
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 2:
-        title = "Library"
+        title = "Files"
     library_id = "lib-" + hashlib.sha256(f"{account_id}:{title}:{_now()}".encode()).hexdigest()[:8]
     index_path = plane.accounts.home(account_id) / "library" / "libraries.json"
     with _LOCK:

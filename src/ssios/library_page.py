@@ -179,10 +179,10 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
                 "<button name=\"op\" value=\"trash\" type=\"submit\">Move to trash</button></form>"
             )
     left = (
-        '<div class="lib-side"><h2>Libraries</h2>'
+        '<div class="lib-side"><h2>' + html.escape(say(lang, "library_link")) + "</h2>"
         + "".join(switcher)
         + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
-        + '<label>New library <input name="name" maxlength="40"></label>'
+        + '<label>Name <input name="name" maxlength="40"></label>'
         + '<button name="op" value="create-library" type="submit">Create</button></form>'
         + f'<p><a href="{base}">All</a> <a href="{base}&amp;uncategorized=1">Uncategorized</a> '
         + f'<a href="{base}&amp;untagged=1">Untagged</a> <a href="{base}&amp;trash=1">Trash</a></p>'
@@ -211,7 +211,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     )
     body = notice + '<div class="library">' + left + "<div>" + grid + "</div>" + '<aside class="lib-inspector">' + inspector + "</aside></div>"
     body += f'<script src="{library_script_path()}"></script>'
-    return _page(session, "Library", body, wide=True)
+    return _page(session, say(lang, "library_link"), body, wide=True)
 
 
 def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
@@ -220,7 +220,7 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     library_id = str(body.get("library") or "")
     if op == "create-library":
         created = create_library(plane, account_id, str(body.get("name") or ""), peer_ip)
-        return Page(200, library_page(plane, session, {"library": created["id"]}, "<p>Library created.</p>"))
+        return Page(200, library_page(plane, session, {"library": created["id"]}, "<p>Created.</p>"))
     chosen = library_or_default(plane, account_id, library_id)
     library_id = chosen["id"]
     if op == "import":

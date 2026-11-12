@@ -2085,7 +2085,7 @@ def _info_pane(plane, session, state: dict) -> str:
         files.append("<li><a href=\"/ui/files/" + html.escape(item["id"]) + "\">" + html.escape(item["name"]) + "</a></li>")
     library = (
         "<h3>Files</h3><ul class=\"activity\">" + ("".join(files) or "<li>No files yet.</li>") + "</ul>"
-        "<p><a href=\"/ui/files\">Open files</a></p><p><a href=\"/ui/vault\">Open notes</a></p>"
+        "<p><a href=\"/ui/library\">Open files</a></p><p><a href=\"/ui/vault\">Open notes</a></p>"
     )
     return (
         "<aside id=\"info-pane\" class=\"info\" aria-label=\"Account details\">"
