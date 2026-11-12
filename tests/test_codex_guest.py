@@ -78,10 +78,11 @@ class PinAndConfigTest(unittest.TestCase):
     def test_settings_default_to_the_summary_worker(self) -> None:
         loaded = load_settings(Path("config/ssios.example.toml"), state_dir=Path("/tmp/ssios-codex-settings"), port=0)
         self.assertEqual(loaded.runtime_agent, "summary")
-        self.assertEqual(loaded.codex_model, "qwen2.5-coder:7b")
+        self.assertEqual(loaded.codex_model, "qwen3:14b")
         self.assertEqual(loaded.codex_num_ctx, 16384)
         self.assertEqual(loaded.codex_max_requests, 4)
-        self.assertIn("qwen2.5-coder:1.5b", loaded.codex_allow_models)
+        self.assertIn("qwen2.5-coder:7b", loaded.codex_allow_models)
+        self.assertIn("muse-glimmer:30b-mlx", loaded.codex_allow_models)
         with self.assertRaises(SsiosError):
             load_settings_text('agent = "remote"\n', loaded.state_dir)
 
@@ -664,14 +665,14 @@ class VsockRelayTest(unittest.TestCase):
         thread.start()
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_address[1]}"
-        report = ollama_smoke_preflight(base, timeout=5, num_ctx=16384)
+        report = ollama_smoke_preflight(base, model="qwen2.5-coder:7b", timeout=5, num_ctx=16384)
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["context_length"], 16384)
         missing = ollama_smoke_preflight(base, model="missing:1b", timeout=5, num_ctx=16384)
         self.assertFalse(missing["ok"])
         self.assertIn("ollama pull", missing["detail"])
         Handler.context_length = 4096
-        short = ollama_smoke_preflight(base, timeout=5, num_ctx=16384)
+        short = ollama_smoke_preflight(base, model="qwen2.5-coder:7b", timeout=5, num_ctx=16384)
         self.assertFalse(short["ok"])
         self.assertIn("4096", short["detail"])
         self.assertIn("OLLAMA_CONTEXT_LENGTH=16384", short["detail"])

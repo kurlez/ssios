@@ -157,7 +157,7 @@ The host writes the config into the task's `CODEX_HOME` and mounts it into the g
 
 ```toml
 model_provider = "ssios"
-model = "qwen2.5-coder:7b"
+model = "qwen3:14b"
 check_for_update_on_startup = false
 web_search = "disabled"
 
@@ -330,7 +330,7 @@ macos_vm_volume = "/Volumes/krunvm"
 guest_prepare_timeout_seconds = 600
 
 [agent.codex]
-model = "qwen2.5-coder:7b"
+model = "qwen3:14b"
 max_output_tokens = 4096
 max_request_bytes = 200000
 max_tool_rounds = 8

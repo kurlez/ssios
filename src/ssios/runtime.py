@@ -40,7 +40,9 @@ def krunvm_create_command(
     for value in (name, image, str(input_dir), str(scratch_dir)):
         _reject_option_text(value)
     for value in (str(input_dir), str(scratch_dir)):
-        if ":" in value or " " in value:
+        # krunvm takes ``-v host:guest`` as one argument. A colon splits the mount.
+        # A space stays in the host path because the argument is not passed through a shell.
+        if ":" in value:
             raise SsiosError("runtime_invalid", "krunvm path rejected", 400)
     if cpus < 1 or memory_mb < 128:
         raise SsiosError("runtime_invalid", "microvm size rejected", 400)

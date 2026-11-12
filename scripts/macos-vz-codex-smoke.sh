@@ -21,7 +21,7 @@ if ! command -v ollama >/dev/null 2>&1; then
   echo "ollama is not on PATH." >&2
   exit 2
 fi
-echo "If qwen2.5-coder:7b is not listed, run: ollama pull qwen2.5-coder:7b" >&2
+echo "If qwen3:14b is not listed, run: ollama pull qwen3:14b" >&2
 ollama list || true
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/ssios-vz-codex.XXXXXX")
 echo "Temporary state directory: $STATE" >&2

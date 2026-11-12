@@ -34,6 +34,25 @@ TASK_OUTPUT_SCHEMA = {
 }
 
 MARKERS = ("CORE-PROJECT-FACT", "THREE-BULLET-RULE", "NORTHWIND-FIXTURE-NOTE")
+_ROUTE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["route"],
+    "properties": {"route": {"type": "string", "enum": ["direct", "vm"]}},
+}
+
+
+def _route_word(content: str) -> str:
+    text = content.strip()
+    if text.lower() == "direct":
+        return "direct"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return "vm"
+    if isinstance(data, dict) and str(data.get("route") or "").lower() == "direct":
+        return "direct"
+    return "vm"
 
 
 @dataclass
@@ -292,9 +311,10 @@ def _chat_payload(
     think: bool | None,
     num_ctx: int = 8192,
     schema_hint: bool = True,
+    hint_schema: dict | None = None,
 ) -> dict:
     grounded = []
-    schema_note = "JSON schema for the answer content: " + json.dumps(TASK_OUTPUT_SCHEMA, separators=(",", ":"))
+    schema_note = "JSON schema for the answer content: " + json.dumps(hint_schema or TASK_OUTPUT_SCHEMA, separators=(",", ":"))
     for message in _to_ollama(messages):
         content = message["content"]
         if schema_hint and not grounded and message.get("role") == "system":
@@ -321,6 +341,17 @@ def _chat_payload(
     if think is False:
         payload["think"] = False
     return payload
+
+
+def _vision_installed(base_url: str, model: str, timeout: float) -> bool:
+    request = urllib.request.Request(base_url.rstrip("/") + "/api/tags", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, UnicodeError):
+        return False
+    names = [str(item.get("name") or "") for item in (body.get("models") or []) if isinstance(item, dict)]
+    return any(name == model or name.startswith(model + "-") for name in names)
 
 
 def _post_json(url: str, payload: dict, timeout: float) -> dict:
@@ -534,6 +565,77 @@ class MockLLM:
         text = "Synthetic project summary\n" + "\n".join(f"- {marker}" for marker in MARKERS)
         return ModelResponse(kind="final", text=text, raw_approve_flag=True)
 
+    def complete_chat(self, messages: list[dict], *, cancel_event, deadline: float) -> str:
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        blob = json.dumps(messages, ensure_ascii=False)
+        if "REPORT-REQUEST" in blob:
+            script = getattr(self, "report_script", None)
+            if script:
+                item = script.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                return str(item)
+            return ""
+        if "FACT-EXTRACT" in blob:
+            script = getattr(self, "fact_script", None)
+            if script:
+                item = script.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                return str(item)
+            return '{"facts":[]}'
+        if "GROUNDED-READ" in blob:
+            count = "0"
+            found = re.search(r"count=(\d+)", blob)
+            if found:
+                count = found.group(1)
+            if re.search(r"[\u4e00-\u9fff]", blob):
+                return f"共 {count} 项。"
+            return f"{count} items."
+        if "MEMORY-CONTEXT" in blob and "HARBOR-LOCK" in blob:
+            return "Synthetic local answer. The memory excerpt stayed on this machine. No tools were used."
+        if "Untrusted approved cloud text" in blob:
+            return "Synthetic local answer using the approved cloud text. No tools were used."
+        return "Synthetic local answer. No tools were used."
+
+    def describe_image(self, prompt: str, images: list[str], *, model: str, deadline: float) -> str:
+        """Stand-in vision reply. Tests can set vision_script. No network."""
+        del deadline
+        if not images:
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        script = getattr(self, "vision_script", None)
+        if script:
+            item = script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return str(item)
+        return "Synthetic caption of the attached image."
+
+    def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
+        text = self.complete_chat(messages, cancel_event=cancel_event, deadline=deadline)
+        parts = text.split(" ")
+        for index, part in enumerate(parts):
+            if cancel_event.is_set() or time.monotonic() >= deadline:
+                raise FlowInterrupt("timeout")
+            yield part if index == len(parts) - 1 else part + " "
+
+    def extract_calendar_intent(self, message: str, *, deadline: float, repair: bool = False):
+        """Fake local extractor. Tests can set intent_script to a list of replies."""
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        script = getattr(self, "intent_script", None)
+        if script is not None:
+            if not script:
+                return "not-json"
+            item = script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        from ssios.calendar_intent import scripted_intent
+
+        return scripted_intent(message)
+
 
 class OllamaLLM:
     provider = "ollama"
@@ -553,6 +655,8 @@ class OllamaLLM:
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
         self.num_ctx = num_ctx
+        self.router_model = "qwen3:1.7b"
+        self.router_timeout = 4.0
         self._think_false: bool | None = None
 
     def wants_plain_summary(self, deadline: float) -> bool:
@@ -660,6 +764,181 @@ class OllamaLLM:
                 raise
         return body
 
+    def complete_chat(self, messages: list[dict], *, cancel_event, deadline: float) -> str:
+        return "".join(self.stream_chat(messages, cancel_event=cancel_event, deadline=deadline)).strip()
+
+    def extract_calendar_intent(self, message: str, *, deadline: float, repair: bool = False) -> str:
+        """Local Ollama only. One caller retries once. There is no cloud fallback."""
+        from ssios.calendar_intent import INTENT_SCHEMA, intent_messages
+
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        think = False if self._supports_think_false(deadline) else None
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = _chat_payload(
+            self.model,
+            intent_messages(message, repair=repair),
+            INTENT_SCHEMA,
+            num_predict=min(self.max_output_tokens, 512),
+            think=think,
+            num_ctx=self.num_ctx,
+            hint_schema=INTENT_SCHEMA,
+        )
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
+        except SsiosError as exc:
+            if exc.code == "llm_unavailable" and "timed out" in exc.detail and time.monotonic() >= deadline:
+                raise FlowInterrupt("timeout") from exc
+            raise
+        answer = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = answer.get("content") if isinstance(answer.get("content"), str) else ""
+        return content
+
+    def describe_image(self, prompt: str, images: list[str], *, model: str, deadline: float) -> str:
+        """Ollama /api/chat with the images field. The text model is not used."""
+        if not images:
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        if not _vision_installed(self.base_url, model, min(10.0, max(0.1, deadline - time.monotonic()))):
+            raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503)
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        payload = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "messages": [{"role": "user", "content": prompt or "Describe this image.", "images": list(images)}],
+            "options": {"temperature": 0, "num_predict": min(self.max_output_tokens, 512)},
+        }
+        try:
+            body = _post_json(self.base_url + "/api/chat", payload, timeout)
+        except SsiosError as exc:
+            if exc.code in {"llm_unavailable", "ollama_rejected"}:
+                raise SsiosError("vision_unavailable", f"The vision model {model} is not installed. Run: ollama pull {model}", 503) from exc
+            raise
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return content.strip()
+
+    def stream_chat(self, messages: list[dict], *, cancel_event, deadline: float):
+        """Stream native /api/chat. There is no cloud fallback."""
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        think = False if self._supports_think_false(deadline) else None
+        payload = _chat_payload(
+            self.model,
+            messages,
+            None,
+            num_predict=self.max_output_tokens,
+            think=think,
+            num_ctx=self.num_ctx,
+            schema_hint=False,
+        )
+        payload["stream"] = True
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        yield from _iter_chat_stream(self.base_url + "/api/chat", payload, timeout, deadline)
+
+    def classify_route(self, text: str, deadline: float | None = None) -> dict | None:
+        """One short JSON call on the small router model. Timeout and bad JSON return None."""
+        from ssios.route_classifier import CLASSIFIER_SCHEMA, CLASSIFIER_SYSTEM, parse_classifier
+
+        limit = deadline if isinstance(deadline, float) else time.monotonic() + self.router_timeout
+        if time.monotonic() >= limit:
+            return None
+        timeout = min(self.router_timeout, self.timeout, max(0.1, limit - time.monotonic()))
+        payload = _chat_payload(
+            self.router_model,
+            [
+                {"role": "system", "content": CLASSIFIER_SYSTEM},
+                {"role": "user", "content": str(text or "")[:1000]},
+            ],
+            CLASSIFIER_SCHEMA,
+            num_predict=80,
+            think=False,
+            num_ctx=min(self.num_ctx, 4096),
+            hint_schema=CLASSIFIER_SCHEMA,
+        )
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
+        except (SsiosError, FlowInterrupt, TimeoutError, OSError):
+            return None
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return parse_classifier(content)
+
+    def judge_route(self, text: str, deadline: float | None = None) -> str:
+        """Local JSON judgment. Only a direct route leaves the guest. There is no cloud model."""
+        limit = deadline if isinstance(deadline, float) else time.monotonic() + 10
+        if time.monotonic() >= limit:
+            return "vm"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Choose a route for one user message. "
+                    "direct means a question, identity, capability, general knowledge, or conversation, "
+                    "with no file, command, workspace edit, or tool. "
+                    "vm means the user asks to read or change files, run a command, edit a workspace, or use a tool. "
+                    "Return one JSON object with route set to direct or vm."
+                ),
+            },
+            {"role": "user", "content": text[:1000]},
+        ]
+        timeout = min(self.timeout, max(0.1, limit - time.monotonic()))
+        payload = _chat_payload(
+            self.model,
+            messages,
+            _ROUTE_SCHEMA,
+            num_predict=64,
+            think=False if self._supports_think_false(limit) else None,
+            num_ctx=self.num_ctx,
+            hint_schema=_ROUTE_SCHEMA,
+        )
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
+        except (SsiosError, FlowInterrupt):
+            return "vm"
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return _route_word(content)
+
+
+def threading_event():
+    import threading
+
+    return threading.Event()
+
+
+def _iter_chat_stream(url: str, payload: dict, timeout: float, deadline: float):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        raise SsiosError("llm_unavailable", f"ollama http {exc.code}", 503) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise SsiosError("llm_unavailable", "ollama timed out", 503) from exc
+    except urllib.error.URLError as exc:
+        raise SsiosError("llm_unavailable", "ollama is unreachable", 503) from exc
+    try:
+        while time.monotonic() < deadline:
+            line = response.readline()
+            if not line:
+                break
+            try:
+                body = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(body, dict):
+                continue
+            message = body.get("message") if isinstance(body.get("message"), dict) else {}
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                yield content
+            if body.get("done") is True:
+                break
+    finally:
+        response.close()
+
 
 def _to_ollama(messages: list[dict]) -> list[dict]:
     converted = []
@@ -677,11 +956,14 @@ def build_llm(settings):
     if settings.llm_provider == "mock":
         return MockLLM()
     if settings.llm_provider == "ollama":
-        return OllamaLLM(
+        client = OllamaLLM(
             settings.ollama_base_url,
             settings.ollama_model,
             settings.llm_timeout_seconds,
             settings.max_output_tokens,
             settings.num_ctx,
         )
+        client.router_model = str(getattr(settings, "router_model", "qwen3:1.7b") or "qwen3:1.7b")
+        client.router_timeout = float(getattr(settings, "router_timeout_seconds", 4.0) or 4.0)
+        return client
     raise SsiosError("config_invalid", "llm provider rejected", 500)

@@ -84,8 +84,12 @@ def vfkit_command(
 ) -> list[str]:
     if cpus < 1 or memory_mb < 128:
         raise SsiosError("runtime_invalid", "microvm size rejected", 400)
-    for path in (kernel, initrd, serial, vsock, *(item for _tag, item in shares)):
+    for path in (kernel, initrd, serial, *(item for _tag, item in shares)):
         _reject_path(path)
+    from ssios.codex_guest import assert_unix_socket_path
+
+    assert_unix_socket_path(vsock)
+    _reject_path(vsock)
     cmdline = "console=hvc0 reboot=k panic=1 rdinit=/init"
     argv = [
         binary,
@@ -135,6 +139,9 @@ def prepare_macos_vz(state_dir: Path, timeout: float = 600) -> dict:
     tar filter then loops in ``realpath``. The cpio is built from tar members in
     memory, so host case folding cannot apply.
     """
+    path_report = state_path_report(state_dir)
+    if not path_report["ok"]:
+        raise SsiosError("runtime_invalid", path_report["detail"], 400)
     pin = load_pin()
     cache = cache_dir(state_dir)
     cache.mkdir(parents=True, exist_ok=True)
@@ -648,7 +655,7 @@ def supervise_process(command: list[str], proxy, deadline: float, connect_grace:
     return completed, connect_timeout
 
 
-def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None):
+def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Path, initramfs: Path, upstream: str | None, tool_handler=None):
     del cancel
     import time
 
@@ -672,6 +679,7 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
         max_output_tokens=runtime.settings.max_output_tokens,
         listen_path=vsock,
         num_ctx=int(getattr(runtime.settings, "codex_num_ctx", 16384)),
+        tool_handler=tool_handler,
     )
     before = _snapshot(session.root / "workspace")
     records: list[dict] = []
@@ -748,6 +756,55 @@ def boot_vfkit(runtime, session, text: str, cancel, deadline: float, kernel: Pat
 
 
 def _reject_path(path: Path) -> None:
-    text = str(path)
-    if not text.startswith("/") or "," in text or " " in text or "\n" in text or ".." in path.parts:
+    """Reject a path vfkit 0.6.4 would split or that walks out of the directory.
+
+    ``deviceFromCmdLine`` in ``pkg/config/virtio.go`` splits one ``--device`` argument on
+    commas, then splits each piece on the first ``=``. ``parseString`` in
+    ``pkg/cmdline/string_slice.go`` does the same for ``--bootloader``, and keeps a space
+    inside the current value. The process is started with an argument vector, not a shell,
+    so a space in ``Library/Application Support`` stays in ``kernel``, ``initrd``,
+    ``logFilePath``, ``socketURL``, and ``sharedDir``. A comma, quote, or newline would
+    start another option. ``..`` is still rejected.
+    """
+    text = os.fspath(path)
+    if not text.startswith("/") or ".." in Path(text).parts:
         raise SsiosError("runtime_invalid", "vfkit path rejected", 400)
+    if any(char in text for char in ",\n\r\x00\"'\\"):
+        raise SsiosError("runtime_invalid", "vfkit path rejected", 400)
+    if len(os.fsencode(text)) > 1024:
+        raise SsiosError("runtime_invalid", "vfkit path is longer than 1024 bytes", 400)
+
+
+def state_path_report(state_dir: Path) -> dict:
+    """Tell vm-diagnose and ui --check whether this state directory can reach vfkit."""
+    text = os.fspath(state_dir)
+    samples = (
+        state_dir / "cache" / "macos-vz" / "Image-arm64",
+        state_dir / "cache" / "macos-vz" / "codex-initrd.img",
+        state_dir / "accounts" / "acct" / "workspace" / "tasks" / "task-0011223344556677" / "guest" / "serial.log",
+        state_dir / "accounts" / "acct" / "workspace" / "tasks" / "task-0011223344556677" / "guest" / "workspace",
+    )
+    try:
+        for path in samples:
+            _reject_path(path)
+    except SsiosError as exc:
+        return {
+            "ok": False,
+            "path": text,
+            "detail": (
+                f"{exc.detail}. The state directory is {text}. "
+                "vfkit 0.6.4 and cloud-hypervisor split one option on commas. "
+                "A space is allowed, including Library/Application Support. "
+                "A comma, quote, backslash, newline, or '..' is not. "
+                "Move SSIOS_STATE to a path without those characters. "
+                "The vsock socket is created under /tmp because macOS limits an AF_UNIX path to 104 bytes."
+            ),
+        }
+    return {
+        "ok": True,
+        "path": text,
+        "detail": (
+            "The state path can be passed to vfkit. A space stays inside one argument. "
+            "The vsock socket is created under /tmp so it stays within the 104-byte AF_UNIX limit."
+        ),
+    }

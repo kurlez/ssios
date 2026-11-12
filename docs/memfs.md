@@ -2,6 +2,8 @@
 
 The default mode `letta-memfs-compat` only reuses the public Git Markdown shape so the mock demo can run without the Letta CLI. It is not Letta MemFS.
 
+Household logs that say `letta-memfs-compat` are expected. `config/ssios.example.toml` sets that mode, and `./scripts/ssios setup` copies it. Each account then keeps one git repository at `<state>/accounts/<account-id>/memory/notes/repo`. That repository is shared by every conversation and every route. It is not the upstream Letta process. `letta-memfs-upstream` is optional and fails closed when the pinned Letta CLI is missing. It does not fall back, and this build does not switch the default to upstream.
+
 Only the optional mode `letta-memfs-upstream` calls upstream. The pinned package is `@letta-ai/letta-code@0.34.45`. The integrity digest is in `third_party/letta-code.pin.json`.
 
 ## What upstream looks like
@@ -57,6 +59,10 @@ The `memory` subcommand help says memory is backed by Git and commits use git. A
 The core file list comes from `memory tokens`. Topic directories come from `MEMORY.md` files in `memory export` that are not on that list. On read, the bytes at Git `HEAD` must match the same export.
 
 Arguments that are explicitly rejected include `-p`, `--yolo`, `--permission-mode`, `--tools`, and `--disable-memory-guard`. There is therefore no full agent turn without a model. Creating an agent on the upstream local backend itself needs no account and no model call. That was verified on 0.34.45.
+
+## Chat memory
+
+Each account has a write mode in `memory-prefs.json`. The default is `approve`, so a chat fact waits on an approval card. `auto` writes the git commit immediately and keeps the previous file. The Undo button restores that file. The Memory page can edit or forget a note. A fact proposed by the local model is stored only when the user explicitly stated it and the value appears in that sentence. Text from a web page is not sent to the extractor.
 
 ## What is not done
 

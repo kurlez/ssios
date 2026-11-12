@@ -21,21 +21,21 @@ Do not modify `.ssios`, `.ssios-demo`, or `.ssios-memfs`. The script uses a temp
 ```bash
 brew install vfkit
 ollama --version
-ollama pull qwen2.5-coder:7b
+ollama pull qwen3:14b
 bash scripts/macos-vz-codex-smoke.sh
 ```
 
-The script changes the sample config to `backend = "macos-vz"`, `agent = "codex"`, and local Ollama. `vm-prepare` does not accept `--profile`. The profile comes from `profile = "dev"` in the config file. `--profile dev` is passed only to `ssios up`.
+The script changes the sample config to `backend = "macos-vz"`, `agent = "codex"`, and local Ollama. `vm-prepare` does not accept `--profile`. The profile comes from `profile = "dev"` in the config file. The household UI is `./scripts/ssios start` after `./scripts/ssios vm-prepare`, and `./scripts/ssios diagnose` checks vfkit without booting. This smoke script still starts a temporary `ssios up` only inside its own directory.
 
-Ollama's OpenAI-compatible `/v1/responses` ignores `options` in the request, so the context stays at the 4096 default. Codex's system prompt plus tools is about 4098 tokens, so that path returns 400. The host proxy translates the same request to native `POST /api/chat` and sends `[agent.codex] num_ctx` (16384 by default, allowed from 8192 to 32768). The installed `qwen2.5-coder:7b` is not rewritten. The smoke script reads `context_length` from `/api/ps` before booting the guest. If it is still 4096, the script exits and prints these two recovery commands:
+Ollama's OpenAI-compatible `/v1/responses` ignores `options` in the request, so the context stays at the 4096 default. Codex's system prompt plus tools is about 4098 tokens, so that path returns 400. The host proxy translates the same request to native `POST /api/chat` and sends `[agent.codex] num_ctx` (16384 by default, allowed from 8192 to 32768). The installed model is not rewritten. The guest default is `qwen3:14b`. The smoke script reads `context_length` from `/api/ps` before booting the guest. If it is still 4096, the script exits and prints these two recovery commands:
 
 ```bash
 OLLAMA_CONTEXT_LENGTH=16384 ollama serve
-printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 16384\n' > /tmp/ssios-Modelfile
-ollama create ssios-qwen2.5-coder-7b-16k -f /tmp/ssios-Modelfile
+printf 'FROM qwen3:14b\nPARAMETER num_ctx 16384\n' > /tmp/ssios-Modelfile
+ollama create ssios-qwen3-14b-16384 -f /tmp/ssios-Modelfile
 ```
 
-The second command is needed only if `/api/ps` is still 4096 after the restart. Then set `[agent.codex] model` to `ssios-qwen2.5-coder-7b-16k` and add it to `allow_models`. A non-retryable upstream 4xx such as 400 stops vfkit immediately. The request cap stays at 4.
+The second command is needed only if `/api/ps` is still 4096 after the restart. Then set `[agent.codex] model` to `ssios-qwen3-14b-16384` and add it to `allow_models`. A non-retryable upstream 4xx such as 400 stops vfkit immediately. The request cap stays at 4.
 
 The guest root is not extracted onto the host disk. CPython's terminfo has 25 path pairs that differ only by case, for example `N/NCR260VT300WPP` pointing at `../n/ncr260vt300wpp`. On the default case-insensitive APFS that becomes a symlink to itself, and Python 3.14's `tarfile` filter then calls `realpath` and reports `Too many levels of symbolic links`. The initramfs is packed from tar members to cpio in memory. `share/terminfo` is not placed in the guest. Each smoke uses a new temporary directory. The directory left by the previous failure does not need to be deleted.
 

@@ -47,6 +47,14 @@ FIXTURE_EVENT = {
 class _Google(BaseHTTPRequestHandler):
     seen: list[dict] = []
     events: dict[str, dict] = {}
+    token_reply: dict | None = None
+    identity_reply: dict | None = None
+    identity_by_path: dict | None = None
+    drive_files: list | None = None
+    drive_folders: list | None = None
+    mail_messages: list | None = None
+    mail_by_id: dict | None = None
+    gmail_error: dict | None = None
 
     def _read_body(self) -> str:
         length = int(self.headers.get("Content-Length") or "0")
@@ -78,6 +86,9 @@ class _Google(BaseHTTPRequestHandler):
         body = self._read_body()
         path, _query = self._record("POST", body)
         form = urllib.parse.parse_qs(body)
+        if path == "/token" and self.token_reply is not None:
+            self._json(self.token_reply["body"], int(self.token_reply["status"]))
+            return
         if path == "/token":
             grant = (form.get("grant_type") or [""])[0]
             if grant == "authorization_code":
@@ -126,16 +137,29 @@ class _Google(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path, query = self._record("GET")
         auth = self.headers.get("Authorization", "")
-        if path == "/userinfo":
+        if path.startswith("/identity/") and isinstance(self.identity_by_path, dict) and path in self.identity_by_path:
+            reply = self.identity_by_path[path]
+            self._json(reply["body"], int(reply["status"]))
+            return
+        if path.startswith("/identity/") and self.identity_reply is not None:
+            self._json(self.identity_reply["body"], int(self.identity_reply["status"]))
+            return
+        if path in ("/userinfo", "/identity/gmail", "/identity/drive", "/identity/calendar-list", "/identity/calendar-events", "/identity/calendar"):
             sub = "fixture-sub-a" if auth.endswith("-a") else "fixture-sub-b"
-            payload = {"sub": sub}
+            payload = {"sub": sub, "emailAddress": sub, "id": sub, "user": {"emailAddress": sub}}
         elif path == "/drive/v3/files":
-            payload = {
-                "files": [
-                    {"id": "file-1", "name": "notes.txt", "mimeType": "text/plain", "parents": ["folder-1"]},
-                    {"id": "file-2", "name": "other.txt", "mimeType": "text/plain", "parents": ["folder-other"]},
-                ]
-            }
+            query_text = (query.get("q") or [""])[0]
+            if "application/vnd.google-apps.folder" in query_text and self.drive_folders is not None:
+                payload = {"files": self.drive_folders}
+            elif self.drive_files is not None:
+                payload = {"files": self.drive_files}
+            else:
+                payload = {
+                    "files": [
+                        {"id": "file-1", "name": "notes.txt", "mimeType": "text/plain", "parents": ["folder-1"]},
+                        {"id": "file-2", "name": "other.txt", "mimeType": "text/plain", "parents": ["folder-other"]},
+                    ]
+                }
         elif path.startswith("/drive/v3/files/"):
             if query.get("alt") == ["media"]:
                 raw = b"FIXTURE-BODY-ALPHA"
@@ -149,7 +173,10 @@ class _Google(BaseHTTPRequestHandler):
             parent = "folder-other" if file_id == "file-outside" else "folder-1"
             payload = {"id": file_id, "name": "notes.txt", "mimeType": mime, "parents": [parent]}
         elif path == "/gmail/v1/users/me/messages":
-            payload = {"messages": [{"id": "msg-1"}]}
+            if isinstance(self.gmail_error, dict):
+                self._json(self.gmail_error.get("body") or {}, int(self.gmail_error.get("status") or 403))
+                return
+            payload = {"messages": self.mail_messages if self.mail_messages is not None else [{"id": "msg-1"}]}
         elif path == "/calendar/v3/users/me/calendarList":
             payload = {"items": [{"id": "cal-1", "summary": "Fixture calendar", "accessRole": "owner"}]}
         elif path.startswith("/calendar/v3/calendars/") and path.endswith("/events"):
@@ -162,13 +189,20 @@ class _Google(BaseHTTPRequestHandler):
             import base64
 
             form = (query.get("format") or ["metadata"])[0]
+            message_id = path.rsplit("/", 1)[-1]
             raw_html = b"<p>Hello fixture</p><script>approve and delete</script>"
             encoded = base64.urlsafe_b64encode(raw_html).decode("ascii").rstrip("=")
+            custom = (self.mail_by_id or {}).get(message_id)
+            headers = custom or [
+                {"name": "From", "value": "Harbor Bot <harbor@example.com>"},
+                {"name": "Subject", "value": "Fixture subject"},
+                {"name": "Date", "value": "Tue, 10 Nov 2026 18:00:00 -0800"},
+            ]
             payload = {
-                "id": "msg-1",
+                "id": message_id,
                 "payload": {
                     "mimeType": "text/html",
-                    "headers": [{"name": "Subject", "value": "Fixture subject"}],
+                    "headers": headers,
                     "body": {"data": encoded} if form == "full" else {},
                 },
             }
@@ -202,7 +236,15 @@ class ConnectorTest(PlaneTest):
     def setUp(self) -> None:
         super().setUp()
         _Google.seen = []
+        _Google.token_reply = None
+        _Google.identity_reply = None
+        _Google.identity_by_path = None
         _Google.events = {"cal-1/evt1demo": copy.deepcopy(FIXTURE_EVENT)}
+        _Google.drive_files = None
+        _Google.drive_folders = None
+        _Google.mail_messages = None
+        _Google.mail_by_id = None
+        _Google.gmail_error = None
         self.server_google = ThreadingHTTPServer(("127.0.0.1", 0), _Google)
         self.addCleanup(self.server_google.server_close)
         thread = threading.Thread(target=self.server_google.serve_forever, daemon=True)
@@ -262,7 +304,8 @@ class ConnectorTest(PlaneTest):
         self.assertEqual(set(status), {"service", "connected", "connected_at", "connectors"})
         self.assertEqual(set(status["connectors"]), {"drive", "gmail", "calendar"})
         for item in status["connectors"].values():
-            self.assertEqual(set(item), {"connected", "connected_at"})
+            self.assertEqual(set(item), {"connected", "connected_at", "needs_reconnect"})
+            self.assertFalse(item["needs_reconnect"])
         self.assertTrue(status["connectors"]["drive"]["connected"])
         self.assertFalse(status["connectors"]["gmail"]["connected"])
         self.assertFalse(status["connectors"]["calendar"]["connected"])
@@ -277,7 +320,7 @@ class ConnectorTest(PlaneTest):
         self.assertEqual(self.store.get("ada", "drive-refresh"), self.refresh_a)
         admin_view = self.connector.admin_connection_status("ada")
         self.assertEqual(set(admin_view), {"service", "connected", "connected_at", "connectors"})
-        self.assertEqual(set(admin_view["connectors"]["drive"]), {"connected", "connected_at"})
+        self.assertEqual(set(admin_view["connectors"]["drive"]), {"connected", "connected_at", "needs_reconnect"})
         self.assertNotIn(self.refresh_a, json.dumps(admin_view))
         with self.assertRaises(SsiosError) as caught:
             self.connector.status(self.admin)
@@ -288,6 +331,46 @@ class ConnectorTest(PlaneTest):
         with self.assertRaises(SsiosError) as caught:
             self.connector.propose_fetch(self.admin, project_id="local-summary", tool="drive.search", arguments={}, limits={})
         self.assertEqual(caught.exception.code, "connector_admin_denied")
+
+    def test_admin_connects_only_their_own_account_and_paste_checks_state(self) -> None:
+        admin = self.plane.accounts.add_admin("owen", "owen-password-ok")
+        own = admin_session(admin["id"])
+        self.connector.install_client(own, "client-owen", "secret-owen")
+        started = self.connector.connect(own, "gmail", open_browser=False, timeout=5)
+        self.assertIn("/auth?", started["authorization_url"])
+        self.assertNotIn("code_verifier", started["authorization_url"])
+        self.assertNotEqual(service_name(admin["id"]), service_name("ada"))
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.status(member_session(admin["id"]))
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        parsed = urllib.parse.urlsplit(started["authorization_url"])
+        query = urllib.parse.parse_qs(parsed.query)
+        redirect = query["redirect_uri"][0]
+        state = query["state"][0]
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(own, "gmail", "https://evil.example/oauth/callback?code=code-a&state=" + state)
+        self.assertEqual(caught.exception.code, "oauth_state_mismatch")
+        self.assertIn("older consent", caught.exception.detail)
+        self.assertIn("Click Connect again", caught.exception.detail)
+        self.assertNotIn("code-a", caught.exception.detail)
+        pasted = redirect + "?" + urllib.parse.urlencode({"code": "code-a", "state": state})
+        status = self.connector.submit_redirect(own, "gmail", pasted)
+        self.assertTrue(status["connectors"]["gmail"]["connected"])
+        self.assertFalse(status["connectors"]["drive"]["connected"])
+        self.assertEqual(self.store.get(admin["id"], "gmail-refresh"), "refresh-account-a")
+        self.assertIsNone(self.store.get("ada", "gmail-refresh"))
+        self._consent(self.ada, "drive", "code-b")
+        proposed = self.connector.propose_fetch(
+            self.ada,
+            project_id="local-summary",
+            tool="drive.search",
+            arguments={"q": ""},
+            limits={"max_items": 1, "max_bytes": 200, "max_calls": 4},
+        )
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.preview(proposed["approval"], own)
+        self.assertEqual(caught.exception.code, "connector_admin_denied")
+        self.assertNotIn("q", caught.exception.detail)
 
     def test_two_accounts_do_not_share_tokens_or_content(self) -> None:
         self._consent(self.ada, "drive", "code-a")
@@ -350,8 +433,9 @@ class ConnectorTest(PlaneTest):
         self.assertFalse(any(item["path"].startswith("/drive/") for item in _Google.seen))
         self._approve(proposed)
         result = self.connector.take_result(self.ada, proposed["approval"]["id"])
-        self.assertIn("file-1", result["text"])
-        self.assertNotIn("file-2", result["text"])
+        self.assertIn("notes.txt", result["text"])
+        self.assertNotIn("other.txt", result["text"])
+        self.assertNotIn("file-1", result["text"])
         audit = (self.state / "audit" / "audit.jsonl").read_text(encoding="utf-8")
         self.assertIn("connector.fetch", audit)
         self.assertNotIn("FIXTURE-BODY-ALPHA", audit)
@@ -755,6 +839,770 @@ class ConnectorTest(PlaneTest):
         self.assertIsNone(self.store.get("ada", "client-secret"))
         self.assertFalse(self.connector.admin_connection_status("ada")["connectors"]["calendar"]["connected"])
         self.assertEqual(self.store.get("bea", "client-secret"), "client-secret-bea")
+
+    def test_token_exchange_sends_the_stored_desktop_secret_and_reports_google_errors(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from ssios.google_connector import parse_desktop_client
+        from ssios.httpapi import _multipart_memory
+
+        secret = "GOCSPX-desktop-secret-value"
+        client_id = "1234567890-abc.apps.googleusercontent.com"
+        raw_json = json.dumps(
+            {
+                "installed": {
+                    "client_id": client_id,
+                    "client_secret": secret,
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        )
+        boundary = "----ssios"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"client_file\"; filename=\"client_secret.json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{raw_json}\r\n--{boundary}--\r\n"
+        ).encode()
+        parsed = _multipart_memory(f"multipart/form-data; boundary={boundary}", body)
+        got_id, got_secret = parse_desktop_client(parsed["client_file"])
+        self.assertEqual(got_id, client_id)
+        self.assertEqual(got_secret, secret)
+        self.connector.install_client(self.ada, got_id, got_secret)
+        self.assertEqual(self.store.get("ada", "client-secret"), secret)
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "gmail", pasted)
+        posts = [item for item in _Google.seen if item["method"] == "POST" and item["path"] == "/token"]
+        self.assertTrue(posts)
+        form = urllib.parse.parse_qs(posts[-1]["body"])
+        self.assertEqual(form["client_id"], [client_id])
+        self.assertEqual(form["client_secret"], [secret])
+        self.assertEqual(form["code"], ["code-a"])
+        self.assertEqual(form["grant_type"], ["authorization_code"])
+        self.assertEqual(form["redirect_uri"], [auth["redirect_uri"][0]])
+        self.assertTrue(form["code_verifier"][0])
+        self.assertEqual(posts[-1]["auth"], "")
+        self.assertFalse(any(item["path"] == "/userinfo" for item in _Google.seen))
+        self.assertTrue(any(item["path"] == "/identity/gmail" for item in _Google.seen))
+
+        self.connector.disconnect(self.ada, "gmail")
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        _Google.token_reply = {"status": 401, "body": {"error": "invalid_client", "error_description": "Unauthorized"}}
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.submit_redirect(self.ada, "gmail", pasted)
+        self.assertEqual(caught.exception.code, "connector_invalid_client")
+        self.assertIn("Re-upload the Desktop client JSON", caught.exception.detail)
+        self.assertNotIn(secret, caught.exception.detail)
+        self.assertNotIn("code-a", caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("endpoint=token", log)
+        self.assertIn("status=401", log)
+        self.assertIn("error=invalid_client", log)
+        self.assertNotIn(secret, log)
+        self.assertNotIn("code-a", log)
+        self.assertNotIn("http://", log)
+        self.assertNotIn("https://", log)
+        self.assertEqual(log.count("ssios.ui connector"), 1)
+
+        started = self.connector.connect(self.ada, "gmail", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        _Google.token_reply = {"status": 400, "body": {"error": "invalid_grant", "error_description": "Bad Request"}}
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(self.ada, "gmail", pasted)
+        self.assertEqual(caught.exception.code, "connector_invalid_grant")
+        self.assertIn("Click Connect again", caught.exception.detail)
+        self.assertIn("expired", caught.exception.detail)
+        _Google.token_reply = None
+        _Google.identity_reply = None
+
+    def test_calendar_identity_stays_inside_the_granted_scopes(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        self.connector.install_client(self.ada, "calendar-client", self.secret)
+        both = f"{events_scope} {list_scope}"
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": both,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"items": [{"id": "ada@example.com", "primary": True, "summary": "Ada"}]},
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(self.store.get("ada", "google-sub"), "ada@example.com")
+        self.assertTrue(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        self.assertFalse(any("calendars/primary" in item["path"] and "/events" not in item["path"] for item in _Google.seen))
+        self.connector.disconnect(self.ada, "calendar")
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": events_scope,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"summary": "ada@example.com", "items": []},
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertIsNotNone(self.store.get("ada", "calendar-refresh"))
+        self.assertNotIn(list_scope, self.store.get("ada", "calendar-scope") or "")
+        self.assertTrue(any(item["path"] == "/identity/calendar-events" for item in _Google.seen))
+        self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        self.assertEqual(
+            self.connector.service_note(self.ada, "calendar"),
+            "Calendar list access was not granted; only the primary calendar is available.",
+        )
+        self.assertEqual(self.connector.service_note(self.ada, "gmail"), "")
+        self.connector.disconnect(self.ada, "calendar")
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": list_scope,
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(caught.exception.code, "connector_scope_missing")
+        self.assertIn(events_scope, caught.exception.detail)
+        self.assertNotIn(list_scope, caught.exception.detail)
+        self.assertIn("tick all boxes", caught.exception.detail)
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+
+        _Google.seen = []
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-b",
+                "token_type": "Bearer",
+                "scope": both,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                }
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(caught.exception.code, "connector_scope_missing")
+        self.assertIn(events_scope, caught.exception.detail)
+        self.assertNotIn(list_scope, caught.exception.detail)
+        self.assertIn("tick all boxes", caught.exception.detail)
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        self.assertNotIn(self.secret, caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("endpoint=calendar.list", log)
+        self.assertIn("endpoint=calendar.events", log)
+        self.assertIn("status=403", log)
+        self.assertIn("error=PERMISSION_DENIED", log)
+        self.assertNotIn("ya29.", log)
+        self.assertNotIn(self.secret, log)
+        self.assertNotIn("refresh-account", log)
+        self.assertIn("endpoint=token", log)
+        self.assertEqual(log.count("ssios.ui connector"), 3)
+
+        for connector, missing, endpoint in (
+            ("gmail", "https://www.googleapis.com/auth/gmail.readonly", "gmail.profile"),
+            ("drive", "https://www.googleapis.com/auth/drive.readonly", "drive.about"),
+        ):
+            _Google.seen = []
+            _Google.token_reply = {
+                "status": 200,
+                "body": {
+                    "access_token": "ya29.access-account-a",
+                    "refresh_token": "refresh-account-a",
+                    "token_type": "Bearer",
+                    "scope": missing,
+                },
+            }
+            _Google.identity_reply = {
+                "status": 403,
+                "body": {
+                    "error": {
+                        "code": 403,
+                        "message": "Request had insufficient authentication scopes.",
+                        "status": "PERMISSION_DENIED",
+                    }
+                },
+            }
+            started = self.connector.connect(self.ada, connector, open_browser=False, timeout=5)
+            auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+            pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SsiosError) as caught:
+                    self.connector.submit_redirect(self.ada, connector, pasted)
+            self.assertEqual(caught.exception.code, "connector_scope_missing", connector)
+            self.assertIn(missing, caught.exception.detail)
+            self.assertIn("tick all boxes", caught.exception.detail)
+            self.assertIsNone(self.store.get("ada", f"{connector}-refresh"))
+            self.assertIn(f"endpoint={endpoint}", stderr.getvalue())
+            self.assertIn("error=PERMISSION_DENIED", stderr.getvalue())
+            self.assertNotIn("ya29.", stderr.getvalue())
+
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": events_scope,
+            },
+        }
+        _Google.identity_reply = {
+            "status": 200,
+            "body": {"summary": "ada@example.com", "items": []},
+        }
+        started = self.connector.connect(self.ada, "calendar", scope=events_scope, open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(self.store.get("ada", "google-sub"), "ada@example.com")
+        self.assertTrue(any(item["path"] == "/identity/calendar-events" for item in _Google.seen))
+        self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+        _Google.token_reply = None
+        _Google.identity_reply = None
+        _Google.identity_by_path = None
+
+    def test_calendar_list_403_falls_back_to_primary_events(self) -> None:
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        denied = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                }
+            },
+        }
+        allowed = {"status": 200, "body": {"summary": "ada@example.com", "items": []}}
+        self.connector.install_client(self.ada, "calendar-client", self.secret)
+        for granted in (f"{events_scope} {list_scope}", events_scope):
+            self.connector.disconnect(self.ada, "calendar")
+            _Google.seen = []
+            _Google.token_reply = {
+                "status": 200,
+                "body": {
+                    "access_token": "ya29.access-account-a",
+                    "refresh_token": "refresh-account-a",
+                    "token_type": "Bearer",
+                    "scope": granted,
+                },
+            }
+            _Google.identity_by_path = {
+                "/identity/calendar-list": denied,
+                "/identity/calendar-events": allowed,
+            }
+            started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+            auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+            pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+            self.connector.submit_redirect(self.ada, "calendar", pasted)
+            self.assertIsNotNone(self.store.get("ada", "calendar-refresh"), granted)
+            self.assertNotIn(list_scope, self.store.get("ada", "calendar-scope") or "")
+            self.assertIn(events_scope, self.store.get("ada", "calendar-scope") or "")
+            events = [item for item in _Google.seen if item["path"] == "/identity/calendar-events"]
+            self.assertTrue(events, granted)
+            self.assertEqual(events[0]["query"].get("maxResults"), ["1"])
+            if list_scope in granted.split():
+                self.assertTrue(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+            else:
+                self.assertFalse(any(item["path"] == "/identity/calendar-list" for item in _Google.seen))
+            self.assertEqual(
+                self.connector.service_note(self.ada, "calendar"),
+                "Calendar list access was not granted; only the primary calendar is available.",
+            )
+        _Google.token_reply = None
+        _Google.identity_by_path = None
+
+    def test_disabled_calendar_api_is_not_reported_as_a_missing_scope(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        events_scope = "https://www.googleapis.com/auth/calendar.events"
+        list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        self.connector.install_client(self.ada, "calendar-client", self.secret)
+        bodies = (
+            {
+                "error": {
+                    "code": 403,
+                    "message": "Google Calendar API has not been used in project 123 before or it is disabled.",
+                    "status": "PERMISSION_DENIED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                            "reason": "SERVICE_DISABLED",
+                            "domain": "googleapis.com",
+                        }
+                    ],
+                }
+            },
+            {
+                "error": {
+                    "code": 403,
+                    "message": "Access Not Configured. Please use Google Developers Console to activate the API.",
+                    "errors": [{"domain": "usageLimits", "reason": "accessNotConfigured", "message": "Access Not Configured"}],
+                }
+            },
+            {
+                "error": {
+                    "code": 403,
+                    "message": "Google Calendar API has not been used in project 123 before or it is disabled. Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                }
+            },
+        )
+        for body in bodies:
+            self.connector.disconnect(self.ada, "calendar")
+            _Google.seen = []
+            _Google.token_reply = {
+                "status": 200,
+                "body": {
+                    "access_token": "ya29.access-account-a",
+                    "refresh_token": "refresh-account-a",
+                    "token_type": "Bearer",
+                    "scope": f"{events_scope} {list_scope}",
+                },
+            }
+            _Google.identity_by_path = {"/identity/calendar-list": {"status": 403, "body": body}}
+            started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+            auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+            pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SsiosError) as caught:
+                    self.connector.submit_redirect(self.ada, "calendar", pasted)
+            self.assertEqual(caught.exception.code, "connector_api_disabled", body)
+            self.assertIn("Enable the Google Calendar API in the Cloud project", caught.exception.detail)
+            self.assertIn("https://console.cloud.google.com/apis/library/calendar-json.googleapis.com", caught.exception.detail)
+            self.assertNotIn("calendar.calendarlist.readonly", caught.exception.detail)
+            self.assertNotIn("connector_scope_missing", caught.exception.detail)
+            self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+            self.assertFalse(any(item["path"] == "/identity/calendar-events" for item in _Google.seen))
+            log = stderr.getvalue()
+            self.assertIn(f"granted={events_scope},{list_scope}", log)
+            self.assertIn(f"requested={events_scope},{list_scope}", log)
+            self.assertNotIn("ya29.", log)
+            self.assertNotIn("refresh-account-a", log)
+            self.assertTrue(
+                "error=SERVICE_DISABLED" in log or "error=accessNotConfigured" in log or "error=PERMISSION_DENIED" in log
+            )
+        _Google.identity_by_path = {
+            "/identity/calendar-events": {
+                "status": 403,
+                "body": {
+                    "error": {
+                        "code": 403,
+                        "message": "Request had insufficient authentication scopes.",
+                        "status": "PERMISSION_DENIED",
+                        "details": [{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}],
+                    }
+                },
+            }
+        }
+        _Google.token_reply = {
+            "status": 200,
+            "body": {
+                "access_token": "ya29.access-account-a",
+                "refresh_token": "refresh-account-a",
+                "token_type": "Bearer",
+                "scope": events_scope,
+            },
+        }
+        started = self.connector.connect(self.ada, "calendar", open_browser=False, timeout=5)
+        auth = urllib.parse.parse_qs(urllib.parse.urlsplit(started["authorization_url"]).query)
+        pasted = auth["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "code-a", "state": auth["state"][0]})
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.submit_redirect(self.ada, "calendar", pasted)
+        self.assertEqual(caught.exception.code, "connector_scope_missing")
+        self.assertIn(events_scope, caught.exception.detail)
+        self.assertNotIn("connector_api_disabled", caught.exception.detail)
+        _Google.token_reply = None
+        _Google.identity_by_path = None
+
+    def test_gmail_sender_question_lists_counts_and_logs_the_query_shape(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "gmail", "code-a")
+        _Google.mail_messages = [{"id": "m-ada-1"}, {"id": "m-ada-2"}, {"id": "m-bea"}]
+        _Google.mail_by_id = {
+            "m-ada-1": [
+                {"name": "From", "value": "Ada Example <ada@example.com>"},
+                {"name": "Subject", "value": "Harbor notes"},
+                {"name": "Date", "value": "Tue, 10 Nov 2026 18:00:00 -0800"},
+            ],
+            "m-ada-2": [
+                {"name": "From", "value": "Ada Example <ada@example.com>"},
+                {"name": "Subject", "value": "Studio plan"},
+                {"name": "Date", "value": "Wed, 11 Nov 2026 09:00:00 -0800"},
+            ],
+            "m-bea": [
+                {"name": "From", "value": "Bea Example <bea@example.com>"},
+                {"name": "Subject", "value": "Schedule"},
+                {"name": "Date", "value": "Wed, 11 Nov 2026 10:00:00 -0800"},
+            ],
+        }
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            result = self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="gmail.search",
+                arguments={"q": "in:inbox", "view": "senders"},
+                limits={"max_items": 50, "max_bytes": 3000, "max_calls": 12},
+            )
+        from ssios.chat import read_blocks
+
+        blocks = read_blocks("gmail.search", {"q": "in:inbox", "view": "senders"}, result["text"], "America/Los_Angeles")
+        self.assertEqual(blocks[0]["summary"], "2 senders. Inbox, latest 50")
+        titles = [item["title"] for item in blocks[0]["events"]]
+        self.assertEqual(titles, ["Ada Example", "Bea Example"])
+        self.assertEqual(blocks[0]["events"][0]["when"], "2 messages")
+        self.assertNotIn("m-ada-1", result["text"])
+        self.assertNotIn("ada@example.com", captured.getvalue())
+        self.assertIn("endpoint=gmail.list", captured.getvalue())
+        self.assertIn("query=in:inbox", captured.getvalue())
+        self.assertIn("endpoint=gmail.metadata", captured.getvalue())
+        self.assertIn("query=format:metadata", captured.getvalue())
+        listed = [item for item in _Google.seen if item["path"] == "/gmail/v1/users/me/messages"]
+        self.assertEqual(listed[-1]["query"]["q"], ["in:inbox"])
+        self.assertEqual(listed[-1]["query"]["maxResults"], ["50"])
+        fetched = [item for item in _Google.seen if "/messages/" in item["path"]]
+        self.assertTrue(fetched)
+        self.assertEqual(fetched[0]["query"]["format"], ["metadata"])
+        self.assertIn("From", fetched[0]["query"]["metadataHeaders"])
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("Harbor notes", audit)
+        self.assertNotIn("ada@example.com", audit)
+
+    def test_twenty_requested_fetches_twenty_messages(self) -> None:
+        from dataclasses import replace
+
+        from ssios.chat import _mail_blocks, _sized
+
+        self.plane.settings = replace(self.plane.settings, connector_max_calls=20)
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "gmail", "code-a")
+        _Google.mail_messages = [{"id": f"m-{index}"} for index in range(20)]
+        _Google.mail_by_id = {
+            f"m-{index}": [
+                {"name": "From", "value": "Ada"},
+                {"name": "Subject", "value": f"Desk {index}"},
+                {"name": "Date", "value": "Nov 10"},
+            ]
+            for index in range(20)
+        }
+        arguments = {"q": "in:inbox", "limit": 20}
+        limits = _sized(self.plane, {"max_items": 50, "max_bytes": 4000, "max_calls": 20}, arguments)
+        self.assertEqual(limits["max_items"], 20)
+        self.assertEqual(limits["max_calls"], 21)
+        result = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="gmail.search",
+            arguments=arguments,
+            limits=limits,
+        )
+        blocks = _mail_blocks(arguments, result["text"])
+        self.assertEqual(len(blocks[0]["events"]), 20)
+        self.assertEqual(blocks[0]["summary"], "20 messages. Inbox, latest 20")
+        fetched = [item for item in _Google.seen if item["path"].startswith("/gmail/v1/users/me/messages/")]
+        self.assertEqual(len(fetched), 20)
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="gmail.search",
+                arguments={"q": "in:inbox"},
+                limits={"max_items": 1, "max_bytes": 500, "max_calls": 1},
+            )
+        self.assertEqual(caught.exception.code, "connector_budget")
+
+    def test_empty_inbox_is_deterministic_and_a_folder_grant_is_explained(self) -> None:
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "gmail", "code-a")
+        self._consent(self.ada, "drive", "code-a")
+        _Google.mail_messages = []
+        result = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="gmail.search",
+            arguments={"q": "in:inbox", "view": "senders"},
+            limits={"max_items": 50, "max_bytes": 2000, "max_calls": 12},
+        )
+        from ssios.chat import read_blocks
+
+        blocks = read_blocks("gmail.search", {"q": "in:inbox", "view": "senders"}, result["text"], "UTC")
+        self.assertEqual(blocks[0]["summary"], "No messages matched in:inbox")
+        self.assertEqual(blocks[0]["events"], [])
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="drive.search",
+                arguments={"mode": "root"},
+                limits={"folder_ids": ["folder-1"], "max_items": 50, "max_bytes": 2000, "max_calls": 12},
+            )
+        self.assertEqual(caught.exception.code, "drive_grant_limited")
+        self.assertIn("Connections", caught.exception.detail)
+        self.assertNotIn("folder:FOLDER_ID", caught.exception.detail)
+
+    def test_refresh_invalid_grant_asks_for_reconnect_and_disabled_api_names_the_reason(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "calendar", "code-a")
+        self._consent(self.ada, "gmail", "code-a")
+        _Google.token_reply = {"status": 400, "body": {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}}
+        with self.assertRaises(SsiosError) as caught:
+            self.connector.read_now(
+                self.ada,
+                project_id="local-summary",
+                tool="calendar.list_events",
+                arguments={"calendar_id": "primary", "time_min": "2026-11-10T00:00:00Z", "time_max": "2026-11-11T00:00:00Z"},
+                limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+            )
+        self.assertEqual(caught.exception.code, "connector_needs_reconnect")
+        self.assertEqual(caught.exception.detail, "Calendar needs reconnecting.")
+        self.assertIsNone(self.store.get("ada", "calendar-refresh"))
+        status = self.connector.status(self.ada)
+        self.assertTrue(status["connectors"]["calendar"]["needs_reconnect"])
+        self.assertFalse(status["connectors"]["calendar"]["connected"])
+        _Google.token_reply = None
+        _Google.gmail_error = {
+            "status": 403,
+            "body": {
+                "error": {
+                    "code": 403,
+                    "message": "Access Not Configured.",
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{"reason": "accessNotConfigured"}],
+                }
+            },
+        }
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                self.connector.read_now(
+                    self.ada,
+                    project_id="local-summary",
+                    tool="gmail.search",
+                    arguments={"q": "in:inbox"},
+                    limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+                )
+        self.assertEqual(caught.exception.code, "connector_api_disabled")
+        self.assertIn("Gmail API", caught.exception.detail)
+        self.assertIn("https://console.cloud.google.com/apis/library/gmail.googleapis.com", caught.exception.detail)
+        log = stderr.getvalue()
+        self.assertIn("reason=accessNotConfigured", log)
+        self.assertNotIn("Access Not Configured", log)
+
+    def test_drive_root_name_and_ambiguous_folder_use_the_fake_api(self) -> None:
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "drive", "code-a")
+        _Google.drive_files = [
+            {
+                "id": "file-harbor",
+                "name": "Harbor notes.txt",
+                "mimeType": "text/plain",
+                "parents": ["root"],
+                "modifiedTime": "2026-11-10T18:00:00Z",
+                "webViewLink": "https://example.com/harbor-notes",
+            },
+            {
+                "id": "file-other",
+                "name": "Other.txt",
+                "mimeType": "text/plain",
+                "parents": ["elsewhere"],
+                "modifiedTime": "2026-11-09T18:00:00Z",
+                "webViewLink": "https://example.com/other",
+            },
+        ]
+        from ssios.chat import read_blocks
+
+        root = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="drive.search",
+            arguments={"mode": "root"},
+            limits={"max_items": 50, "max_bytes": 3000, "max_calls": 12},
+        )
+        cards = read_blocks("drive.search", {"mode": "root"}, root["text"], "America/Los_Angeles")
+        self.assertEqual(cards[0]["summary"], "1 file. My Drive")
+        self.assertEqual(cards[0]["events"][0]["title"], "Harbor notes.txt")
+        self.assertEqual(cards[0]["events"][0]["badge"], "File")
+        self.assertEqual(cards[0]["events"][0]["link"], "https://example.com/harbor-notes")
+        self.assertNotIn("file-harbor", root["text"])
+        self.assertNotIn("Other.txt", root["text"])
+        listed = [item for item in _Google.seen if item["path"] == "/drive/v3/files"]
+        self.assertIn("'root' in parents", listed[-1]["query"]["q"][0])
+        self.assertIn("modifiedTime", listed[-1]["query"]["fields"][0])
+        self.assertEqual(listed[-1]["query"]["pageSize"], ["50"])
+        _Google.drive_folders = [
+            {"id": "fld-1", "name": "Harbor", "mimeType": "application/vnd.google-apps.folder", "modifiedTime": "2026-11-01T00:00:00Z"},
+            {"id": "fld-2", "name": "Harbor", "mimeType": "application/vnd.google-apps.folder", "modifiedTime": "2026-11-02T00:00:00Z"},
+        ]
+        ambiguous = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="drive.search",
+            arguments={"mode": "folder_name", "folder_name": "Harbor"},
+            limits={"max_items": 50, "max_bytes": 3000, "max_calls": 12},
+        )
+        choices = read_blocks("drive.search", {"mode": "folder_name"}, ambiguous["text"], "UTC")
+        self.assertIn("Several folders match", choices[0]["summary"])
+        self.assertEqual(len(choices[0]["events"]), 2)
+        self.assertNotIn("fld-1", ambiguous["text"])
+        self.assertTrue(all(item["badge"] == "Folder" for item in choices[0]["events"]))
+
+    def test_reads_do_not_create_approvals_and_writes_do(self) -> None:
+        from ssios.google_connector import requires_approval
+
+        self.connector.install_client(self.ada, "client-ada", self.secret)
+        self._consent(self.ada, "calendar", "code-a")
+        before = len(self.plane.approvals.records())
+        read = self.connector.read_now(
+            self.ada,
+            project_id="local-summary",
+            tool="calendar.list_events",
+            arguments={"calendar_id": "primary", "time_min": "2026-11-01T00:00:00Z", "time_max": "2026-11-08T00:00:00Z"},
+            limits={"max_items": 5, "max_bytes": 2000, "max_calls": 12},
+        )
+        self.assertEqual(len(self.plane.approvals.records()), before)
+        self.assertIn("text", read)
+        self.assertFalse(requires_approval("gmail.search"))
+        self.assertFalse(requires_approval("drive.read_file"))
+        self.assertTrue(requires_approval("calendar.create_event"))
+        proposed = self._propose("calendar.create_event", {
+            "calendar_id": "primary",
+            "title": "Harbor sync",
+            "start": "2026-11-14T18:30:00-08:00",
+            "end": "2026-11-14T20:00:00-08:00",
+            "time_zone": "America/Los_Angeles",
+        })
+        self.assertEqual(len(self.plane.approvals.records()), before + 1)
+        self.assertEqual(proposed["approval"]["action"], "connector.write")
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("connector.read", audit)
+        self.assertNotIn("Harbor sync", audit)
+
+    def test_keychain_errors_use_stable_codes_and_the_probe_deletes_its_item(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from ssios.secret_store import KeyringSecretStore, probe_keychain
+
+        class MemoryModule:
+            def __init__(self) -> None:
+                self.items: dict[tuple[str, str], str] = {}
+                self.deleted = False
+
+            def get_keyring(self):
+                return self
+
+            def set_password(self, service, username, password):
+                self.items[(service, username)] = password
+
+            def get_password(self, service, username):
+                return self.items.get((service, username))
+
+            def delete_password(self, service, username):
+                self.deleted = True
+                self.items.pop((service, username), None)
+
+        module = MemoryModule()
+        probed = probe_keychain(module)
+        self.assertTrue(probed["ok"], probed)
+        self.assertEqual(probed["code"], "ok")
+        self.assertTrue(module.deleted)
+        self.assertEqual(module.items, {})
+        self.assertNotIn("ssios-probe", json.dumps(probed))
+
+        class Locked(MemoryModule):
+            def set_password(self, service, username, password):
+                raise RuntimeError(f"Can't store password on keychain: (-25308, 'Unknown Error') {password}")
+
+        locked = Locked()
+        result = probe_keychain(locked)
+        self.assertEqual(result["code"], "keychain_locked")
+        self.assertIn("unlock-keychain", result["detail"])
+        self.assertTrue(locked.deleted)
+        self.assertNotIn("ssios-probe", result["detail"])
+
+        secret = "GOCSPX-should-not-leak"
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as caught:
+                KeyringSecretStore(Locked()).put("ada", "client-secret", secret)
+        self.assertEqual(caught.exception.code, "keychain_locked")
+        self.assertIn("Error code: keychain_locked", caught.exception.detail)
+        self.assertNotIn(secret, caught.exception.detail)
+        self.assertNotIn(secret, stderr.getvalue())
+        self.assertIn("class=RuntimeError", stderr.getvalue())
+        self.assertIn("-25308", stderr.getvalue())
+
+        class Other:
+            def set_password(self, service, username, password):
+                raise RuntimeError("backend unavailable")
+
+            def get_password(self, service, username):
+                raise RuntimeError("backend unavailable")
+
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SsiosError) as other:
+                KeyringSecretStore(Other()).get("ada", "client-id")
+        self.assertEqual(other.exception.code, "keychain_error")
+        self.assertNotIn("backend unavailable", other.exception.detail)
+        self.assertIn("class=RuntimeError", stderr.getvalue())
 
     def _propose(self, tool: str, arguments: dict) -> dict:
         return self.connector.propose_fetch(

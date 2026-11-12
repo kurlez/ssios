@@ -37,6 +37,7 @@ Gmail and Drive stay read-only. Calendar is read/write and is specified in secti
 2.2 When LAN-bound:
 
 - Login required for every route, websocket/SSE.
+- A browser page (`/ui/...` with `Accept: text/html`, or a browser navigation) shows an English HTML error page or a redirect. It does not show a raw JSON error. `/v1` and other JSON or event-stream clients still receive JSON.
 - HTTPS with a locally generated self-signed cert stored in the state dir; fingerprint printed at startup (mkcert documented as an option).
 - Source-address allowlist: private ranges only (RFC1918, link-local, IPv6 ULA) by default; others rejected.
 - Strict Host/Origin checks, no CORS, CSRF protection on all state-changing requests (approvals, OAuth connect/disconnect, admin actions).
@@ -54,6 +55,7 @@ Gmail and Drive stay read-only. Calendar is read/write and is specified in secti
 - Own conversations, tasks, approvals, workspaces; VM tasks mount only that account's workspace/inputs.
 - Own Gmail, Drive, and Calendar connections and tokens.
 - Every route, router decision, VM task, connector fetch, and memory read/write scoped by the authenticated account id.
+- An admin account is also a normal user of its own chat, memory, approvals, and Google connections. Those use that admin's own account id and its own keychain namespace `ssios.google.<account id>`. They are not a way to open another account.
 - Path-traversal attempts rejected.
 
 3.3 Approvals can only be decided by the owning account.
@@ -64,10 +66,10 @@ Gmail and Drive stay read-only. Calendar is read/write and is specified in secti
 4.1 Registration: sign-up form on the LAN UI and/or one-time invite links/codes created by the admin; new accounts pending until admin approves. Sign-up rate-limited; no self-elevation.
 4.2 Admin can: approve/reject sign-ups, enable/disable, reset password (forces change), assign roles, delete accounts (explicit confirmation; documented data retention/archive policy, no silent deletion).
 4.3 Admin console requires admin role and the same auth/CSRF/LAN protections.
-4.4 **Hard rule: the admin can manage and delete accounts but can never obtain any member's OAuth tokens/refresh tokens/client secrets, nor read or write the content of members' personal cloud accounts (Gmail, Drive, Calendar titles, descriptions, attendees, locations), conversations, or memory.**
+4.4 **Hard rule: the admin can manage and delete accounts but can never obtain any other account's OAuth tokens/refresh tokens/client secrets, nor read or write the content of any other account's cloud data (Gmail, Drive, Calendar titles, descriptions, attendees, locations), conversations, or memory.** The admin's own Google connection, chat, and memory are that admin's, and work the same way as a member's. The admin console, when it looks at someone else, stays metadata-only.
 
-- No admin route, API, export, or audit view returns tokens or cloud content. Admin sees only service name, and per connector connected yes/no and connected_at.
-- No impersonation feature; connector fetches and calendar writes run only in the owning member's authenticated session.
+- No admin route, API, export, or audit view returns another account's tokens or cloud content. For other accounts the console shows only the service name, and per connector connected yes/no and connected_at.
+- No impersonation feature. Connector fetches and calendar writes run only in the authenticated session of the account that owns them. An admin session cannot name another account id.
 - Admin password reset revokes the member's sessions AND their Google connections (member must re-consent), so reset-then-login cannot expose mail or calendar content.
 - Account deletion: revoke tokens with Google, delete keychain entries, then delete/archive local data per policy; admin never sees token values or content.
 
@@ -84,8 +86,8 @@ Gmail and Drive stay read-only. Calendar is read/write and is specified in secti
 6.2 Host-side module; the no-NIC guest never receives tokens or network access. The guest cannot call Google. It can only ask the host to propose a connector action.
 6.3 OAuth: loopback redirect + PKCE in the user's own browser; the user completes consent. Mac setup guide for creating an OAuth client.
 6.4 Secure storage: tokens and the OAuth client secret in OS secure storage through the `keyring` package (macOS Keychain; Linux Secret Service), never plaintext files and never on a process command line. Namespaced per account (`ssios.google.<account_id>`). One Google identity per SSIOS account. If `keyring` is missing, refuse with `secure_store_unavailable`.
-6.5 API (member calls take the authenticated account from the session, never an admin-supplied target): `connect`, `status` (`service`, `connected`, `connected_at`, plus per-connector `connectors`), `disconnect` (revoke + keychain delete for that connector), read and calendar-write operations gated by the approval flow, `revoke_and_delete(account_id)` for deletion and admin password reset. No method returns token values. `revoke_and_delete` covers Calendar.
-6.6 In chat: requests needing Gmail, Drive, or Calendar data route through the connector with an approval card before any fetch or write. Fetched content goes to local Ollama only; it never enters the VM unless needed for a VM task and approved.
+6.5 API calls take the authenticated account from the session, never a target chosen by someone else. The signed-in account may be a member or an admin. Either may `connect`, `status` (`service`, `connected`, `connected_at`, plus per-connector `connectors`), `disconnect`, and request reads or calendar writes for that same account id only. `revoke_and_delete(account_id)` remains the deletion and password-reset call. It returns no token and no cloud content. A session whose role does not match the stored account, or whose account id is someone else's, is rejected with `connector_admin_denied` and receives none of that account's tokens or content.
+6.6 In chat: Gmail, Drive, and Calendar reads run on the host without an approval card. Each read is its own block, headed by that query's time range. Calendar writes still wait for an approval card. Fetched content goes to local Ollama only; it never enters the VM unless needed for a VM task and approved.
 6.7 Documented API so A's adapter can integrate. See `docs/google-connector.md`.
 
 ## 7. Tests (must exist and pass)
@@ -115,7 +117,7 @@ Do not request `https://www.googleapis.com/auth/calendar`. That scope also delet
 
 9.2 `admin_connection_status` includes `connectors.calendar.connected` and `connectors.calendar.connected_at`. Connecting Calendar does not mark Gmail or Drive connected, and the reverse is also true.
 
-9.3 Reads: `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`. `list_events` requires a time window of at most 31 days and a result cap. A missing or longer window raises `connector_window_denied`. Reads go through `propose_fetch` and `take_result` and do not call Google before approval.
+9.3 Reads: `calendar.list_calendars`, `calendar.list_events`, `calendar.get_event`. `list_events` requires a time window of at most 31 days and a result cap. A missing or longer window raises `connector_window_denied` and does not call Google. Reads use `read_now`. They do not create an approval.
 
 9.4 Writes: `calendar.create_event`, `calendar.update_event`, `calendar.delete_event`, one event per approval. The approval action is `connector.write`. The card shows the calendar, title, start, end, time zone, location, and attendees. Update shows before and after. Delete starts with `DESTRUCTIVE`. Nothing is written without that approval. Expired and denied approvals do not write. There is no batch auto-approve.
 

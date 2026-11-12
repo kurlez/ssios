@@ -31,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-prepare", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "router-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
-        if name in ("up", "demo", "preflight", "summary"):
+        if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
             command.add_argument("--port", type=int)
         if name == "summary":
@@ -46,6 +46,20 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("task_id")
         if name == "gc":
             command.add_argument("--dry-run", action="store_true")
+        if name == "model-bench":
+            command.add_argument("--model", default="", help="Ollama model name, such as qwen3:14b or muse-glimmer:30b-mlx")
+            command.add_argument("--vision", action="store_true", help="also score one synthetic image caption")
+            command.add_argument("--vision-model", default="", help="vision model, default qwen2.5vl:7b")
+        if name == "router-bench":
+            command.add_argument("--rules-only", action="store_true", help="score the rules and do not call Ollama")
+            command.add_argument("--model", action="append", default=[], help="classifier model, repeatable. Default qwen3:1.7b and qwen3:4b")
+        if name == "ui":
+            command.add_argument("--lan", action="store_true")
+            command.add_argument("--check", action="store_true", help="print chat guest prerequisites and exit")
+        if name == "user":
+            command.add_argument("user_action", choices=("add",))
+            command.add_argument("--admin", action="store_true")
+            command.add_argument("--username", required=True)
         if name == "ui-login":
             pass
         if name == "memfs-info":
@@ -107,6 +121,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "up":
         return _up(settings)
+    if args.command == "ui":
+        if getattr(args, "lan", False):
+            settings = replace(settings, ui_bind="0.0.0.0")
+        if getattr(args, "check", False):
+            from ssios.chat_guest import chat_guest_report
+            from ssios.secret_store import probe_keychain
+
+            report = chat_guest_report(settings)
+            report["keychain"] = probe_keychain()
+            print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+            ready = bool(report.get("ok")) and bool(report["keychain"].get("ok"))
+            return 0 if ready else 1
+        return _up(settings)
+    if args.command == "user":
+        return run_user_add(settings, args.username, admin=bool(args.admin))
+    if args.command == "audit-verify":
+        plane = ControlPlane(settings)
+        plane.open()
+        report = plane.security_audit.verify()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("ok") else 1
     if args.command in ("health", "status"):
         return _get(settings, "/v1/health" if args.command == "health" else "/v1/status")
     if args.command == "demo":
@@ -130,6 +165,46 @@ def main(argv: list[str] | None = None) -> int:
         from ssios.runtime import build_runtime
 
         print(json.dumps(build_runtime(settings).doctor(), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "vm-diagnose":
+        from ssios.chat_guest import vm_diagnose
+
+        report = vm_diagnose(settings)
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        return 0 if report.get("prerequisites", {}).get("ok") else 1
+    if args.command == "router-bench":
+        from ssios.router_bench import CLASSIFIER_MODELS, score_model, score_rules
+
+        rules = score_rules()
+        if args.rules_only:
+            print(json.dumps(rules, ensure_ascii=False, indent=2), flush=True)
+            return 0 if rules.get("accuracy") == 1 else 1
+        models = list(args.model) or list(CLASSIFIER_MODELS)
+        scored = []
+        for model in models:
+            try:
+                scored.append(score_model(model, base_url=settings.ollama_base_url, timeout=settings.router_timeout_seconds))
+            except (SsiosError, OSError, TimeoutError) as exc:
+                detail = exc.detail if isinstance(exc, SsiosError) else exc.__class__.__name__
+                scored.append({"mode": model, "error": detail})
+        print(json.dumps({"rules": rules, "models": scored}, ensure_ascii=False, indent=2), flush=True)
+        return 0 if rules.get("accuracy") == 1 else 1
+    if args.command == "model-bench":
+        from ssios.model_bench import run_bench
+
+        model = str(getattr(args, "model", "") or "") or settings.codex_model
+        try:
+            report = run_bench(
+                model=model,
+                base_url=settings.ollama_base_url,
+                num_ctx=int(settings.codex_num_ctx),
+                vision=bool(getattr(args, "vision", False)),
+                vision_model=str(getattr(args, "vision_model", "") or "") or settings.vision_model,
+            )
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0
     if args.command == "gc":
         return run_gc(settings, dry_run=args.dry_run)
@@ -162,6 +237,36 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def run_user_add(settings, username: str, *, admin: bool) -> int:
+    from ssios.accounts import public_account
+
+    plane = ControlPlane(settings)
+    plane.open()
+    password = _read_password()
+    if not password:
+        print(json.dumps({"error": "password_rejected", "detail": "password was empty or the two entries did not match"}, ensure_ascii=False))
+        return 1
+    try:
+        account = plane.accounts.add_admin(username, password) if admin else plane.accounts.add_member(username, password)
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False))
+        return 1
+    print(json.dumps(public_account(account), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _read_password() -> str:
+    if sys.stdin.isatty():
+        import getpass
+
+        first = getpass.getpass("Password: ")
+        second = getpass.getpass("Repeat password: ")
+        if first != second:
+            return ""
+        return first
+    return sys.stdin.readline().rstrip("\n")
+
+
 def run_vm_prepare(settings) -> int:
     from ssios.codex_guest import prepare_codex_binary
     from ssios.runtime import build_runtime
@@ -186,7 +291,9 @@ def run_vm_prepare(settings) -> int:
             print(json.dumps({"ok": False, "detail": exc.detail}, ensure_ascii=False, indent=2))
             return 1
     elif settings.runtime_agent != "codex":
-        print(json.dumps({"ok": False, "detail": "vm-prepare pulls the krunvm image. This backend does not use it."}, ensure_ascii=False, indent=2))
+        from ssios.chat_guest import unsuitable_guest_detail
+
+        print(json.dumps({"ok": False, "detail": unsuitable_guest_detail(settings)}, ensure_ascii=False, indent=2))
         return 1
     ok = all(item.get("ok") for item in reports)
     print(json.dumps({"ok": ok, "steps": reports}, ensure_ascii=False, indent=2), flush=True)
@@ -277,9 +384,24 @@ def _up(settings) -> int:
         print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
         return 1
     server.start()
-    listen_url = f"http://127.0.0.1:{plane.bound_port}"
-    (settings.state_dir / "listen.url").write_text(listen_url + "\n", encoding="utf-8")
-    print(f"SSIOS dev profile is listening at {listen_url}", flush=True)
+    from ssios.config import lan_enabled
+    from ssios.netguard import browser_login_urls, local_urls
+
+    urls = local_urls(plane.bound_port, tls=lan_enabled(settings))
+    shown = browser_login_urls(plane.bound_port, tls=lan_enabled(settings))
+    (settings.state_dir / "listen.url").write_text("\n".join(urls) + "\n", encoding="utf-8")
+    print(f"SSIOS dev profile is listening at {shown[0]}", flush=True)
+    for extra in shown[1:]:
+        print(f"LAN URL: {extra}", flush=True)
+    if getattr(server, "fingerprint", ""):
+        print(f"Certificate SHA-256 fingerprint: {server.fingerprint}", flush=True)
+        print(
+            "Compare that fingerprint with the browser warning. "
+            "macOS may prompt to allow incoming connections the first time this program listens. "
+            "Allow it for browsers on the home network. "
+            "If you deny it, a browser on this Mac can still use the loopback address.",
+            flush=True,
+        )
     print(f"Profile: {settings.profile}, model: {settings.llm_provider}, memory mode: {settings.memory_mode}", flush=True)
     try:
         while True:
@@ -467,18 +589,31 @@ def run_google_command(settings, args) -> int:
         if args.command == "oauth-revoke-account":
             print(json.dumps(google.revoke_and_delete(args.account), ensure_ascii=False))
             return 0
+        from ssios.google_connector import requires_approval
+
+        arguments = json.loads(args.arguments)
+        limits = json.loads(args.limits)
+        if not requires_approval(args.tool):
+            result = google.read_now(
+                session,
+                project_id=args.project,
+                tool=args.tool,
+                arguments=arguments,
+                limits=limits,
+            )
+            print(result["text"])
+            return 0
         proposed = google.propose_fetch(
             session,
             project_id=args.project,
             tool=args.tool,
-            arguments=json.loads(args.arguments),
-            limits=json.loads(args.limits),
+            arguments=arguments,
+            limits=limits,
         )
         approval = proposed["approval"]
         print(google.preview(approval, session))
         print(json.dumps(approval, ensure_ascii=False))
-        verb = "change" if args.tool in ("calendar.create_event", "calendar.update_event", "calendar.delete_event") else "read"
-        print(f"Type yes to approve this {verb}, or anything else to leave it pending.")
+        print("Type yes to approve this change, or anything else to leave it pending.")
         if input("").strip() != "yes":
             print(json.dumps({"result": "pending", "approval_id": approval["id"]}, ensure_ascii=False))
             return 2

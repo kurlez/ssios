@@ -1,0 +1,8 @@
+name = "web_fetch"
+description = "Fetch one http or https URL with GET and extract readable text."
+enabled = true
+methods = ["GET"]
+domains = ["*"]
+tools = ["fetch"]
+timeout_seconds = 8
+max_bytes = 200000

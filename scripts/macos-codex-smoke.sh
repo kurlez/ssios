@@ -26,7 +26,7 @@ PY
 
 echo "Pinned Codex binary is on the host. The guest must not download it."
 echo "Ollama stays on 127.0.0.1. Suggested pulls, if they are not already present:"
-echo "  ollama pull qwen2.5-coder:7b"
+echo "  ollama pull qwen3:14b"
 echo "  # deepseek-r1:7b was weak at tool calls on Ollama 0.40.15 /v1/responses."
 if command -v ollama >/dev/null 2>&1; then
   ollama list || true
@@ -42,6 +42,6 @@ fi
 echo "Private config sketch, not written by this script:"
 echo "  [llm] provider = \"ollama\" and ollama_base_url = \"http://127.0.0.1:11434\""
 echo "  [runtime] backend = \"macos-vm\" and agent = \"codex\""
-echo "  [agent.codex] model = \"qwen2.5-coder:7b\""
+echo "  [agent.codex] model = \"qwen3:14b\""
 echo "A later krunvm boot would still have a network. Do not treat it as the Cloud Hypervisor result."
 exit 2

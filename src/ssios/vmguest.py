@@ -546,7 +546,14 @@ def redact_text(text: str, secrets: list[str]) -> str:
 
 
 def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> GuestSession:
-    root = plane.settings.state_dir / "storage" / "tasks" / task["id"] / "guest"
+    raw_root = task.get("guest_root")
+    if raw_root:
+        root = Path(str(raw_root)).resolve()
+        allowed = (plane.settings.state_dir / "accounts").resolve()
+        if allowed not in root.parents:
+            raise SsiosError("path_rejected", "guest root is outside the account workspace", 403)
+    else:
+        root = plane.settings.state_dir / "storage" / "tasks" / task["id"] / "guest"
     if root.exists():
         shutil.rmtree(root)
     input_dir = root / "input"
@@ -568,6 +575,9 @@ def _prepare_codex(plane, task: dict, token: str, grant: dict, binary: Path) -> 
 
     (home / "config.toml").write_text(codex_config_text(VSOCK_PORT, plane.settings.codex_model), encoding="utf-8")
     (scratch / "entry.py").write_text(guest_entry_source(VSOCK_PORT), encoding="utf-8")
+    from ssios.codex_guest import mcp_bridge_source
+
+    (tools / "ssios_mcp.py").write_text(mcp_bridge_source(VSOCK_PORT), encoding="utf-8")
     destination = tools / "codex"
     shutil.copy2(binary, destination)
     destination.chmod(0o755)

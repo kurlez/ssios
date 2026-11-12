@@ -29,3 +29,8 @@ jobs:
         env:
           PYTHONPATH: src
           SSIOS_TEST: "1"
+
+      - name: Router rules bench
+        run: python -m ssios.cli router-bench --rules-only
+        env:
+          PYTHONPATH: src
