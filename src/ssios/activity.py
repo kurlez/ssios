@@ -19,6 +19,7 @@ _TITLES = {
     "vault.clip": "Saved a clip",
     "skill.read": "Fetched a page",
     "site.session": "Updated a site session",
+    "goal.update": "Updated a task",
 }
 
 
@@ -72,6 +73,8 @@ def _detail(action: str, row: dict) -> str:
         return "The memory repository was updated."
     if action == "site.session":
         return f"The site session is {result or 'updated'}."
+    if action == "goal.update":
+        return "A task was updated after approval."
     return "Recorded on this computer."
 
 

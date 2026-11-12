@@ -84,7 +84,7 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "GET" and path == "/ui/notices":
         return _notices(plane, session)
     if method == "GET" and path == "/ui/tasks":
-        return Page(200, _tasks(plane, session, query.get("status", "open")))
+        return Page(200, _tasks(plane, session, query.get("status", "all")))
     if method == "POST" and path == "/ui/tasks":
         _csrf(session, body)
         return _tasks_post(plane, session, body, peer_ip)
@@ -421,8 +421,58 @@ def _notices(plane, session: dict) -> Page:
     return Page(200, payload, content_type="application/json; charset=utf-8")
 
 
-def _tasks(plane, session: dict, status_filter: str = "open") -> str:
-    from ssios.goals import GoalStore, goal_mode
+def task_check_control(session: dict, task: dict) -> str:
+    """A square checkbox. A saved task posts an approval. Anything else is read-only."""
+    title = " ".join(str(task.get("title") or "").split())
+    if not title:
+        return ""
+    status = "done" if str(task.get("status") or "") == "done" else "open"
+    due = str(task.get("due") or "")
+    label = title + (f" (due {due})" if due else "")
+    pressed = "true" if status == "done" else "false"
+    word = "Done" if status == "done" else "Open"
+    writable = bool(task.get("writable")) and bool(task.get("id"))
+    if not writable:
+        hint = str(task.get("hint") or "This box is read-only.")
+        return (
+            "<div class=\"row\"><span class=\"check\" aria-disabled=\"true\" aria-pressed=\""
+            + pressed
+            + "\" title=\""
+            + html.escape(hint, quote=True)
+            + "\"><span class=\"sr\">"
+            + word
+            + "</span></span><span class=\"label\">"
+            + html.escape(label)
+            + "</span></div>"
+        )
+    csrf = html.escape(str(session.get("csrf") or ""), quote=True)
+    goal_id = html.escape(str(task.get("id") or ""), quote=True)
+    hint = "Mark open. Nothing is saved until you approve." if status == "done" else "Mark done. Nothing is saved until you approve."
+    return (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
+        f"<button class=\"check\" type=\"submit\" name=\"op\" value=\"toggle\" aria-pressed=\"{pressed}\" title=\"{html.escape(hint, quote=True)}\">"
+        f"<span class=\"sr\">{word}</span></button><span class=\"label\">{html.escape(label)}</span></form>"
+    )
+
+
+def task_checklist_html(session: dict, tasks: list[dict]) -> str:
+    rows = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        control = task_check_control(session, task)
+        if not control:
+            continue
+        status = "done" if str(task.get("status") or "") == "done" else "open"
+        rows.append(f"<li class=\"task {status}\">{control}</li>")
+    if not rows:
+        return ""
+    return "<ul class=\"checklist\">" + "".join(rows) + "</ul>"
+
+
+def _tasks(plane, session: dict, status_filter: str = "open", notice: str = "") -> str:
+    from ssios.goals import GoalStore, goal_mode, task_view
     from ssios.reminders import ReminderStore, sweep_accounts
     from ssios.scope import AccountScope
 
@@ -443,7 +493,6 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
     )
     rows = []
     for goal in shown:
-        title = html.escape(str(goal.get("title") or ""))
         goal_id = html.escape(str(goal.get("id") or ""))
         source = goal.get("source") if isinstance(goal.get("source"), dict) else {}
         conversation = html.escape(str(source.get("conversation_id") or ""))
@@ -453,11 +502,12 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
         buttons = (
             f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
             f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
-            "<button name=\"op\" value=\"complete\" type=\"submit\">Complete</button>"
             "<button name=\"op\" value=\"drop\" type=\"submit\">Drop</button>"
             "<button name=\"op\" value=\"undo\" type=\"submit\">Undo</button></form>"
         )
-        rows.append(f"<li><strong>{title}</strong> {html.escape(str(goal.get('status') or ''))} {link} {reason} {buttons}</li>")
+        box = task_check_control(session, task_view(goal))
+        state = "done" if goal.get("status") == "done" else "open"
+        rows.append(f"<li class=\"task {state}\">{box} {link} {reason} {buttons}</li>")
     mode = html.escape(goal_mode(scope.home))
     mode_form = (
         f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -472,20 +522,31 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
         "<label>Description <input name=\"description\" maxlength=\"240\"></label>"
         "<button name=\"op\" value=\"add\" type=\"submit\">Add goal</button></form>"
     )
-    guest = []
+    guest_rows = []
+    guest_tasks = []
     if account.get("legacy_owner"):
-        for task in plane.tasks.values():
-            guest.append(
-                f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
-            )
-    for task in scope.tasks().values():
+        guest_tasks.extend(task for task in plane.tasks.values() if isinstance(task, dict))
+    guest_tasks.extend(task for task in scope.tasks().values() if isinstance(task, dict))
+    for task in guest_tasks:
+        status = str(task.get("status") or "")
+        guest_rows.append(
+            {
+                "id": "",
+                "title": str(task.get("id") or ""),
+                "status": "done" if status in {"done", "succeeded", "completed"} else "open",
+                "writable": False,
+                "hint": "Guest task status is not changed from this list.",
+            }
+        )
+    guest = []
+    for task in guest_tasks:
         guest.append(
-            f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
+            f"<li><a href=\"/ui/tasks/{html.escape(str(task.get('id') or ''))}\">{html.escape(str(task.get('id') or ''))}</a> {html.escape(str(task.get('status') or ''))}</li>"
         )
     reminder_store = ReminderStore(scope.home)
     notices = []
-    for notice in reminder_store.unseen():
-        notices.append(f"<li>Reminder: {html.escape(str(notice.get('text') or ''))} was due {html.escape(str(notice.get('due') or ''))}.</li>")
+    for item in reminder_store.unseen():
+        notices.append(f"<li>Reminder: {html.escape(str(item.get('text') or ''))} was due {html.escape(str(item.get('due') or ''))}.</li>")
     dismiss = (
         f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button name=\"op\" value=\"dismiss\" type=\"submit\">Dismiss</button></form>"
@@ -501,12 +562,15 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
             "<button name=\"op\" value=\"snooze\" type=\"submit\">Snooze</button>"
             "<button name=\"op\" value=\"cancel\" type=\"submit\">Cancel</button></form></li>"
         )
+    guest_list = task_checklist_html(session, guest_rows)
+    guest_links = "<ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
     body = (
-        f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
-        + "<ul>" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
+        notice
+        + f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
+        + "<ul class=\"checklist\">" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
         + "<h2>Reminders</h2>" + (f"<ul>{''.join(notices)}</ul>" + dismiss if notices else "")
         + "<ul>" + ("".join(reminder_rows) or "<li>No open reminders.</li>") + "</ul>"
-        + "<h2>Guest tasks</h2><ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
+        + "<h2>Guest tasks</h2>" + guest_list + guest_links
     )
     return _page(session, "Tasks", body)
 
@@ -544,9 +608,40 @@ def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
         ReminderStore(scope.home).cancel_matching(str(body.get("id") or ""))
     elif op == "dismiss":
         ReminderStore(scope.home).mark_seen()
+    elif op == "toggle":
+        return _stage_goal_toggle(plane, session, scope, str(body.get("id") or ""))
     else:
         raise SsiosError("goal_invalid", "goal action rejected", 400)
     return Page(200, _tasks(plane, session, "open"))
+
+
+def _stage_goal_toggle(plane, session, scope, goal_id: str) -> Page:
+    import json
+
+    from ssios.goals import GoalStore
+
+    goal = GoalStore(scope.home).get(goal_id)
+    if goal is None or goal.get("status") == "dropped":
+        raise SsiosError("goal_invalid", "goal not found", 404)
+    status = "open" if goal.get("status") == "done" else "done"
+    payload = json.dumps({"id": goal["id"], "status": status}, ensure_ascii=False).encode("utf-8")
+    approval = scope.create_approval(
+        action="goal.update",
+        project_id=scope.project_id(),
+        task_id="chat",
+        payload=payload,
+        meta={"expected_revision": "goal", "goal_id": goal["id"], "status": status, "title": str(goal.get("title") or "")[:80]},
+    )
+    record = scope.approvals().get(str(approval.get("id") or ""))
+    preview = html.escape(scope.preview(record))
+    notice = (
+        "<article class=\"card approval\"><h2>goal.update</h2><pre>"
+        + preview
+        + "</pre><p>Nothing is written until you approve it.</p>"
+        + _decision_form(session, record)
+        + "</article>"
+    )
+    return Page(200, _tasks(plane, session, "open", notice))
 
 
 def _goal_title(scope, goal_id: str) -> str:
@@ -763,6 +858,8 @@ def _approval_outcome(scope, record: dict, result: dict | None) -> str:
         return "Saved the clip."
     if action == "chat.accept":
         return "Saved the guest result for this account."
+    if action == "goal.update":
+        return "Updated the task."
     if isinstance(result, dict) and result.get("status"):
         return "Status: " + str(result.get("status"))
     return "The decision was recorded."
@@ -1380,6 +1477,27 @@ label { display: grid; gap: 4px; }
 form { display: grid; gap: 12px; }
 .goal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .goal-actions button { width: auto; }
+.checklist, .msg ul.checklist { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 8px; }
+.checklist li.task { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.checklist form, .checklist .row { display: flex; align-items: flex-start; gap: 10px; margin: 0; }
+.checklist .check {
+  width: 18px; height: 18px; min-width: 18px; padding: 0; border-radius: 3px;
+  border: 1.5px solid var(--ink); background: var(--panel); display: inline-grid; place-items: center;
+}
+.checklist .check[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.checklist .check[aria-pressed="true"]::after {
+  content: ""; width: 8px; height: 4px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg) translateY(-1px);
+}
+.checklist .task.done .label { color: var(--muted); text-decoration: line-through; }
+.checklist .check[aria-disabled="true"] { cursor: default; }
+.md li.task { list-style: none; margin-left: 0; }
+.md li.task input[type="checkbox"] {
+  appearance: none; width: 16px; height: 16px; margin: 0 8px 0 0; vertical-align: -3px;
+  border: 1.5px solid var(--ink); border-radius: 3px; background: var(--panel);
+}
+.md li.task.done { color: var(--muted); text-decoration: line-through; }
+.md li.task.done input[type="checkbox"] { background: var(--ink); }
 .badge { display: inline-block; min-width: 1.2em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: 12px; text-align: center; }
 pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .app { height: 100%; display: flex; min-height: 0; }

@@ -207,8 +207,9 @@
       var body = line.replace(/^(\s*)([-*+]|\d+\.)\s+/, "");
       var task = /^\[( |x|X)\]\s+/.exec(body);
       if (task) {
-        var checked = task[1].toLowerCase() === "x" ? " checked" : "";
-        html += '<li class="task"><input type="checkbox" disabled' + checked + "> " + inlineParts(body.slice(task[0].length)) + "</li>";
+        var done = task[1].toLowerCase() === "x";
+        var checked = done ? " checked" : "";
+        html += '<li class="task' + (done ? " done" : "") + '"><input type="checkbox" disabled title="This box is read-only."' + checked + "> " + inlineParts(body.slice(task[0].length)) + "</li>";
       } else html += "<li>" + inlineParts(body) + "</li>";
     });
     return html + "</" + tag + ">";

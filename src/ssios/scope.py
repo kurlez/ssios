@@ -77,6 +77,11 @@ class AccountScope:
             return "\n\n".join(str(item.get("content") or "") for item in proposal.get("files") or [])
         if action in ("chat.accept", "connector.fetch"):
             return self.staged_bytes(str(record.get("proposal_id") or "")).decode("utf-8", "replace")
+        if action == "goal.update":
+            meta = self.staged_meta(str(record.get("proposal_id") or ""))
+            status = "done" if meta.get("status") == "done" else "open"
+            title = str(meta.get("title") or "")
+            return f"Mark this task {status}.\n\n{title}\nNothing is written until you approve it."
         return ""
 
     def stage_bytes(self, proposal_id: str, data: bytes, meta: dict) -> str:
@@ -174,7 +179,43 @@ class AccountScope:
             from ssios.mcp_host import apply_write
 
             return apply_write(self, record)
+        if action == "goal.update":
+            return self._apply_goal(record, peer_ip)
         raise SsiosError("approval_invalid", "action rejected", 400)
+
+    def _apply_goal(self, record: dict, peer_ip: str) -> dict:
+        import json
+
+        from ssios.calendar_intent import host_clock
+        from ssios.goals import GoalStore, manual_goal
+
+        data = self.staged_bytes(str(record.get("proposal_id") or ""))
+        if sha256_bytes(data) != record.get("payload_sha256"):
+            raise SsiosError("payload_mismatch", "staged bytes do not match the approval", 409)
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SsiosError("approval_invalid", "goal update rejected", 400) from exc
+        if not isinstance(payload, dict):
+            raise SsiosError("approval_invalid", "goal update rejected", 400)
+        goal_id = str(payload.get("id") or "")
+        status = str(payload.get("status") or "")
+        if status not in {"open", "done"}:
+            raise SsiosError("approval_invalid", "goal update rejected", 400)
+        current = GoalStore(self.home).get(goal_id)
+        if current is None:
+            raise SsiosError("goal_invalid", "goal not found", 404)
+        now, _zone = host_clock(self.plane, self.account)
+        goal = manual_goal(
+            self,
+            title=str(current.get("title") or ""),
+            description=str(current.get("description") or ""),
+            status=status,
+            goal_id=goal_id,
+            now=now,
+            peer_ip=peer_ip,
+        )
+        return {"action": "goal.update", "goal_id": goal["id"], "status": goal.get("status")}
 
     def _audit(self, peer_ip: str, action: str, target: str, result: str) -> None:
         self.plane.security_audit.write(actor=self.account_id, ip=peer_ip or "127.0.0.1", action=action, target=target, result=result)

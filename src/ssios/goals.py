@@ -298,6 +298,32 @@ def apply_turn(scope, conversation_id: str, message_id: str, message: str, *, ev
     return chips
 
 
+def listed_goals(goals: list[dict]) -> list[dict]:
+    """Open and done goals from a store query. Dropped goals are omitted."""
+    shown = []
+    for goal in goals:
+        if not isinstance(goal, dict):
+            continue
+        if goal.get("status") not in {"open", "in_progress", "done"}:
+            continue
+        shown.append(goal)
+    return shown
+
+
+def task_view(goal: dict, *, writable: bool = True, hint: str = "") -> dict:
+    """A checklist row. The title and status come from the stored goal."""
+    view = {
+        "id": str(goal.get("id") or ""),
+        "title": str(goal.get("title") or ""),
+        "status": "done" if goal.get("status") == "done" else "open",
+        "due": str(goal.get("due") or ""),
+        "writable": bool(writable and goal.get("id")),
+    }
+    if hint:
+        view["hint"] = hint
+    return view
+
+
 def undo_goal(scope, goal_id: str, now: datetime, peer_ip: str) -> dict | None:
     stamp = now.replace(microsecond=0).isoformat()
     restored = GoalStore(scope.home).undo(goal_id, stamp)

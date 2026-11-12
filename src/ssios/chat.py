@@ -1012,23 +1012,28 @@ def _wants_clip(message: str) -> bool:
 
 def _task_command(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
     from ssios.calendar_intent import account_zone
-    from ssios.goals import GoalStore, _audit, manual_goal, task_command
+    from ssios.goals import GoalStore, _audit, listed_goals, manual_goal, task_command, task_view
     from ssios.reminders import ReminderStore, reminder_schedule, reminder_text
 
     command = task_command(message) or {"op": "list"}
     now, zone_name = host_clock(plane, scope.account)
     store = GoalStore(scope.home)
     if command["op"] == "list":
-        lines = ["Open tasks:"]
-        found = store.open_goals()
+        found = listed_goals(store.all())
         if not found:
-            lines.append("No open tasks.")
+            text = "No open tasks."
+            scope.chat().append(conversation_id, {"role": "assistant", "text": text, "task_ids": []})
+            yield {"event": "outcome", "data": {"text": text, "tasks": []}}
+            return
+        lines = ["Tasks:"]
         for goal in found:
+            mark = "x" if goal.get("status") == "done" else " "
             due = f" due {goal['due']}" if goal.get("due") else ""
-            lines.append(f"- {goal.get('title')}{due}")
+            lines.append(f"- [{mark}] {goal.get('title')}{due}")
         text = "\n".join(lines)
-        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
-        yield {"event": "outcome", "data": {"text": text}}
+        views = [task_view(goal) for goal in found]
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text, "task_ids": [goal["id"] for goal in found]})
+        yield {"event": "outcome", "data": {"text": text, "tasks": views}}
         return
     if command["op"] == "add":
         goal = manual_goal(
