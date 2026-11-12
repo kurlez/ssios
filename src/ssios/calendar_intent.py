@@ -113,15 +113,68 @@ _INTENT_SYSTEM = (
 )
 
 
+_CREATIVE = re.compile(
+    r"(帮我写|写一个|写一篇|写首|写一首|小故事|故事|诗|文章|总结一下什么是|假如|想象|假设|会怎样|"
+    r"\b(write|story|poem|essay|explain|imagine|suppose|hypothetical)\b|what if)",
+    re.IGNORECASE,
+)
+_GENERAL = re.compile(r"^(what is|what's an|what's a|explain|define)\b", re.IGNORECASE)
+_CLOCK = re.compile(r"(点|点钟|\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm)\b|\bat\s+\d{1,2}\b)", re.IGNORECASE)
+_CAL_VERB = re.compile(
+    r"(加到日历|添加到日历|创建会议|创建个会议|新建.{0,8}(?:会|会议)|安排.{0,12}(?:会|会议)|(?<!大)约)",
+)
+_CAL_VERB_EN = re.compile(
+    r"\b(?:schedule|book|add to (?:my )?calendar|put on (?:my )?calendar|create (?:a )?(?:meeting|event))\b",
+    re.IGNORECASE,
+)
+
+
+def creative_request(message: str) -> bool:
+    """Writing, a story, or a hypothetical. A meeting word inside it is not a calendar change."""
+    return bool(_CREATIVE.search(" ".join(str(message or "").split())))
+
+
+def general_question(message: str) -> bool:
+    """A definition, not a request to read the user's mail, calendar, or weather."""
+    text = " ".join(str(message or "").split())
+    if any(cue in text for cue in ("什么是", "是什么意思", "是啥")):
+        return not any(part in text for part in ("我的", "我有", "查一下", "查我"))
+    if _GENERAL.search(text):
+        if re.search(r"\b(price|prices|weather|forecast|news)\b", text, re.IGNORECASE):
+            return False
+        return not re.search(r"\b(my|inbox)\b", text, re.IGNORECASE)
+    return False
+
+
+def _has_clock(text: str) -> bool:
+    return bool(_CLOCK.search(text))
+
+
+def calendar_write(message: str) -> bool:
+    """A change to the user's own calendar needs an action and an event, or a clock time plus a meeting."""
+    text = " ".join(str(message or "").split())
+    if not text or creative_request(text) or general_question(text):
+        return False
+    folded = text.casefold()
+    verb = bool(_CAL_VERB.search(text) or _CAL_VERB_EN.search(folded))
+    meeting = bool(re.search(r"(开会|会议|见面|meeting|appointment)", text, re.IGNORECASE))
+    if verb and (meeting or _has_clock(text)):
+        return True
+    return bool(_has_clock(text) and meeting)
+
+
 def mentions_calendar(message: str) -> bool:
-    folded = message.casefold()
-    if "calendar" in folded:
+    text = " ".join(str(message or "").split())
+    if creative_request(text) or general_question(text):
+        return False
+    folded = text.casefold()
+    if "calendar" in folded or any(cue in text for cue in ("日历", "日程", "有空", "什么会", "什么安排", "有什么安排", "站会", "牙医")):
         return True
-    if any(cue in message for cue in ("日历", "日程", "安排", "有空", "开会", "会议", "站会", "牙医", "什么会")):
+    if calendar_write(text):
         return True
-    if "改到" in message and any(part in message for part in ("点", "上午", "下午", "早上", "晚上")):
+    if "改到" in text and any(part in text for part in ("点", "上午", "下午", "早上", "晚上")):
         return True
-    if "取消" in message and any(part in message for part in ("会", "安排", "日程", "日历")):
+    if "取消" in text and any(part in text for part in ("会", "安排", "日程", "日历")):
         return True
     return False
 
@@ -662,7 +715,7 @@ def _phrase_op(text: str, folded: str) -> str:
         return "delete"
     if any(cue in text for cue in ("改到", "改成", "改为")) or re.search(r"\b(reschedule|move)\b", folded):
         return "update"
-    if any(cue in text for cue in ("开会", "新建", "预约")) or re.search(r"\b(schedule|create|book)\b", folded):
+    if calendar_write(text) or any(cue in text for cue in ("新建", "预约")):
         return "create"
     return "list"
 

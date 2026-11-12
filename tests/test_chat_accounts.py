@@ -1927,10 +1927,10 @@ class HouseholdTest(PlaneTest):
             {"csrf": self._csrf(self.ada), "message": "把日历改一下"},
             cookie=self.ada,
         )
-        self.assertEqual(status, 400, failed)
-        self.assertIn("calendar_intent_invalid", failed)
-        self.assertIn("Nothing was read or changed", failed)
-        self.assertIn("查一下我明天有什么日程", failed)
+        self.assertEqual(status, 200, failed)
+        self.assertNotIn("calendar_intent_invalid", failed)
+        self.assertNotIn("Error code", failed)
+        self.assertIn("时间和事件", failed)
         self.assertNotIn("vm-diagnose", failed)
         self.plane.llm.intent_script = [SsiosError("llm_unavailable", "down", 503)]
         _CalendarApi.writes.clear()

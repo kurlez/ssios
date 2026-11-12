@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ssios.calendar_intent import mentions_calendar
+from ssios.calendar_intent import creative_request, general_question, mentions_calendar
 
 _QUESTION = re.compile(
     r"^(what|why|how|when|who|where|explain|describe|hello|hi|thanks|thank you)\b",
@@ -94,6 +94,8 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
     from ssios.goals import task_command
     from ssios.reminders import is_agenda, reminder_command, wants_forget, wants_remember
 
+    if (creative_request(message) or general_question(message)) and forced != "force_vm":
+        return _decision("direct", "rule_direct", "The message asks for writing or an explanation, so the local model answers directly.", ())
     skill = match_skill(message)
     if task_command(message) and forced != "force_vm":
         return _decision("tasks", "rule_tasks", "The message is a task command. It is handled here, not by the model.", ())
@@ -193,6 +195,8 @@ def _saved_facts(message: str) -> str:
 
 def _services(message: str) -> tuple[str, ...]:
     folded = message.casefold()
+    if creative_request(message) or general_question(message):
+        return ()
     if _DEFINITION.search(message) and "my" not in folded and "inbox" not in folded and "unread" not in folded:
         return ()
     found = []

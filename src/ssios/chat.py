@@ -69,6 +69,15 @@ def _hold_slot(
     yield {"event": "outcome", "data": {"text": prompt, "choices": list(choices or [])}}
 
 
+def _calendar_clarify(scope, conversation_id: str, message: str) -> Iterator[dict]:
+    """A weak calendar guess asks one question. It does not show an error card."""
+    from ssios.locale_messages import say
+
+    text = say(_turn_language(scope.plane, scope.account_id, message), "calendar_clarify")
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": {"route": "direct", "reason": text, "source": "rule"}})
+    yield {"event": "outcome", "data": {"text": text}}
+
+
 def _keep_weather_context(message: str) -> bool:
     from ssios.skill_broker import live_weather, place_only
 
@@ -275,6 +284,9 @@ def iter_turn(
         else:
             raise SsiosError("chat_rejected", "route rejected", 400)
     except SsiosError as exc:
+        if exc.code in {"calendar_intent_unclear", "calendar_intent_invalid"}:
+            yield from _calendar_clarify(scope, record["id"], message)
+            return
         _note_missing_slot(scope, record["id"], message, exc)
         yield remember_failure(scope, record["id"], exc.code, english_connector_error(exc), exc.status)
         return

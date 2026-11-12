@@ -35,6 +35,7 @@ MESSAGES = {
         "condition_thunderstorm": "Thunderstorm",
         "condition_unknown": "Unknown",
         "reply_instruction": "Reply in English.",
+        "calendar_clarify": "Which event and what time should I put on your calendar?",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -63,6 +64,7 @@ MESSAGES = {
         "condition_thunderstorm": "雷暴",
         "condition_unknown": "未知",
         "reply_instruction": "用中文回答。",
+        "calendar_clarify": "要改日历的话，请说时间和事件。",
     },
 }
 
