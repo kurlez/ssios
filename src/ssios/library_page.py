@@ -285,16 +285,22 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     trash = str(query.get("trash") or "") == "1"
     uncategorized = str(query.get("uncategorized") or "") == "1"
     untagged = str(query.get("untagged") or "") == "1"
-    items = list_items(
-        plane,
-        account_id,
-        library_id,
-        folder=folder,
-        tag=tag,
-        trash=trash,
-        uncategorized=uncategorized,
-        untagged=untagged,
-    )
+    smart_id = str(query.get("smart") or "")
+    if smart_id:
+        from ssios.library_query import smart_items
+
+        items = smart_items(plane, account_id, library_id, smart_id)
+    else:
+        items = list_items(
+            plane,
+            account_id,
+            library_id,
+            folder=folder,
+            tag=tag,
+            trash=trash,
+            uncategorized=uncategorized,
+            untagged=untagged,
+        )
     selected = None
     item_id = str(query.get("item") or "")
     if item_id:
@@ -404,6 +410,10 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
         + '<label>Folder <input name="name" maxlength="40"></label>'
         + '<button name="op" value="folder" type="submit">Add folder</button></form>'
+        + "<h2>" + html.escape(say(lang, "smart_folder")) + "</h2>"
+        + _smart_block(meta, base, lang, csrf, library_id)
+        + "<h2>" + html.escape(say(lang, "watch_folder")) + "</h2>"
+        + _watch_form(meta, lang, csrf, library_id)
         + "<h2>Tags</h2>" + ("".join(f"<p>{row}</p>" for row in tags) or "<p>No tags.</p>")
         + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
@@ -465,6 +475,28 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         if saved.get("result") == "conflict":
             return Page(200, library_page(plane, session, {"library": library_id}, _conflict_form(session, library_id, saved, _language(plane, account_id))))
         return Page(200, library_page(plane, session, {"library": library_id, "item": saved["id"]}, "<p>Saved the file.</p>"))
+    if op == "smart":
+        from ssios.library_query import add_smart_folder
+
+        add_smart_folder(plane, account_id, library_id, str(body.get("name") or ""), str(body.get("query") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(say(_language(plane, account_id), 'smart_saved'))}</p>"))
+    if op == "watch":
+        from ssios.library_watch import scan_watch, set_watch
+
+        set_watch(
+            plane,
+            account_id,
+            library_id,
+            str(body.get("path") or ""),
+            str(body.get("enabled") or "") == "1",
+            peer_ip,
+            delete_source=str(body.get("delete_source") or "") == "1",
+        )
+        found = scan_watch(plane, account_id, library_id, peer_ip)
+        note = say(_language(plane, account_id), "watch_saved")
+        if found.get("imported"):
+            note += " " + say(_language(plane, account_id), "drop_saved")
+        return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(note)}</p>"))
     if op == "folder":
         add_folder(plane, account_id, library_id, str(body.get("name") or ""), peer_ip)
     elif op == "tag":
@@ -508,6 +540,41 @@ def _upload(body: dict) -> tuple[bytes, str, str]:
     if uploads and isinstance(uploads[0], dict) and isinstance(uploads[0].get("bytes"), (bytes, bytearray)):
         return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker"} else "picker"
     return b"", str(body.get("name") or ""), source
+
+
+def _smart_block(meta: dict, base: str, lang: str, csrf: str, library_id: str) -> str:
+    links = []
+    for row in meta.get("smart_folders") or []:
+        if not isinstance(row, dict):
+            continue
+        links.append(
+            f'<p><a href="{base}&amp;smart={html.escape(str(row.get("id") or ""), quote=True)}">'
+            f'{html.escape(str(row.get("name") or ""))}</a></p>'
+        )
+    form = (
+        f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<label>{html.escape(say(lang, "smart_folder"))} <input name="name" maxlength="40"></label>'
+        f'<label>{html.escape(say(lang, "smart_query"))} <input name="query" maxlength="200"></label>'
+        f'<button name="op" value="smart" type="submit">{html.escape(say(lang, "smart_add"))}</button></form>'
+    )
+    return "".join(links) + form
+
+
+def _watch_form(meta: dict, lang: str, csrf: str, library_id: str) -> str:
+    watch = meta.get("watch") if isinstance(meta.get("watch"), dict) else {}
+    enabled = " checked" if watch.get("enabled") else ""
+    delete = " checked" if watch.get("delete_source") else ""
+    path = html.escape(str(watch.get("path") or ""), quote=True)
+    return (
+        f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<p>{html.escape(say(lang, "watch_hint"))}</p>'
+        f'<label>{html.escape(say(lang, "watch_folder"))} <input name="path" value="{path}"></label>'
+        f'<label><input type="checkbox" name="enabled" value="1"{enabled}> {html.escape(say(lang, "watch_enable"))}</label>'
+        f'<label><input type="checkbox" name="delete_source" value="1"{delete}> {html.escape(say(lang, "watch_delete"))}</label>'
+        f'<button name="op" value="watch" type="submit">{html.escape(say(lang, "watch_saved"))}</button></form>'
+    )
 
 
 def _folder_label(folders: list[dict], row: dict) -> str:

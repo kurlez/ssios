@@ -73,7 +73,7 @@ Personal libraries, more than one per account, each with its own folders, tags, 
 
 ### M2 — preview, search, more doors
 
-MOV, EPUB, and DOCX previews. Full-text search, filters, and smart folders (saved queries with AND / OR / NOT, computed, never copied). A watched local folder that imports a file only after it stops changing, and does not delete the source unless asked. The clipper can send an image into the library. Gmail and Drive attachments are read-only copies. A memory switch can exist on the item, but extracted facts may still be only the title and tags.
+Smart folders are saved queries with AND, OR, and NOT. They are computed when the list is drawn and never copy a file. A watched folder is a local path, off until the owner turns it on, and it refuses a network path. A file is imported only after its size and time match the previous look. The source stays unless the owner asks to delete it. MOV, EPUB, and DOCX previews, the clipper, and Gmail or Drive copies are not in this branch. See `docs/files-open-issues.md`.
 
 ### M3 — Eagle import and visual organize
 

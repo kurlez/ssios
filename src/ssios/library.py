@@ -1,8 +1,8 @@
 """Personal asset libraries. Originals are immutable copies under the state directory.
 
 Chat files stay where they are. The first visit copies them into the default
-personal library. Re-importing the same name adds a version. The same hash is
-stored once.
+personal library. A matching name or the same bytes waits for a choice. The
+same hash is stored once.
 """
 
 from __future__ import annotations
@@ -91,8 +91,21 @@ def library_or_default(plane, account_id: str, library_id: str) -> dict:
 
 
 def metadata(plane, account_id: str, library_id: str) -> dict:
-    library_or_default(plane, account_id, library_id)
+    _owned(plane, account_id, library_id)
     return _metadata(plane, account_id, library_id, create=False, name="")
+
+
+def replace_metadata(plane, account_id: str, library_id: str, data: dict) -> None:
+    """Replace the catalog header for a library this account can open."""
+    _owned(plane, account_id, library_id)
+    _write_metadata(plane, account_id, library_id, data)
+
+
+def _owned(plane, account_id: str, library_id: str) -> dict:
+    chosen = library_or_default(plane, account_id, library_id)
+    if chosen["id"] != library_id:
+        raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
+    return chosen
 
 
 def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str, parent_id: str = "") -> dict:
