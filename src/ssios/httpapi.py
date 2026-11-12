@@ -70,6 +70,23 @@ def _multipart_memory(content_type: str, raw: bytes) -> dict:
             "override",
             "conversation",
             "quote",
+            "library",
+            "item",
+            "name",
+            "query",
+            "source",
+            "folder",
+            "tag",
+            "star",
+            "path",
+            "enabled",
+            "delete_source",
+            "username",
+            "role",
+            "decision",
+            "conflict",
+            "relative",
+            "ajax",
         }:
             continue
         try:

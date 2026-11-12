@@ -124,6 +124,9 @@ MESSAGES = {
         "lib_smart_name": "Enter a name for the smart folder.",
         "lib_smart_query": "That query is not valid. Use tag:name or star>=3, joined with AND, OR, or NOT.",
         "lib_folder_name": "Enter a folder name.",
+        "lib_rename": "Rename",
+        "lib_rename_invalid": "Enter a file name without a path.",
+        "lib_rename_clash": "A file with this name is already in the library. Type a different name.",
         "error_details": "Error code",
     },
     "zh": {
@@ -242,6 +245,9 @@ MESSAGES = {
         "lib_smart_name": "请填写智能文件夹的名称。",
         "lib_smart_query": "这个条件无效。可以用 tag:名称、star>=3，并用 AND、OR 或 NOT 连接。",
         "lib_folder_name": "请填写文件夹名称。",
+        "lib_rename": "重命名",
+        "lib_rename_invalid": "请填写文件名，不要包含路径。",
+        "lib_rename_clash": "文件库里已经有这个名字。请换一个名称。",
         "error_details": "错误代码",
     },
 }

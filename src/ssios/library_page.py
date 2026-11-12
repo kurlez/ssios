@@ -273,6 +273,71 @@ LIBRARY_JS = r"""
       img.replaceWith(tile);
     });
   });
+  var heading = document.querySelector(".lib-rename");
+  if (heading) {
+    function beginRename() {
+      if (heading.querySelector("input")) return;
+      var full = heading.getAttribute("data-name") || "";
+      var input = document.createElement("input");
+      input.className = "lib-rename-input";
+      input.value = full;
+      input.setAttribute("maxlength", "120");
+      var text = heading.querySelector(".lib-rename-text");
+      if (text) text.replaceWith(input);
+      var dot = full.lastIndexOf(".");
+      input.focus();
+      if (dot > 0) input.setSelectionRange(0, dot);
+      var cancel = false;
+      input.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") { cancel = true; input.blur(); }
+        if (event.key === "Enter") { event.preventDefault(); input.blur(); }
+      });
+      input.addEventListener("blur", function () {
+        if (cancel) { restore(full); return; }
+        saveRename(input.value, full);
+      });
+    }
+    function restore(full) {
+      var input = heading.querySelector("input");
+      if (!input) return;
+      var text = document.createElement("span");
+      text.className = "lib-rename-text";
+      text.textContent = full;
+      input.replaceWith(text);
+      var error = document.querySelector(".lib-rename-error");
+      if (error) { error.hidden = true; error.textContent = ""; }
+    }
+    function saveRename(value, previous) {
+      var data = new URLSearchParams();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("item", heading.getAttribute("data-id") || "");
+      data.set("op", "rename");
+      data.set("ajax", "1");
+      data.set("name", value);
+      fetch("/ui/library", {method: "POST", body: data, headers: {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}})
+        .then(function (response) { return response.json(); })
+        .then(function (payload) {
+          if (!payload.ok) {
+            var error = document.querySelector(".lib-rename-error");
+            if (error) { error.hidden = false; error.textContent = payload.error || ""; }
+            var input = heading.querySelector("input");
+            if (input) input.focus();
+            return;
+          }
+          heading.setAttribute("data-name", payload.name);
+          restore(payload.name);
+          var card = document.querySelector('.lib-card[data-item="' + (payload.id || "") + '"] .name');
+          if (card) card.textContent = payload.name;
+        })
+        .catch(function () { restore(previous); });
+    }
+    heading.addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.closest) return;
+      if (target.closest(".lib-rename-text") || target.closest(".lib-rename-edit")) beginRename();
+    });
+  }
   var settings = document.getElementById("lib-settings");
   var openSettings = document.getElementById("lib-settings-open");
   if (settings && openSettings && settings.showModal) {
@@ -375,7 +440,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         else:
             thumb = f'<img class="lib-thumb" src="/ui/library/thumb?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="" data-tile="{ext}">'
         cards.append(
-            f'<a class="lib-card" href="{base}&amp;item={ident}">{avatar}{thumb}<span class="name">{label}</span><span class="type-badge">{ext}</span></a>'
+            f'<a class="lib-card" data-item="{ident}" href="{base}&amp;item={ident}">{avatar}{thumb}<span class="name">{label}</span><span class="type-badge">{ext}</span></a>'
         )
     inspector = ""
     if selected:
@@ -403,7 +468,10 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         chips = "".join(f'<span class="lib-chip">{html.escape(str(tag))}</span>' for tag in selected.get("tags") or [])
         inspector = (
             preview
-            + f"<h2>{html.escape(str(selected.get('name') or ''))}</h2>"
+            + f'<h2 class="lib-rename" data-name="{html.escape(str(selected.get("name") or ""), quote=True)}" data-id="{ident}">'
+            + f'<span class="lib-rename-text">{html.escape(str(selected.get("name") or ""))}</span>'
+            + f'<button type="button" class="lib-rename-edit" aria-label="{html.escape(say(lang, "lib_rename"), quote=True)}">{html.escape(say(lang, "lib_rename"))}</button></h2>'
+            + '<p class="lib-rename-error" hidden></p>'
             + f"<p>{html.escape(version_label)}</p>"
             + (f"<p>{html.escape(str(selected.get('captured_at') or ''))}</p>" if selected.get("captured_at") else "")
             + f"<form method=\"post\" action=\"/ui/library\">{_hidden(csrf, library_id, ident)}"
@@ -516,6 +584,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'data-keep="{html.escape(say(lang, "conflict_keep"), quote=True)}" '
         + f'data-replace="{html.escape(say(lang, "conflict_replace"), quote=True)}" '
         + f'data-apply="{html.escape(say(lang, "conflict_apply"), quote=True)}" '
+        + f'data-rename="{html.escape(say(lang, "lib_rename"), quote=True)}" '
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
         + '<div class="lib-main">'
@@ -535,6 +604,11 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     except SsiosError as exc:
         if not str(exc.code).startswith("library_"):
             raise
+        if str(body.get("ajax") or "") == "1":
+            import json
+
+            payload = json.dumps({"ok": False, "error": exc.detail}, ensure_ascii=False)
+            return Page(200, payload, content_type="application/json; charset=utf-8")
         library_id = str(body.get("library") or "")
         notice = f'<p class="notice">{html.escape(exc.detail)}</p>'
         return Page(200, library_page(plane, session, {"library": library_id, "item": str(body.get("item") or "")}, notice))
@@ -554,6 +628,16 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
 
         decided = resolve_conflict(plane, account_id, library_id, str(body.get("conflict") or ""), str(body.get("decision") or ""), peer_ip)
         return Page(200, library_page(plane, session, {"library": library_id, "item": decided.get("id") or ""}, f"<p>{html.escape(decided.get('reason') or '')}</p>"))
+    if op == "rename":
+        import json
+
+        from ssios.library import rename_item
+
+        renamed = rename_item(plane, account_id, library_id, str(body.get("item") or ""), str(body.get("name") or ""), peer_ip)
+        if str(body.get("ajax") or "") == "1":
+            payload = json.dumps({"ok": True, "id": renamed["id"], "name": renamed["name"]}, ensure_ascii=False)
+            return Page(200, payload, content_type="application/json; charset=utf-8")
+        return Page(200, library_page(plane, session, {"library": library_id, "item": renamed["id"]}, ""))
     if op == "import":
         raw, filename, source = _upload(body)
         saved = import_bytes(plane, account_id, library_id, raw, name=filename, source=source, peer_ip=peer_ip)

@@ -78,7 +78,7 @@ class LibraryTest(PlaneTest):
         self.assertIn("harbor-desk.png", saved)
         self.assertNotIn("GPSLatitude", saved)
         raw_item = saved.split("harbor-desk.png", 1)[0]
-        item = raw_item.split("item=", 1)[-1].split('"', 1)[0].split("&", 1)[0]
+        item = raw_item.rsplit('data-item="', 1)[-1].split('"', 1)[0]
         blob = self._raw(library_id, item)
         self.assertNotIn(b"GPSLatitude", blob)
         self.assertNotIn(b"tEXt", blob)

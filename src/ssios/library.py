@@ -411,6 +411,41 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
     return item
 
 
+def rename_item(plane, account_id: str, library_id: str, item_id: str, name: str, peer_ip: str) -> dict:
+    """Change the display name. The stored bytes stay on the same hash."""
+    _require(plane, account_id, library_id, "add")
+    item = get_item(plane, account_id, library_id, item_id)
+    lang = _lang(plane, account_id)
+    role = _role_of(plane, account_id, library_id) or ""
+    if role != "owner" and str(item.get("added_by") or "") != account_id:
+        raise SsiosError("library_denied", say(lang, "library_denied"), 403)
+    cleaned = _display_name(str(item.get("name") or ""), name, lang)
+    if cleaned.casefold() == str(item.get("name") or "").casefold():
+        return item
+    for other in _items(plane, account_id, library_id):
+        if other.get("id") == item_id or other.get("trashed"):
+            continue
+        if str(other.get("name") or "").casefold() == cleaned.casefold():
+            raise SsiosError("library_rename_clash", say(lang, "lib_rename_clash"), 400)
+    item["name"] = cleaned
+    item["modified_at"] = _now()
+    _write_item(plane, account_id, library_id, item)
+    _audit(plane, account_id, peer_ip, "library.rename", item_id, "ok", int(item.get("size") or 0))
+    return item
+
+
+def _display_name(old: str, proposed: str, lang: str) -> str:
+    text = str(proposed or "")
+    if "/" in text or "\\" in text or any(ord(ch) < 32 for ch in text):
+        raise SsiosError("library_rename", say(lang, "lib_rename_invalid"), 400)
+    cleaned = " ".join(text.split()).strip(" .")[:120]
+    if not cleaned or cleaned.startswith("."):
+        raise SsiosError("library_rename", say(lang, "lib_rename_invalid"), 400)
+    if "." not in cleaned and "." in old:
+        cleaned = (cleaned + old[old.rfind("."):])[:120]
+    return cleaned
+
+
 def purge_item(plane, account_id: str, library_id: str, item_id: str, confirm: str, peer_ip: str) -> None:
     _require(plane, account_id, library_id, "owner")
     if confirm != "delete":
