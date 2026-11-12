@@ -286,6 +286,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     uncategorized = str(query.get("uncategorized") or "") == "1"
     untagged = str(query.get("untagged") or "") == "1"
     smart_id = str(query.get("smart") or "")
+    text_query = " ".join(str(query.get("q") or "").split())[:200]
     if smart_id:
         from ssios.library_query import smart_items
 
@@ -301,6 +302,11 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             uncategorized=uncategorized,
             untagged=untagged,
         )
+    if text_query:
+        from ssios.library_query import _blob
+
+        needle = text_query.casefold()
+        items = [item for item in items if needle in _blob(item)]
     selected = None
     item_id = str(query.get("item") or "")
     if item_id:
@@ -444,6 +450,10 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
         + "<div>"
+        + f'<form class="file-search" method="get" action="/ui/library">'
+        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + f'<label>{html.escape(say(lang, "search_files"))} <input name="q" value="{html.escape(text_query, quote=True)}" maxlength="200"></label>'
+        + f'<button type="submit">{html.escape(say(lang, "search_files"))}</button></form>'
         + '<ol id="drop-log" class="drop-log"></ol><p id="drop-summary"></p>'
         + grid
         + "</div>"

@@ -83,6 +83,7 @@ MESSAGES = {
         "ocr_label": "Text in the file",
         "memory_core": "Copy to core memory",
         "memory_pending": "Waiting for approval before core memory changes.",
+        "search_files": "Search files",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -159,6 +160,7 @@ MESSAGES = {
         "ocr_label": "文件里的文字",
         "memory_core": "复制到核心记忆",
         "memory_pending": "核心记忆要等你批准后才会改。",
+        "search_files": "搜索文件",
     },
 }
 

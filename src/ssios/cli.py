@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "router-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "router-bench", "library-embed-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -189,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
                 scored.append({"mode": model, "error": detail})
         print(json.dumps({"rules": rules, "models": scored}, ensure_ascii=False, indent=2), flush=True)
         return 0 if rules.get("accuracy") == 1 else 1
+    if args.command == "library-embed-bench":
+        from ssios.library_embed import embed_bench
+
+        print(json.dumps(embed_bench(settings.ollama_base_url), ensure_ascii=False, indent=2), flush=True)
+        return 0
     if args.command == "model-bench":
         from ssios.model_bench import run_bench
 

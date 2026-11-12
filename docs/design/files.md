@@ -73,7 +73,7 @@ Personal libraries, more than one per account, each with its own folders, tags, 
 
 ### M2 — preview, search, more doors
 
-Smart folders are saved queries with AND, OR, and NOT. They are computed when the list is drawn and never copy a file. A watched folder is a local path, off until the owner turns it on, and it refuses a network path. A file is imported only after its size and time match the previous look. The source stays unless the owner asks to delete it. MOV, EPUB, and DOCX previews, the clipper, and Gmail or Drive copies are not in this branch. See `docs/files-open-issues.md`.
+Smart folders are saved queries with AND, OR, and NOT. They are computed when the list is drawn and never copy a file. Search matches the name, tags, note, description, and OCR text. A watched folder is a local path, off until the owner turns it on, and it refuses a network path. A file is imported only after its size and time match the previous look. The source stays unless the owner asks to delete it. MOV, EPUB, and DOCX previews, the clipper, and Gmail or Drive copies are not in this branch. See `docs/files-open-issues.md`. Embedding scores are a separate bench command, `./scripts/ssios library-embed-bench`, and no model is pinned.
 
 ### M3 — Eagle import and visual organize
 
