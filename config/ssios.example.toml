@@ -7,12 +7,31 @@ profile = "dev"
 host = "127.0.0.1"
 port = 8765
 
+[ui]
+# 127.0.0.1 is the default. Set bind to "0.0.0.0" or start `ssios ui --lan` to serve the home network over HTTPS.
+bind = "127.0.0.1"
+# IANA zone for calendar dates. Empty uses this computer's local zone.
+# Example: time_zone = "America/Los_Angeles"
+time_zone = ""
+
 [llm]
 # mock: deterministic, no network. ollama: local Ollama, no cloud fallback.
 provider = "mock"
 ollama_base_url = "http://127.0.0.1:11434"
 ollama_model = "llama3.1:8b"
+# An attached image is read by this local model. Text chat and the guest stay on their own models.
+# qwen3:14b remains the guest text model. Pull the vision weights by hand: ollama pull qwen2.5vl:7b
+vision_model = "qwen2.5vl:7b"
+# Small local classifier for turns the rules do not decide. It does not answer and it does not call tools.
+# ollama pull qwen3:1.7b
+# ollama pull qwen3:4b
+router_model = "qwen3:1.7b"
+router_timeout_seconds = 4
 request_timeout_seconds = 60
+# A mail report scales this by the target length and the number of batches. 20 seconds is too short for an 8B model.
+report_base_seconds = 45
+report_batch_seconds = 20
+report_per_100_seconds = 8
 # Answer token cap. Thinking models are asked for think=false first so reasoning does not consume this budget.
 max_output_tokens = 1024
 # Context length. 8192 is the suggestion for a 7B summary. Note bodies are also truncated to max_note_chars before they reach the model.
@@ -46,13 +65,20 @@ guest_image = "docker.io/library/python@sha256:e064671ca452259bab50e8e2c7bd896e3
 
 [agent.codex]
 # The provider name inside the guest config is fixed as ssios, not ollama. This field is only the model name.
-model = "qwen2.5-coder:7b"
-allow_models = ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b", "qwen2.5:0.5b"]
+# qwen3:14b is the guest default. qwen2.5-coder:7b and qwen3-coder:30b are smaller and larger alternatives.
+# To try Meta Muse Glimmer on Apple Silicon: ollama pull muse-glimmer:30b-mlx (Ollama >= 0.32.8, MLX, about 19GB, Apache 2.0).
+# On a 24GB Mac set model = "muse-glimmer:30b-mlx" and num_ctx = 16384. The model can use 128K, but that plus the 2GB guest leaves little free RAM.
+# No Muse Glimmer timing is recorded here. Run ./scripts/ssios model-bench --model muse-glimmer:30b-mlx on the Mac before treating it as the default.
+model = "qwen3:14b"
+allow_models = ["qwen3:14b", "qwen2.5-coder:7b", "qwen3-coder:30b", "muse-glimmer:30b-mlx", "qwen2.5:7b", "llama3.1:8b"]
 max_requests = 4
 max_request_bytes = 200000
 # Codex's system prompt plus tools is about 4098 tokens. Ollama's /v1/responses ignores request options and keeps the 4096 default.
 # The proxy uses native /api/chat and sends options.num_ctx. Installed models are not modified. A 7B model on a 24GB M4 uses 16384, with a maximum of 32768.
 num_ctx = 16384
+# One plan, then at most this many tool calls. The turn stops at the timeout.
+step_limit = 6
+turn_timeout_seconds = 180
 
 [limits]
 task_timeout_seconds = 30
@@ -60,6 +86,23 @@ max_tool_calls = 8
 max_output_bytes = 65536
 approval_ttl_seconds = 600
 core_token_budget = 2000
+
+[connectors]
+# Read-only Google connectors. Empty means every fetch is denied.
+# enabled = ["drive", "gmail", "calendar"]
+enabled = []
+max_calls = 40
+max_bytes = 200000
+
+[skills]
+# Public web reads run on this computer. The guest stays offline. Off until an admin turns skills on.
+enabled = false
+allow_domains = []
+deny_domains = []
+timeout_seconds = 8
+max_bytes = 200000
+# Empty uses <state>/vaults/<account>. Do not point this at .ssios, .ssios-demo, or .ssios-memfs.
+vault_dir = ""
 
 [memory]
 # letta-memfs-compat: the compatibility library used when the Letta CLI is absent. It is not upstream MemFS.

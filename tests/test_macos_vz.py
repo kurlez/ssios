@@ -21,6 +21,7 @@ from ssios.macos_vz import (
     pack_newc,
     pack_tar_bytes,
     release_proxy_socket,
+    state_path_report,
     supervise_process,
     vfkit_command,
 )
@@ -52,6 +53,79 @@ class ArgvTest(unittest.TestCase):
         with self.assertRaises(SsiosError) as caught:
             assert_no_nic(argv + ["--device", "virtio-net,nat"])
         self.assertEqual(caught.exception.code, "network_denied")
+
+    def test_application_support_space_is_one_vfkit_argument(self) -> None:
+        home = Path("/Users/wliu/Library/Application Support/ssios")
+        guest = home / "accounts" / "acct-0123456789abcdef" / "workspace" / "tasks" / "task-0011223344556677" / "guest"
+        argv = vfkit_command(
+            binary="vfkit",
+            kernel=home / "cache" / "macos-vz" / "Image-arm64",
+            initrd=home / "cache" / "macos-vz" / "codex-initrd.img",
+            serial=guest / "serial.log",
+            vsock=Path("/tmp/ssios-abcd/vsock"),
+            shares=[
+                ("input", guest / "input"),
+                ("scratch", guest / "scratch"),
+                ("workspace", guest / "workspace"),
+                ("tools", guest / "tools"),
+            ],
+            cpus=2,
+            memory_mb=2048,
+        )
+        boot = next(item for item in argv if item.startswith("linux,kernel="))
+        self.assertIn("/Library/Application Support/ssios/cache/macos-vz/Image-arm64,", boot)
+        self.assertIn("initrd=" + str(home / "cache" / "macos-vz" / "codex-initrd.img"), boot)
+        self.assertEqual(boot.count(","), 3)
+        share = next(item for item in argv if item.startswith("virtio-fs,sharedDir=") and "mountTag=workspace" in item)
+        self.assertIn("/Library/Application Support/ssios/", share)
+        self.assertNotIn("virtio-net", "\n".join(argv))
+        report = state_path_report(home)
+        self.assertTrue(report["ok"])
+        self.assertIn("104", report["detail"])
+
+    def test_long_state_path_is_accepted_and_the_socket_stays_short(self) -> None:
+        long = Path("/tmp") / ("n" * 80) / "Application Support" / ("m" * 40) / "ssios"
+        guest = long / "accounts" / "acct" / "workspace" / "tasks" / ("task-" + "ab" * 8) / "guest"
+        self.assertGreater(len(os.fsencode(guest / "serial.log")), 104)
+        self.assertLess(len(os.fsencode(guest / "serial.log")), 1024)
+        argv = vfkit_command(
+            binary="vfkit",
+            kernel=long / "cache" / "macos-vz" / "Image-arm64",
+            initrd=long / "cache" / "macos-vz" / "codex-initrd.img",
+            serial=guest / "serial.log",
+            vsock=Path("/tmp/ssios-long/vsock"),
+            shares=[("workspace", guest / "workspace")],
+            cpus=1,
+            memory_mb=2048,
+        )
+        self.assertIn("Application Support", "\n".join(argv))
+        with self.assertRaises(SsiosError) as caught:
+            assert_unix_socket_path(guest / "vfkit.vsock")
+        self.assertEqual(caught.exception.code, "socket_path_too_long")
+        directory, path = allocate_proxy_socket(guest)
+        self.addCleanup(lambda: release_proxy_socket(directory))
+        self.assertLessEqual(len(os.fsencode(path)), UNIX_SOCKET_MAX)
+        self.assertTrue(str(path).startswith("/tmp/ssios-"))
+
+    def test_comma_quote_and_parent_are_still_rejected(self) -> None:
+        base = dict(
+            binary="vfkit",
+            kernel=Path("/tmp/Image-arm64"),
+            initrd=Path("/tmp/initrd"),
+            serial=Path("/tmp/serial.log"),
+            vsock=Path("/tmp/ssios-abcd/vsock"),
+            shares=[("input", Path("/tmp/input"))],
+            cpus=1,
+            memory_mb=1536,
+        )
+        for kernel in (Path("/tmp/Image,arm64"), Path("/tmp/Image\narm64"), Path("/tmp/a/../Image")):
+            with self.assertRaises(SsiosError) as caught:
+                vfkit_command(**{**base, "kernel": kernel})
+            self.assertEqual(caught.exception.code, "runtime_invalid")
+        report = state_path_report(Path("/tmp/ssios,state"))
+        self.assertFalse(report["ok"])
+        self.assertIn("comma", report["detail"])
+        self.assertIn("/tmp", report["detail"])
 
     def test_comma_in_a_path_is_rejected(self) -> None:
         with self.assertRaises(SsiosError):

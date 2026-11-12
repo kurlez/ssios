@@ -1,5 +1,7 @@
 # Ubuntu and Cloud Hypervisor
 
+The household UI on a desktop, including Linux, is `./scripts/ssios start`. See the README. This page is only the Cloud Hypervisor preflight. That preflight does not boot a guest.
+
 The production target is KVM on Ubuntu LTS, plus Cloud Hypervisor and virtiofsd. The dependencies below are what the operator prepares. The repository does not ship an install script that turns security options off, and it does not use a Docker socket or a shared user home directory.
 
 ## Machine prerequisites

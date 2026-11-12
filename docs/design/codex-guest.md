@@ -157,7 +157,7 @@ The host writes the config into the task's `CODEX_HOME` and mounts it into the g
 
 ```toml
 model_provider = "ssios"
-model = "qwen2.5-coder:7b"
+model = "qwen3:14b"
 check_for_update_on_startup = false
 web_search = "disabled"
 
@@ -215,6 +215,7 @@ Host broker:
 
 - The `host_broker` MCP server binary is in the guest, but the transport is still vsock. It does not hold an OAuth token, and it does not write memory or call Google inside the guest.
 - The read-only tools are `drive.search`, `drive.read_file`, `gmail.search`, and `gmail.get_message`. They are constrained by the task grant, the budget, and the audit log, as the next section says. A single read does not open another SSIOS approval, because the person already gave the grant before the task started. Without a grant, the call is denied.
+- Calendar create, update, and delete are not guest tools. The guest can only ask the host to propose one change. The host connector writes the event after a separate approval for that action. See `docs/google-connector.md`.
 - `memory_propose` hands the Markdown proposal from the guest to the existing `memory.commit` approval. It does not add a new approval meaning. MemFS does not change until the person approves.
 - The tool table has no send, reply, change-label, create-draft, upload, rename, share, or delete. An unknown name is rejected immediately. Shell is rejected. Publish to a path the guest cannot see is rejected. An argument that carries a token is rejected.
 
@@ -257,11 +258,9 @@ The revoke command is `ssios oauth revoke`. It first `POST`s `https://oauth2.goo
 
 A refresh token is worth protecting more than an access token. Storage uses the strictest layer the platform can actually provide:
 
-- macOS: the Keychain. Use the `security` command line or the Keychain API, and limit the item's accessor to the user running SSIOS. FileVault should be on.
-- Linux: libsecret (the desktop keyring) first. When there is no keyring, use a file encrypted with a master key. The master key does not enter the repository, MemFS, or the guest.
-- A mode `0600` file under `<state>/secrets/` is only the minimum fallback, for an environment with no Keychain and no libsecret. The directory is `0700`. When the Keychain or libsecret can be used, the refresh token is not also copied into this directory.
+- macOS and Linux: the `keyring` package, which uses the Keychain or the Secret Service in-process. Do not pass the secret to the `security` or `secret-tool` command line. FileVault should be on. If `keyring` is not installed, the connector refuses with `secure_store_unavailable` instead of writing a file.
 
-Whichever layer is used, these stay the same:
+These stay the same:
 
 - The access token stays in memory, is dropped when it has been used, and is not written to disk.
 - The guest sees no Google token. It can only send a brokered tool request.
@@ -269,7 +268,7 @@ Whichever layer is used, these stay the same:
 - The scopes are only the read-only scopes listed in the previous section. The OAuth client is for SSIOS alone and is not shared with another application. The person can also use a separate Google account prepared only for testing.
 - Authorization is the installed-app loopback flow: `code_challenge` uses PKCE, and `state` is random each time. The callback binds only a temporary port on `127.0.0.1`. The client secret stays on the host.
 - Every call is audited and is constrained by a call count and a byte quota.
-- `ssios oauth revoke` calls Google's revocation endpoint and deletes the local copies in the Keychain, libsecret, and `secrets/`.
+- `revoke_and_delete` calls Google's revocation endpoint and deletes the keyring items for that account. It does not leave a copy under `secrets/`.
 - These values do not enter Git, MemFS, logs, or diagnostics. The existing redaction has to cover `ya29.`, `Bearer`, `refresh_token`, and `client_secret`.
 
 The residual risk is that the host itself is compromised. The Keychain and FileVault stop a disk that falls into someone else's hands. They do not stop a process that is already running as the same user on this machine. Guest isolation does not reduce that risk.
@@ -331,7 +330,7 @@ macos_vm_volume = "/Volumes/krunvm"
 guest_prepare_timeout_seconds = 600
 
 [agent.codex]
-model = "qwen2.5-coder:7b"
+model = "qwen3:14b"
 max_output_tokens = 4096
 max_request_bytes = 200000
 max_tool_rounds = 8

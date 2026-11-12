@@ -1,0 +1,9 @@
+name = "weather"
+description = "Current weather from the keyless Open-Meteo API. The account can set a default city."
+enabled = true
+methods = ["GET"]
+domains = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+tools = ["geocode", "forecast"]
+timeout_seconds = 8
+max_bytes = 100000
+units = "metric"

@@ -1,12 +1,12 @@
 [project]
 name = "ssios"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first personal Agent OS prototype: policy plane, Letta MemFS-compatible memory, approvals, and a fail-closed microVM adapter."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Kent Liu" }]
-dependencies = []
+dependencies = ["keyring>=25"]
 
 [project.scripts]
 ssios = "ssios.cli:main"

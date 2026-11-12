@@ -24,6 +24,9 @@ from ssios.paths import fixtures_dir
 from ssios.runtime import CloudHypervisorRuntime, DevGuardRuntime, MacOSVMRuntime, build_runtime
 from ssios.storage import ProjectStorage
 from ssios.upstream import describe_memfs
+from ssios.accounts import AccountStore
+from ssios.netguard import AttemptLimiter
+from ssios.security_audit import SecurityAudit
 from ssios.util import assert_private, atomic_write, read_json, secure_mkdir, sha256_bytes, write_json
 
 SEEDED_PROJECTS = ("demo-alpha", "demo-beta", "local-summary")
@@ -81,10 +84,35 @@ class ControlPlane:
         self.cloud = CloudHypervisorRuntime(settings)
         self.runner = AgentRunner(self)
         self.tasks: dict[str, dict] = {}
+        self.accounts = AccountStore(settings.state_dir)
+        self.security_audit = SecurityAudit(settings.state_dir / "audit" / "security.jsonl")
+        from ssios.chat_guest import ProductionChatGuest
+
+        self.chat_guest = ProductionChatGuest()
+        self.login_limiter = AttemptLimiter(limit=5, window=600, lock_seconds=60)
+        self.signup_limiter = AttemptLimiter(limit=3, window=3600, lock_seconds=600)
         self._tokens: dict[str, str] = {}
         self._cancels: dict[str, threading.Event] = {}
         self._user_cancel: dict[str, bool] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._google = None
+        self._skills = None
+
+    @property
+    def skills(self):
+        if self._skills is None:
+            from ssios.skill_broker import SkillBroker
+
+            self._skills = SkillBroker(self)
+        return self._skills
+
+    @property
+    def google(self):
+        if self._google is None:
+            from ssios.google_connector import GoogleConnector
+
+            self._google = GoogleConnector(self)
+        return self._google
 
     def now(self) -> float:
         return time.time() + self._offset
@@ -97,6 +125,8 @@ class ControlPlane:
 
     def open(self) -> None:
         self._ensure_layout()
+        self.accounts.load()
+        self.security_audit.ensure()
         self.auth.load()
         self.approvals.load()
         self._load_tasks()
@@ -104,6 +134,12 @@ class ControlPlane:
         self._check_perms()
         if self._uses_upstream():
             self.upstream.preflight()
+        try:
+            from ssios.reminders import sweep_accounts
+
+            sweep_accounts(self)
+        except Exception:
+            pass
 
     def _ensure_layout(self) -> None:
         state = self.settings.state_dir
@@ -1040,6 +1076,8 @@ class ControlPlane:
             if task is not None:
                 task["published_revision"] = revision
             return revision
+        if action in ("connector.fetch", "connector.write"):
+            return self.google.execute_approved(record)
         if action in ("memory.commit", "memory.forget"):
             if self._uses_upstream():
                 revision = self.upstream.apply(
@@ -1063,6 +1101,8 @@ class ControlPlane:
         raise SsiosError("approval_invalid", "action rejected", 400)
 
     def _preview_text(self, record: dict) -> str:
+        if record["action"] in ("connector.fetch", "connector.write"):
+            return self.google.preview(record)
         if record["action"] == "storage.publish":
             data = self.storage.staged_bytes(record["task_id"])
             if sha256_bytes(data) != record["payload_sha256"]:

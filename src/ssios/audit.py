@@ -23,6 +23,16 @@ ALLOWED_FIELDS = {
     "revision",
     "error_code",
     "replaces",
+    "tool",
+    "op",
+    "byte_count",
+    "item_count",
+    "truncated",
+    "upstream_status",
+    "calendar_id_sha256",
+    "event_id",
+    "window_start",
+    "window_end",
 }
 
 

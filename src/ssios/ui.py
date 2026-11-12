@@ -5,15 +5,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import re
 import json
 import secrets
 import time
 from http.cookies import SimpleCookie
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from ssios.errors import SsiosError
 from ssios.ingest import _reject_secrets
-from ssios.util import read_json, secure_mkdir, write_json
+from ssios.util import read_json, secure_mkdir, sha256_bytes, write_json
 
 SESSION_COOKIE = "ssios_session"
 CODE_TTL = 120
@@ -21,37 +23,78 @@ SESSION_TTL = 12 * 3600
 
 
 class Page:
-    def __init__(self, status: int, body: str, *, cookie: str | None = None) -> None:
+    def __init__(
+        self,
+        status: int,
+        body: str,
+        *,
+        cookie: str | None = None,
+        cookies: list[str] | None = None,
+        stream=None,
+        content_type: str = "text/html; charset=utf-8",
+        location: str | None = None,
+        cache_control: str | None = None,
+        extra_headers: dict | None = None,
+    ) -> None:
         self.status = status
         self.body = body
         self.cookie = cookie
+        self.cookies = list(cookies or ([] if not cookie else [cookie]))
+        self.stream = stream
+        self.content_type = content_type
+        self.location = location
+        self.cache_control = cache_control
+        self.extra_headers = dict(extra_headers or {})
 
 
-def handle(plane, method: str, target: str, headers, body: dict) -> Page:
+def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
     parts = urlsplit(target)
     path = parts.path.rstrip("/") or "/ui"
     query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
-    rejected = _check_origin(plane, headers)
+    if path == "/ui/clip":
+        return _browser_clip(plane, method, headers, body, peer_ip)
+    rejected = _check_origin(plane, headers, method)
     if rejected is not None:
         return rejected
+    asset = _static_asset(method, path)
+    if asset is not None:
+        return asset
     if method == "GET" and path == "/ui/login":
+        if _session(plane, headers) is not None:
+            return Page(302, "", location="/ui/chat")
         return Page(200, _login_page(query.get("code", "")))
     if method == "POST" and path == "/ui/login":
-        return _login(plane, body)
+        return _login(plane, body, peer_ip, headers)
+    if path in {"/ui/signup", "/ui/join"}:
+        from ssios.ui_household import handle_household
+
+        return handle_household(plane, method, path, None, body, query, peer_ip, headers)
+    if (headers.get("Upgrade") or "").lower() == "websocket":
+        return Page(401, _login_page(""))
     session = _session(plane, headers)
     if session is None:
         return Page(401, _login_page(""))
+    from ssios.ui_household import handle_household
+
+    extra = handle_household(plane, method, path, session, body, query, peer_ip, headers)
+    if extra is not None:
+        return extra
     if method == "GET" and path == "/ui":
         return Page(200, _dashboard(plane, session))
+    if method == "GET" and path == "/ui/notices":
+        return _notices(plane, session)
     if method == "GET" and path == "/ui/tasks":
-        return Page(200, _tasks(plane, session))
+        return Page(200, _tasks(plane, session, query.get("status", "open")))
+    if method == "POST" and path == "/ui/tasks":
+        _csrf(session, body)
+        return _tasks_post(plane, session, body, peer_ip)
     if method == "GET" and path.startswith("/ui/tasks/"):
         return Page(200, _task(plane, session, path.rsplit("/", 1)[-1]))
     if method == "GET" and path == "/ui/approvals":
         return Page(200, _approvals(plane, session))
     if method == "POST" and path.startswith("/ui/approvals/"):
         _csrf(session, body)
-        return _decide(plane, session, path.rsplit("/", 1)[-1], body)
+        return _decide(plane, session, path.rsplit("/", 1)[-1], body, peer_ip)
     if method == "GET" and path == "/ui/ingest":
         return Page(200, _ingest_form(plane, session, ""))
     if method == "POST" and path == "/ui/ingest":
@@ -61,21 +104,31 @@ def handle(plane, method: str, target: str, headers, body: dict) -> Page:
         return Page(200, _summary_form(plane, session))
     if method == "POST" and path == "/ui/summary":
         _csrf(session, body)
-        created = plane.create_task(
-            plane.auth.read_secret("human"),
-            {
-                "project_id": body.get("project_id", "local-summary"),
-                "topic": body.get("topic") or body.get("project_id", "local-summary"),
-                "kind": "project-summary",
-                "input_revision": "exp-1",
-                "input_path": "notes.md",
-            },
-        )
-        return Page(200, _page(session, "Task created", f"<p>Task {html.escape(created['id'])} is queued. Approval still happens in the inbox.</p>"))
+        return _summary_post(plane, session, body)
     if method == "GET" and path == "/ui/memory":
-        return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", "")))
+        return Page(200, _memory(plane, session, query.get("project_id", "local-summary"), query.get("path", ""), query.get("q", "")))
+    if method == "POST" and path == "/ui/memory":
+        _csrf(session, body)
+        return _memory_post(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/settings":
         return Page(200, _settings(plane, session))
+    if method == "POST" and path == "/ui/settings":
+        _csrf(session, body)
+        return _settings_post(plane, session, body)
+    if method == "GET" and path == "/ui/clipper":
+        return Page(200, _clipper_page(plane, session, ""))
+    if method == "POST" and path == "/ui/clipper":
+        _csrf(session, body)
+        return _clipper_post(plane, session, body)
+    if method == "GET" and path == "/ui/vault":
+        return Page(200, _vault_page(plane, session, ""))
+    if method == "POST" and path == "/ui/vault":
+        _csrf(session, body)
+        return _vault_paste(plane, session, body, peer_ip)
+    if method == "GET" and path == "/ui/vault/note":
+        return Page(200, _vault_note(plane, session, str(query.get("path") or "")))
+    if method == "GET" and path == "/ui/vault/asset":
+        return _vault_asset(plane, session, str(query.get("path") or ""))
     if method == "POST" and path == "/ui/logout":
         _csrf(session, body)
         _drop_session(plane, session["id"])
@@ -96,42 +149,86 @@ def issue_login_code(plane) -> str:
     return raw
 
 
-def _login(plane, body: dict) -> Page:
-    token = str(body.get("token") or "")
+def _login(plane, body: dict, peer_ip: str, headers=None) -> Page:
+    from ssios.netguard import is_loopback
+
+    username = str(body.get("username") or "")
+    password = str(body.get("password") or "")
     code = str(body.get("code") or "")
-    if code and _take_code(plane, code):
-        return _start_session(plane)
-    expected = plane.auth.read_secret("human")
-    if token and hmac.compare_digest(token, expected):
-        return _start_session(plane)
+    try:
+        plane.login_limiter.check(peer_ip)
+    except SsiosError as exc:
+        _security(plane, "anonymous", peer_ip, "login", "rate", "denied")
+        return Page(exc.status, _login_page(""))
+    if code and not (username and password) and is_loopback(peer_ip) and _take_code(plane, code):
+        admin = plane.accounts.legacy_admin()
+        if admin is None:
+            plane.login_limiter.fail(peer_ip)
+            _security(plane, "anonymous", peer_ip, "login", "code", "denied")
+            return Page(401, _login_page(""))
+        plane.login_limiter.succeed(peer_ip)
+        _security(plane, admin["id"], peer_ip, "login", admin["id"], "ok")
+        return _start_account_session(plane, admin, headers)
+    if username and password:
+        try:
+            account = plane.accounts.authenticate(username, password)
+        except SsiosError as exc:
+            plane.login_limiter.fail(peer_ip)
+            _security(plane, "anonymous", peer_ip, "login", "password", "denied")
+            if exc.code == "account_inactive":
+                return Page(403, _login_page(""))
+            return Page(401, _login_page(""))
+        plane.login_limiter.succeed(peer_ip)
+        _security(plane, account["id"], peer_ip, "login", account["id"], "ok")
+        return _start_account_session(plane, account, headers)
+    plane.login_limiter.fail(peer_ip)
+    _security(plane, "anonymous", peer_ip, "login", "password", "denied")
     return Page(401, _login_page(""))
 
 
-def _start_session(plane) -> Page:
-    session_id = secrets.token_urlsafe(24)
-    csrf = secrets.token_urlsafe(18)
-    path = _ui_dir(plane) / "sessions.json"
-    current = read_json(path, {"sessions": {}})
-    if not isinstance(current, dict):
-        current = {"sessions": {}}
-    sessions = current.get("sessions") if isinstance(current.get("sessions"), dict) else {}
-    sessions[session_id] = {"csrf": csrf, "expires": time.time() + SESSION_TTL}
-    write_json(path, {"sessions": sessions}, 0o600)
+def _start_account_session(plane, account: dict, headers=None) -> Page:
+    from ssios.config import lan_enabled
+
+    for previous in _session_ids("" if headers is None else headers.get("Cookie", "")):
+        plane.accounts.drop_session(previous)
+    session_id, csrf = plane.accounts.create_session(account["id"])
+    fresh = plane.accounts.read_session(session_id) or {"id": session_id, "csrf": csrf, "account": account}
     cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/ui"
-    return Page(200, _page({"csrf": csrf}, "Signed in", "<p>Signed in. The token was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"), cookie=cookie)
+    if lan_enabled(plane.settings):
+        cookie += "; Secure"
+    cleared = f"{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    return Page(
+        200,
+        _page(fresh, "Signed in", "<p>Signed in as " + html.escape(str(account.get("username") or "")) + ". The password was not written to the session file.</p><p><a href=\"/ui\">Open the console</a></p>"),
+        cookies=[cookie, cleared],
+    )
+
+
+def _security(plane, actor: str, peer_ip: str, action: str, target: str, result: str) -> None:
+    try:
+        plane.security_audit.write(actor=actor, ip=peer_ip or "127.0.0.1", action=action, target=target, result=result)
+    except SsiosError:
+        return
+
+
+def _session_ids(header: str) -> list[str]:
+    found = []
+    for part in str(header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == SESSION_COOKIE and value and value not in found:
+            found.append(value)
+    return found
 
 
 def _session(plane, headers) -> dict | None:
-    jar = SimpleCookie(headers.get("Cookie", ""))
-    morsel = jar.get(SESSION_COOKIE)
-    if morsel is None or not morsel.value:
-        return None
-    current = read_json(_ui_dir(plane) / "sessions.json", {"sessions": {}})
-    sessions = current.get("sessions") if isinstance(current, dict) else {}
-    record = sessions.get(morsel.value) if isinstance(sessions, dict) else None
-    if not isinstance(record, dict) or record.get("expires", 0) < time.time():
-        return None
-    return {"id": morsel.value, "csrf": record.get("csrf", "")}
+    found = []
+    for session_id in _session_ids(headers.get("Cookie", "")):
+        account_session = plane.accounts.read_session(session_id)
+        if account_session is not None:
+            found.append(account_session)
+    if len(found) == 1:
+        return found[0]
+    return None
 
 
 def _csrf(session: dict, body: dict) -> None:
@@ -158,10 +255,11 @@ def _take_code(plane, raw: str) -> bool:
 
 
 def _drop_session(plane, session_id: str) -> None:
+    plane.accounts.drop_session(session_id)
     path = _ui_dir(plane) / "sessions.json"
     current = read_json(path, {"sessions": {}})
     sessions = current.get("sessions") if isinstance(current, dict) else {}
-    if isinstance(sessions, dict):
+    if isinstance(sessions, dict) and session_id in sessions:
         sessions.pop(session_id, None)
         write_json(path, {"sessions": sessions}, 0o600)
 
@@ -179,6 +277,20 @@ def _hash(raw: str) -> str:
 def _bound_port(plane) -> int:
     port = plane.bound_port or plane.settings.port
     return int(port)
+
+
+def browser_error_page(detail: str, status: int) -> Page:
+    """A normal page for a browser. API clients do not use this."""
+    safe = html.escape(detail or "The page could not be shown.")
+    body = (
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Something went wrong</title>"
+        + _style_link()
+        + "<body><main><h1>Something went wrong</h1><p>"
+        + safe
+        + "</p><p><a href=\"/ui/login\">Sign in</a> <a href=\"/ui/chat\">Chat</a> "
+        "<a href=\"/ui/connections\">Connections</a></p></main></body></html>"
+    )
+    return Page(status, body)
 
 
 def loopback_origins(port: int) -> set[str]:
@@ -200,8 +312,21 @@ def _origin_value(value: str) -> str:
     return f"http://{host}:{parts.port}"
 
 
-def _check_origin(plane, headers) -> Page | None:
+def _check_origin(plane, headers, method: str = "GET") -> Page | None:
     """Reject cross-site UI posts. A literal Origin of null falls back to Referer."""
+    from ssios.config import lan_enabled
+    from ssios.netguard import origin_allowed
+
+    if lan_enabled(plane.settings):
+        port = _bound_port(plane)
+        origin = str(headers.get("Origin") or "").strip()
+        site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site == "cross-site":
+            return _origin_rejection(origin or "(no Origin)", {f"https://127.0.0.1:{port}"})
+        if method == "POST" or origin:
+            if not origin_allowed(origin, lan=True, port=port):
+                return _origin_rejection(origin or "(no Origin)", {f"https://<lan-host>:{port}"})
+        return None
     port = _bound_port(plane)
     allowed = loopback_origins(port)
     origin = str(headers.get("Origin") or "").strip()
@@ -223,7 +348,7 @@ def _origin_rejection(received: str, allowed: set[str]) -> Page:
     expected = ", ".join(html.escape(item) for item in sorted(allowed))
     body = (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Origin rejected</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Origin rejected</h1>"
         + f"<p>Origin received: {shown}</p>"
         + f"<p>Allowed origins: {expected}</p>"
@@ -250,16 +375,176 @@ def _dashboard(plane, session: dict) -> str:
     return _page(session, "Console", body)
 
 
-def _tasks(plane, session: dict) -> str:
+def _account(session: dict) -> dict:
+    account = session.get("account")
+    if not isinstance(account, dict):
+        raise SsiosError("unauthorized", "authentication required", 401)
+    return account
+
+
+def _notices(plane, session: dict) -> Page:
+    from ssios.reminders import ReminderStore, sweep_accounts
+    from ssios.scope import AccountScope
+
+    sweep_accounts(plane)
+    scope = AccountScope(plane, _account(session))
+    from ssios.site_session import warnings
+
+    items = [
+        {"text": str(item.get("text") or "")[:160], "due": str(item.get("due") or "")}
+        for item in ReminderStore(scope.home).unseen()
+    ]
+    for note in warnings(plane, scope.account_id):
+        items.append({"text": note[:160], "due": ""})
+    payload = json.dumps({"count": len(items), "items": items[:10]}, ensure_ascii=False)
+    return Page(200, payload, content_type="application/json; charset=utf-8")
+
+
+def _tasks(plane, session: dict, status_filter: str = "open") -> str:
+    from ssios.goals import GoalStore, goal_mode
+    from ssios.reminders import ReminderStore, sweep_accounts
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    sweep_accounts(plane)
+    chosen = status_filter if status_filter in {"open", "done", "dropped", "in_progress", "all"} else "open"
+    goals = GoalStore(scope.home).all()
+    if chosen == "open":
+        shown = [goal for goal in goals if goal.get("status") in {"open", "in_progress"}]
+    elif chosen == "all":
+        shown = goals
+    else:
+        shown = [goal for goal in goals if goal.get("status") == chosen]
+    csrf = html.escape(str(session.get("csrf") or ""))
+    filters = " ".join(
+        f"<a href=\"/ui/tasks?status={name}\">{name}</a>" for name in ("open", "done", "dropped", "all")
+    )
     rows = []
-    for task in plane.tasks.values():
-        rows.append(
-            f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
+    for goal in shown:
+        title = html.escape(str(goal.get("title") or ""))
+        goal_id = html.escape(str(goal.get("id") or ""))
+        source = goal.get("source") if isinstance(goal.get("source"), dict) else {}
+        conversation = html.escape(str(source.get("conversation_id") or ""))
+        link = f"<a href=\"/ui/chat?conversation={conversation}\">Source</a>" if conversation else ""
+        evidence = goal.get("evidence") if isinstance(goal.get("evidence"), dict) else {}
+        reason = html.escape(str(evidence.get("reason") or ""))
+        buttons = (
+            f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
+            "<button name=\"op\" value=\"complete\" type=\"submit\">Complete</button>"
+            "<button name=\"op\" value=\"drop\" type=\"submit\">Drop</button>"
+            "<button name=\"op\" value=\"undo\" type=\"submit\">Undo</button></form>"
         )
-    return _page(session, "Tasks", "<ul>" + "".join(rows) + "</ul>")
+        rows.append(f"<li><strong>{title}</strong> {html.escape(str(goal.get('status') or ''))} {link} {reason} {buttons}</li>")
+    mode = html.escape(goal_mode(scope.home))
+    mode_form = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Goal updates <select name=\"mode\"><option {'selected' if mode=='auto' else ''}>auto</option>"
+        f"<option {'selected' if mode=='suggest' else ''}>suggest</option>"
+        f"<option {'selected' if mode=='off' else ''}>off</option></select></label>"
+        "<button name=\"op\" value=\"mode\" type=\"submit\">Save</button></form>"
+    )
+    add = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Title <input name=\"title\" maxlength=\"80\"></label>"
+        "<label>Description <input name=\"description\" maxlength=\"240\"></label>"
+        "<button name=\"op\" value=\"add\" type=\"submit\">Add goal</button></form>"
+    )
+    guest = []
+    if account.get("legacy_owner"):
+        for task in plane.tasks.values():
+            guest.append(
+                f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
+            )
+    for task in scope.tasks().values():
+        guest.append(
+            f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
+        )
+    reminder_store = ReminderStore(scope.home)
+    notices = []
+    for notice in reminder_store.unseen():
+        notices.append(f"<li>Reminder: {html.escape(str(notice.get('text') or ''))} was due {html.escape(str(notice.get('due') or ''))}.</li>")
+    dismiss = (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"dismiss\" type=\"submit\">Dismiss</button></form>"
+    ) if notices else ""
+    reminder_rows = []
+    for item in reminder_store.open_items():
+        reminder_id = html.escape(str(item.get("id") or ""))
+        reminder_rows.append(
+            f"<li>{html.escape(str(item.get('due') or ''))} {html.escape(str(item.get('text') or ''))} "
+            f"{html.escape(str(item.get('repeat') or ''))}"
+            f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"id\" value=\"{reminder_id}\">"
+            "<button name=\"op\" value=\"snooze\" type=\"submit\">Snooze</button>"
+            "<button name=\"op\" value=\"cancel\" type=\"submit\">Cancel</button></form></li>"
+        )
+    body = (
+        f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
+        + "<ul>" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
+        + "<h2>Reminders</h2>" + (f"<ul>{''.join(notices)}</ul>" + dismiss if notices else "")
+        + "<ul>" + ("".join(reminder_rows) or "<li>No open reminders.</li>") + "</ul>"
+        + "<h2>Guest tasks</h2><ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
+    )
+    return _page(session, "Tasks", body)
+
+
+def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
+    from ssios.calendar_intent import host_clock
+    from ssios.goals import manual_goal, set_goal_mode, undo_goal
+    from ssios.reminders import ReminderStore
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    op = str(body.get("op") or "")
+    now, _zone = host_clock(plane, account)
+    if op == "mode":
+        set_goal_mode(scope.home, str(body.get("mode") or "auto"))
+    elif op == "undo":
+        undo_goal(scope, str(body.get("id") or ""), now, peer_ip)
+    elif op == "add":
+        manual_goal(scope, title=str(body.get("title") or ""), description=str(body.get("description") or ""), status="open", goal_id="", now=now, peer_ip=peer_ip)
+    elif op in {"complete", "drop", "edit"}:
+        status = {"complete": "done", "drop": "dropped", "edit": str(body.get("status") or "open")}[op]
+        manual_goal(
+            scope,
+            title=str(body.get("title") or "") or _goal_title(scope, str(body.get("id") or "")),
+            description=str(body.get("description") or ""),
+            status=status,
+            goal_id=str(body.get("id") or ""),
+            now=now,
+            peer_ip=peer_ip,
+        )
+    elif op == "snooze":
+        ReminderStore(scope.home).snooze_matching(str(body.get("id") or ""), 60, now)
+    elif op == "cancel":
+        ReminderStore(scope.home).cancel_matching(str(body.get("id") or ""))
+    elif op == "dismiss":
+        ReminderStore(scope.home).mark_seen()
+    else:
+        raise SsiosError("goal_invalid", "goal action rejected", 400)
+    return Page(200, _tasks(plane, session, "open"))
+
+
+def _goal_title(scope, goal_id: str) -> str:
+    from ssios.goals import GoalStore
+
+    goal = GoalStore(scope.home).get(goal_id) or {}
+    return str(goal.get("title") or "")
 
 
 def _task(plane, session: dict, task_id: str) -> str:
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    owned = scope.tasks().get(task_id)
+    if isinstance(owned, dict):
+        return _page(session, task_id, f"<pre>{html.escape(json.dumps(owned, ensure_ascii=False, indent=2))}</pre>")
+    if not account.get("legacy_owner"):
+        return _page(session, "Task", "<p>Task not found.</p>")
     try:
         task = plane.get_task(_human(plane), task_id)
     except SsiosError as exc:
@@ -278,16 +563,54 @@ def _task(plane, session: dict, task_id: str) -> str:
 
 
 def _approvals(plane, session: dict) -> str:
+    from ssios.scope import AccountScope
+
     rows = []
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    records = []
+    if account.get("legacy_owner"):
+        records.extend(
+            record
+            for record in plane.approvals.records()
+            if record.get("status") == "pending" and record.get("action") not in ("connector.fetch", "connector.write")
+        )
+    records.extend(
+        record
+        for record in plane.approvals.records()
+        if record.get("status") == "pending"
+        and record.get("action") in ("connector.fetch", "connector.write")
+        and _owns_google_fetch(plane, account["id"], record)
+    )
+    records.extend(scope.list_pending())
     token = _human(plane)
-    for record in plane.approvals.records():
+    for record in records:
         if record.get("status") != "pending":
             continue
-        preview = plane.get_approval(token, record["approval_id"])
-        files = preview.get("files") or []
-        diff = html.escape("\n\n".join(str(item.get("content") or "") for item in files))
+        if record.get("action") in ("connector.fetch", "connector.write"):
+            from ssios.google_connector import session_for_account
+
+            shown = plane.google.preview(record, session_for_account(account))
+            kind = "card approval danger" if shown.startswith("DESTRUCTIVE") else "card approval"
+            diff = html.escape(shown)
+            rows.append(
+                "<article class=\"" + kind + "\"><h2>"
+                + html.escape(str(record.get("action")))
+                + "</h2><pre>"
+                + diff
+                + "</pre>"
+                + _decision_form(session, record)
+                + "</article>"
+            )
+            continue
+        if record.get("approval_id") in {item.get("approval_id") for item in scope.list_pending()}:
+            diff = html.escape(scope.preview(record))
+        else:
+            preview = plane.get_approval(token, record["approval_id"])
+            files = preview.get("files") or []
+            diff = html.escape("\n\n".join(str(item.get("content") or "") for item in files))
         rows.append(
-            "<article><h2>"
+            "<article class=\"card approval\"><h2>"
             + html.escape(str(record.get("action")))
             + "</h2><pre>"
             + diff
@@ -307,14 +630,212 @@ def _decision_form(session: dict, record: dict) -> str:
     return (
         f"<form method=\"post\" action=\"/ui/approvals/{html.escape(record['approval_id'])}\">"
         f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">{fields}"
-        "<button name=\"decision\" value=\"approve\" type=\"submit\">Approve</button>"
+        "<button class=\"primary\" name=\"decision\" value=\"approve\" type=\"submit\">Approve</button>"
         "<button name=\"decision\" value=\"deny\" type=\"submit\">Deny</button></form>"
     )
 
 
-def _decide(plane, session: dict, approval_id: str, body: dict) -> Page:
-    result = plane.decide(_human(plane), approval_id, body)
-    return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+def _decide(plane, session: dict, approval_id: str, body: dict, peer_ip: str = "127.0.0.1") -> Page:
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    scope = AccountScope(plane, account)
+    if str(body.get("decision") or "") == "retry":
+        return _retry_approval(plane, session, scope, approval_id, peer_ip)
+    google_record = _google_fetch_record(plane, approval_id)
+    if google_record is not None:
+        return _decide_google(plane, session, scope, google_record, body, peer_ip)
+    if scope.has_approval(approval_id):
+        try:
+            result = scope.decide(approval_id, body, peer_ip)
+        except SsiosError as exc:
+            if exc.code not in {"approval_replay_denied", "approval_expired"}:
+                raise
+            _log_approval(approval_id, "replay", scope.approvals().get(approval_id))
+            return Page(200, _approval_status_page(plane, session, scope, approval_id, None))
+        _log_approval(approval_id, "decide", scope.approvals().get(approval_id))
+        return Page(200, _approval_status_page(plane, session, scope, approval_id, result))
+    if account.get("legacy_owner"):
+        result = plane.decide(_human(plane), approval_id, body)
+        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    raise SsiosError("not_found", "approval not found", 404)
+
+
+def _log_approval(approval_id: str, path: str, record: dict) -> None:
+    import sys
+
+    status = re.sub(r"[^a-z_]", "", str(record.get("status") or ""))[:24]
+    action = re.sub(r"[^a-z.]", "", str(record.get("action") or ""))[:32]
+    safe_id = re.sub(r"[^A-Za-z0-9-]", "", str(approval_id))[:40]
+    sys.stderr.write(f"ssios.ui approval id={safe_id} path={path} status={status} action={action}\n")
+    sys.stderr.flush()
+
+
+def _approval_status_page(plane, session, scope, approval_id: str, result: dict | None, extra: str = "") -> str:
+    from datetime import datetime
+
+    from ssios.calendar_intent import account_zone
+
+    record = scope.approvals().get(approval_id)
+    status = str(record.get("status") or "")
+    decision = str(record.get("decision") or "")
+    if status == "consumed" and decision == "approve":
+        label = "Approved"
+    elif status == "denied":
+        label = "Denied"
+    elif status == "expired":
+        label = "Expired"
+    elif status == "superseded":
+        label = "Superseded"
+    else:
+        label = status or "Unknown"
+    zone, zone_name = account_zone(plane.settings, session.get("account"))
+    stamp = record.get("decided_at") or record.get("expires_at")
+    try:
+        when = datetime.fromtimestamp(float(stamp), zone).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OSError):
+        when = ""
+    outcome = _approval_outcome(scope, record, result)
+    found = scope.chat().find_approval(approval_id)
+    conversation = found[0] if found else ""
+    back = f"/ui/chat?conversation={html.escape(conversation)}" if conversation else "/ui/chat"
+    retry = ""
+    if status == "expired":
+        csrf = html.escape(str(session.get("csrf") or ""))
+        retry = (
+            f"<form method=\"post\" action=\"/ui/approvals/{html.escape(approval_id)}\">"
+            f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            "<button class=\"primary\" name=\"decision\" value=\"retry\" type=\"submit\">Retry</button></form>"
+        )
+    return _page(
+        session,
+        "Decided",
+        "<h2>" + html.escape(label) + "</h2>"
+        + (f"<p>When: <time datetime=\"{html.escape(when)}\">{html.escape(when)}</time> ({html.escape(zone_name)})</p>" if when else "")
+        + f"<p>{html.escape(outcome)}</p>"
+        + f"<p>Stored status: {html.escape(status)}</p>"
+        + retry
+        + extra
+        + f"<p><a href=\"{back}\">Back to the conversation</a></p>",
+    )
+
+
+def _approval_outcome(scope, record: dict, result: dict | None) -> str:
+    status = str(record.get("status") or "")
+    if status == "denied":
+        return "Nothing was changed."
+    if status == "expired":
+        return "This approval expired before it ran. Retry stages a new one."
+    if status == "superseded":
+        return "A newer approval replaced this one."
+    action = str(record.get("action") or "")
+    if action == "memory.commit":
+        try:
+            proposal = scope.memory().load_proposal(str(record.get("proposal_id") or ""))
+            paths = ", ".join(str(item.get("path") or "") for item in proposal.get("files") or [])
+        except SsiosError:
+            paths = ""
+        if paths:
+            return "Saved to memory (" + paths + ")."
+        return "Saved to memory."
+    if action == "vault.clip":
+        return "Saved the clip."
+    if action == "chat.accept":
+        return "Saved the guest result for this account."
+    if isinstance(result, dict) and result.get("status"):
+        return "Status: " + str(result.get("status"))
+    return "The decision was recorded."
+
+
+def _retry_approval(plane, session, scope, approval_id: str, peer_ip: str) -> Page:
+    del peer_ip
+    if not scope.has_approval(approval_id):
+        raise SsiosError("not_found", "approval not found", 404)
+    store = scope.approvals()
+    record = store.get(approval_id)
+    if record.get("status") != "expired" or record.get("action") != "memory.commit":
+        _log_approval(approval_id, "retry-rejected", record)
+        return Page(200, _approval_status_page(plane, session, scope, approval_id, None))
+    proposal = scope.memory().load_proposal(str(record.get("proposal_id") or ""))
+    files = [item for item in proposal.get("files") or [] if isinstance(item, dict)]
+    if not files:
+        return Page(200, _page(session, "Decided", "<p>Nothing to stage again.</p>"))
+    fresh = scope.memory().propose(scope.project_id(), scope.memory().head(scope.project_id()), files, task_id="chat")
+    approval = scope.create_memory_approval(fresh)
+    store = scope.approvals()
+    record = store.get(approval_id)
+    record["status"] = "superseded"
+    store.save()
+    _log_approval(approval_id, "retry", record)
+    form = "<h2>New approval</h2>" + _decision_form(session, scope.approvals().get(approval["id"]))
+    return Page(200, _approval_status_page(plane, session, scope, approval_id, None, form))
+
+
+def _owns_google_fetch(plane, account_id: str, record: dict) -> bool:
+    google = getattr(plane, "_google", None)
+    if google is None:
+        return False
+    material = google._requests.get(record.get("approval_id"))
+    return isinstance(material, dict) and material.get("account_id") == account_id
+
+
+def _google_fetch_record(plane, approval_id: str) -> dict | None:
+    try:
+        record = plane.approvals.get(approval_id)
+    except SsiosError:
+        return None
+    if record.get("action") not in ("connector.fetch", "connector.write"):
+        return None
+    return record
+
+
+def _decide_google(plane, session: dict, scope, record: dict, body: dict, peer_ip: str) -> Page:
+    from ssios.chat import continue_after_fetch
+    from ssios.ui_household import _events_html
+
+    account = session["account"]
+    material = plane.google._requests.get(record["approval_id"])
+    applied_owner = plane.google._applied.get(record["approval_id"])
+    owner = material.get("account_id") if isinstance(material, dict) else applied_owner
+    if owner != account["id"]:
+        raise SsiosError("forbidden", "a session cannot act for another account", 403)
+    try:
+        result = plane.decide(_human(plane), record["approval_id"], body)
+    except SsiosError as exc:
+        from ssios.chat import english_connector_error
+
+        return Page(exc.status, _page(session, "Decided", f"<p>{html.escape(english_connector_error(exc))}</p>"))
+    if result.get("status") != "consumed":
+        return Page(200, _page(session, "Decided", f"<p>{html.escape(str(result.get('status')))}</p>"))
+    from ssios.google_connector import session_for_account
+
+    taken = plane.google.take_result(session_for_account(account), record["approval_id"])
+    tool = str(material.get("tool") or "")
+    plane.security_audit.write(
+        actor=account["id"],
+        ip=peer_ip or "127.0.0.1",
+        action=str(record.get("action") or "connector.fetch"),
+        target=tool.split(".", 1)[0],
+        result="ok",
+        extra={"service": tool.split(".", 1)[0], "item_count": "1"},
+    )
+    found = scope.chat().find_approval(record["approval_id"])
+    conversation_id = found[0] if found else ""
+    message = found[1] if found else {}
+    route_name = str(message.get("route_name") or "connector")
+    followup = message.get("followup") if isinstance(message.get("followup"), dict) else None
+    events = list(
+        continue_after_fetch(
+            plane,
+            account,
+            {
+                "meta": {"conversation_id": conversation_id, "route": route_name, "followup": followup},
+                "fetch": {"text": taken["text"]},
+            },
+            peer_ip,
+        )
+    )
+    return Page(200, _page(session, "Decided", _events_html(session, events)))
 
 
 def _ingest_form(plane, session: dict, notice: str) -> str:
@@ -333,6 +854,9 @@ def _ingest_form(plane, session: dict, notice: str) -> str:
 
 
 def _ingest(plane, session: dict, body: dict) -> Page:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        raise SsiosError("forbidden", "ingest for another account is rejected", 403)
     project_id = str(body.get("project_id") or "")
     filename = str(body.get("filename") or "")
     content = str(body.get("content") or "")
@@ -362,6 +886,23 @@ def _ingest(plane, session: dict, body: dict) -> Page:
     )
 
 
+def _summary_post(plane, session: dict, body: dict) -> Page:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        raise SsiosError("forbidden", "summary tasks stay on the original account", 403)
+    created = plane.create_task(
+        plane.auth.read_secret("human"),
+        {
+            "project_id": body.get("project_id", "local-summary"),
+            "topic": body.get("topic") or body.get("project_id", "local-summary"),
+            "kind": "project-summary",
+            "input_revision": "exp-1",
+            "input_path": "notes.md",
+        },
+    )
+    return Page(200, _page(session, "Task created", f"<p>Task {html.escape(created['id'])} is queued. Approval still happens in the inbox.</p>"))
+
+
 def _summary_form(plane, session: dict) -> str:
     del plane
     csrf = html.escape(str(session["csrf"]))
@@ -375,7 +916,57 @@ def _summary_form(plane, session: dict) -> str:
     )
 
 
-def _memory(plane, session: dict, project_id: str, path: str) -> str:
+def _memory(plane, session: dict, project_id: str, path: str, query_text: str = "") -> str:
+    account = _account(session)
+    if not account.get("legacy_owner"):
+        from ssios.scope import AccountScope
+
+        scope = AccountScope(plane, account)
+        project_id = scope.project_id()
+        paths = scope.memory().list_markdown(project_id)
+        content = ""
+        if path:
+            doc = scope.memory().read_file(project_id, path, include_untrusted=False)
+            from ssios.vault import render_markdown
+
+            _meta, rendered = render_markdown(str(doc.get("content") or ""), link_for=lambda url: url if str(url).startswith(("http://", "https://")) else "")
+            trust = html.escape(str(doc.get("trust") or ""))
+            revision = html.escape(str(doc.get("revision") or ""))
+            content = (
+                f"<p>Trust: {trust}. Revision: {revision}.</p>"
+                + rendered
+                + _account_history(scope, project_id, path)
+            )
+        shown = [item for item in paths if not query_text or query_text.casefold() in item.casefold()]
+        links = "".join(
+            f"<li><a href=\"/ui/memory?path={html.escape(item)}\">{html.escape(item)}</a></li>"
+            for item in shown
+        )
+        safe_q = html.escape(query_text)
+        search = (
+            f"<form method=\"get\" action=\"/ui/memory\"><label>Search <input name=\"q\" value=\"{safe_q}\"></label>"
+            "<button type=\"submit\">Search</button></form>"
+        )
+        from ssios.account_memory import write_mode
+
+        mode = write_mode(scope.home)
+        mode_form = (
+            f"<form method=\"post\" action=\"/ui/memory\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session.get('csrf') or ''))}\">"
+            f"<label>Memory writes <select name=\"mode\"><option {'selected' if mode == 'approve' else ''}>approve</option>"
+            f"<option {'selected' if mode == 'auto' else ''}>auto</option></select></label>"
+            "<button name=\"op\" value=\"mode\" type=\"submit\">Save</button></form>"
+        )
+        editor = ""
+        if path and path in paths:
+            raw = str(doc.get("content") or "")
+            editor = (
+                f"<form method=\"post\" action=\"/ui/memory\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(str(session.get('csrf') or ''))}\">"
+                f"<input type=\"hidden\" name=\"path\" value=\"{html.escape(path)}\">"
+                f"<label>Edit <textarea name=\"content\" rows=\"10\">{html.escape(raw)}</textarea></label>"
+                "<button name=\"op\" value=\"save\" type=\"submit\">Save</button> "
+                "<button name=\"op\" value=\"forget\" type=\"submit\">Forget</button></form>"
+            )
+        return _page(session, "Memory", mode_form + search + f"<ul>{links}</ul>{content}{editor}")
     paths = plane.memory.list_markdown(project_id) if not plane._uses_upstream() else plane.upstream.list_markdown(project_id)
     links = "".join(
         f"<li><a href=\"/ui/memory?project_id={html.escape(project_id)}&path={html.escape(item)}\">{html.escape(item)}</a></li>"
@@ -386,6 +977,51 @@ def _memory(plane, session: dict, project_id: str, path: str) -> str:
         doc = plane.read_memory(_human(plane), project_id, path)
         content = f"<pre>{html.escape(str(doc.get('content') or ''))}</pre>" + _history(plane, project_id, path)
     return _page(session, "Memory", f"<ul>{links}</ul>{content}")
+
+
+def _memory_post(plane, session, body: dict, peer_ip: str) -> Page:
+    from ssios.account_memory import set_write_mode
+    from ssios.chat import apply_memory_change, restore_memory
+    from ssios.memory_store import validate_document
+    from ssios.scope import AccountScope
+
+    account = _account(session)
+    if account.get("legacy_owner"):
+        raise SsiosError("forbidden", "use the account memory page", 403)
+    scope = AccountScope(plane, account)
+    op = str(body.get("op") or "")
+    if op == "mode":
+        set_write_mode(scope.home, str(body.get("mode") or "approve"))
+        return Page(200, _memory(plane, session, scope.project_id(), "", ""))
+    if op == "undo":
+        restore_memory(scope, str(body.get("id") or ""), peer_ip)
+        return Page(200, _memory(plane, session, scope.project_id(), "", ""))
+    path = str(body.get("path") or "")
+    known = scope.memory().list_markdown(scope.project_id())
+    if path not in known:
+        raise SsiosError("path_rejected", "memory path rejected", 400)
+    if op == "forget":
+        result = apply_memory_change(scope, [], peer_ip, forget_path=path)
+    elif op == "save":
+        content = str(body.get("content") or "")
+        validate_document(path, content)
+        result = apply_memory_change(scope, [{"path": path, "content": content}], peer_ip)
+    else:
+        raise SsiosError("memory_invalid", "memory action rejected", 400)
+    if result["status"] == "pending":
+        approval = scope.approvals().get(result["approval"]["id"])
+        form = "<h2>Approve this memory change</h2>" + _decision_form(session, approval)
+        return Page(200, _page(session, "Memory", form))
+    return Page(200, _memory(plane, session, scope.project_id(), path, ""))
+
+
+def _account_history(scope, project_id: str, path: str) -> str:
+    repo = scope.memory().repo(project_id)
+    completed = scope.memory().git.run(repo, ["log", "--pretty=format:%h %s", "-n", "8", "--", path], check=False)
+    if completed.returncode != 0 or not completed.stdout:
+        return ""
+    text = completed.stdout.decode("utf-8", "replace")
+    return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
 def _history(plane, project_id: str, path: str) -> str:
@@ -401,6 +1037,162 @@ def _history(plane, project_id: str, path: str) -> str:
     return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
+def _vault_page(plane, session: dict, notice: str) -> str:
+    from ssios.vault import list_notes
+
+    notes = list_notes(plane.settings, session["account"]["id"])
+    items = []
+    for item in notes:
+        path = html.escape(item["path"], quote=True)
+        title = html.escape(item["title"])
+        source = html.escape(item.get("source") or "")
+        items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
+    csrf = html.escape(str(session.get("csrf") or ""))
+    paste = (
+        f"<form method=\"post\" action=\"/ui/vault\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Source URL <input name=\"url\" placeholder=\"https://example.com/story\"></label>"
+        "<label>Pasted article <textarea name=\"content\" rows=\"6\"></textarea></label>"
+        "<button type=\"submit\">Clip pasted article</button></form>"
+    )
+    body = notice + paste + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
+    return _page(session, "Notes", body)
+
+
+def _vault_note(plane, session: dict, rel: str) -> str:
+    from urllib.parse import quote
+
+    from ssios.vault import read_note, render_markdown
+
+    text = read_note(plane.settings, session["account"]["id"], rel)
+
+    def link_for(url: str) -> str:
+        if url.startswith(("javascript:", "data:")):
+            return ""
+        if url.startswith(("https://", "http://")):
+            return url
+        if url.startswith("/") or ".." in url.split("/"):
+            return ""
+        if url.endswith(".md"):
+            return "/ui/vault/note?path=" + quote("Clippings/" + url)
+        return "/ui/vault/asset?path=" + quote("Clippings/" + url)
+
+    meta, rendered = render_markdown(text, link_for=link_for)
+    props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
+    return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
+
+
+def _vault_paste(plane, session: dict, body: dict, peer_ip: str) -> Page:
+    from ssios.clipper import clip_from_browser
+    from ssios.scope import AccountScope
+
+    url = str(body.get("url") or "")
+    content = str(body.get("content") or "")
+    result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    if result.get("status") == "saved":
+        return Page(200, _vault_page(plane, session, f"<p>Saved the clip to {html.escape(str(result.get('path') or ''))}.</p>"))
+    scope = AccountScope(plane, session["account"])
+    record = scope.approvals().get(str(result.get("approval_id") or ""))
+    note = "This page looks truncated or paywalled. " if result.get("truncated") else ""
+    return Page(200, _page(session, "Notes", f"<p>{note}Waiting for your approval. Nothing is written until you approve it.</p>" + _decision_form(session, record)))
+
+
+def _vault_asset(plane, session: dict, rel: str) -> Page:
+    from ssios.vault import read_asset
+
+    data, content_type = read_asset(plane.settings, session["account"]["id"], rel)
+    return Page(200, data, content_type=content_type)
+
+
+_CLIP_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "content-type, x-ssios-clip-token",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+}
+
+
+def _browser_clip(plane, method: str, headers, body: dict, peer_ip: str) -> Page:
+    from ssios.clipper import account_for_token, clip_from_browser
+
+    if method == "OPTIONS":
+        return Page(204, "", content_type="text/plain; charset=utf-8", extra_headers=_CLIP_HEADERS)
+    if method != "POST":
+        raise SsiosError("method_not_allowed", "method rejected", 405)
+    token = ""
+    if headers is not None:
+        token = str(headers.get("X-SSIOS-Clip-Token") or "")
+    account_id = account_for_token(plane, token)
+    if str(body.get("op") or "") == "save-session":
+        from ssios.clipper import save_site_from_browser
+
+        result = save_site_from_browser(plane, account_id, body, peer_ip)
+    else:
+        result = clip_from_browser(plane, account_id, body, peer_ip)
+    return Page(200, json.dumps(result), content_type="application/json; charset=utf-8", extra_headers=_CLIP_HEADERS)
+
+
+def _clipper_page(plane, session: dict, notice: str, token: str = "") -> str:
+    from ssios.clipper import token_status
+    from ssios.site_session import list_sessions
+
+    account_id = session["account"]["id"]
+    csrf = html.escape(str(session.get("csrf") or ""))
+    status = token_status(plane, account_id)
+    shown = f"<p><code>{html.escape(token)}</code></p><p>Copy this token now. It is not shown again.</p>" if token else ""
+    rows = []
+    for item in list_sessions(plane, account_id):
+        rows.append(
+            f"<li>{html.escape(item['domain'])} {html.escape(item.get('label') or '')} "
+            f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"domain\" value=\"{html.escape(item['domain'])}\">"
+            "<button name=\"op\" value=\"delete-site\" type=\"submit\">Delete</button></form></li>"
+        )
+    body = (
+        notice
+        + "<h2>Clip token</h2>"
+        + f"<p>Status: {html.escape(status)}. The browser sends this token in a header. The session cookie is not used.</p>"
+        + shown
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"issue\" type=\"submit\">Generate token</button> "
+        "<button name=\"op\" value=\"revoke\" type=\"submit\">Revoke</button></form>"
+        + "<p><a href=\"/ui/clipper\">Install notes are in docs/clipper.md</a></p>"
+        + "<h2>Site sessions</h2>"
+        + "<p>Open the site while you are logged in, then click Save site session in the extension or bookmarklet. Status is on Connections. The cookie stays in the OS secret store. SSIOS does not store a password and does not log in for you.</p>"
+        + "<details><summary>Paste a cookie instead</summary>"
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<label>Domain <input name=\"domain\" placeholder=\"example.com\"></label>"
+        "<label>Cookie header <textarea name=\"cookie\" rows=\"3\"></textarea></label>"
+        "<button name=\"op\" value=\"save-site\" type=\"submit\">Save pasted cookie</button></form></details>"
+        + "<ul>" + ("".join(rows) or "<li>No site sessions.</li>") + "</ul>"
+        + f"<form method=\"post\" action=\"/ui/clipper\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button name=\"op\" value=\"undo-clip\" type=\"submit\">Undo last auto clip</button></form>"
+    )
+    return _page(session, "Clipper", body)
+
+
+def _clipper_post(plane, session: dict, body: dict) -> Page:
+    from ssios.clipper import issue_token, revoke_token, undo_last_clip
+    from ssios.site_session import delete_session, save_session
+
+    account_id = session["account"]["id"]
+    op = str(body.get("op") or "")
+    if op == "issue":
+        token = issue_token(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "", token))
+    if op == "revoke":
+        revoke_token(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "<p>Token revoked.</p>"))
+    if op == "save-site":
+        save_session(plane, account_id, str(body.get("domain") or ""), str(body.get("cookie") or ""))
+        return Page(200, _clipper_page(plane, session, "<p>Site session saved. The cookie was not written to disk.</p>"))
+    if op == "delete-site":
+        delete_session(plane, account_id, str(body.get("domain") or ""))
+        return Page(200, _clipper_page(plane, session, "<p>Site session deleted.</p>"))
+    if op == "undo-clip":
+        undo_last_clip(plane, account_id)
+        return Page(200, _clipper_page(plane, session, "<p>The last auto clip was removed.</p>"))
+    raise SsiosError("skill_denied", "clip action rejected", 400)
+
+
 def _settings(plane, session: dict) -> str:
     status = plane.status(_human(plane))
     safe = {
@@ -409,48 +1201,546 @@ def _settings(plane, session: dict) -> str:
         "memory": status.get("memory", {}).get("mode"),
         "model": status.get("llm", {}).get("model"),
     }
-    return _page(session, "Settings", f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
+    policy = plane.skills.policy()
+    prefs = plane.skills.account_prefs(session["account"]["id"])
+    csrf = html.escape(str(session["csrf"]))
+    location = html.escape(str(prefs.get("location") or ""))
+    switches = []
+    for name in ("weather", "web_fetch"):
+        on = name in prefs.get("enabled", [])
+        verb = "disable" if on else "enable"
+        label = "On" if on else "Off"
+        switches.append(
+            f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+            f"<input type=\"hidden\" name=\"skill\" value=\"{name}\">"
+            f"<span>{name}: {label}</span> <button name=\"op\" value=\"{verb}\" type=\"submit\">{verb.title()}</button></form>"
+        )
+    ceiling = "Web skills are on." if policy["enabled"] else "Web skills are off until an admin turns them on."
+    form = (
+        f"<section class=\"card\"><h2>Web skills</h2><p>{ceiling}</p>"
+        + "".join(switches)
+        + f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Default city <input name=\"location\" value=\"{location}\" maxlength=\"80\"></label> "
+        "<button type=\"submit\">Save city</button></form>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Language <select name=\"language\"><option value=\"en\" {'selected' if prefs.get('language') != 'zh' else ''}>English</option>"
+        f"<option value=\"zh\" {'selected' if prefs.get('language') == 'zh' else ''}>中文</option></select></label> "
+        f"<label>Units <select name=\"units\"><option value=\"celsius\" {'selected' if prefs.get('units') != 'fahrenheit' else ''}>Celsius</option>"
+        f"<option value=\"fahrenheit\" {'selected' if prefs.get('units') == 'fahrenheit' else ''}>Fahrenheit</option></select></label> "
+        "<button type=\"submit\">Save language and units</button></form>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"auto_save\" value=\"{'off' if prefs.get('auto_save') else 'on'}\">"
+        f"<button type=\"submit\">{'Turn auto-save off' if prefs.get('auto_save') else 'Turn auto-save on'}</button></form>"
+        "<p>Auto-save is off by default. A clip is written to your vault only after you approve it.</p>"
+        "<p><a href=\"/ui/clipper\">Browser clipper</a></p>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<label>Time zone <input name=\"time_zone\" value=\"{html.escape(str((plane.accounts.users.get(session['account']['id']) or {}).get('time_zone') or ''))}\" placeholder=\"America/Los_Angeles\"></label> "
+        "<button type=\"submit\">Save time zone</button></form>"
+        "</section>"
+    )
+    return _page(session, "Settings", form + f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
 
 
-_STYLE = """
-<style>
-body { margin: 0; font: 16px/1.5 Georgia, "Iowan Old Style", serif; color: #1c1915; background: #f6f1e7; }
-nav, main { max-width: 46rem; margin: 0 auto; }
-nav { display: flex; gap: 1rem; padding: 1rem 0; }
-a { color: #6b3a1f; }
-h1 { font-weight: 500; }
-form { display: grid; gap: 0.75rem; }
-input, textarea, button { font: inherit; padding: 0.45rem 0.6rem; }
-button { background: #1c1915; color: #f6f1e7; border: 0; width: max-content; }
-pre { white-space: pre-wrap; background: #fff; padding: 1rem; }
-article { border-top: 1px solid #d9d0c1; padding-top: 1rem; }
-</style>
+def _settings_post(plane, session: dict, body: dict) -> Page:
+    account_id = session["account"]["id"]
+    location = body.get("location")
+    skill = str(body.get("skill") or "")
+    op = str(body.get("op") or "")
+    if skill and op in {"enable", "disable"}:
+        plane.skills.set_account(account_id, name=skill, enabled=op == "enable")
+    elif body.get("auto_save") in {"on", "off"}:
+        plane.skills.set_account(account_id, auto_save=body.get("auto_save") == "on")
+    elif body.get("link_style") in {"relative", "wikilink"}:
+        plane.skills.set_account(account_id, link_style=str(body.get("link_style")))
+    elif "time_zone" in body:
+        try:
+            plane.accounts.set_time_zone(account_id, str(body.get("time_zone") or ""))
+        except SsiosError as exc:
+            return Page(exc.status, _page(session, "Settings", f"<p>{html.escape(exc.detail)}</p>"))
+    elif body.get("language") in {"en", "zh"} or body.get("units") in {"celsius", "fahrenheit"}:
+        language = body.get("language") if body.get("language") in {"en", "zh"} else None
+        units = body.get("units") if body.get("units") in {"celsius", "fahrenheit"} else None
+        plane.skills.set_account(account_id, language=language, units=units)
+        from ssios.account_memory import commit_preference_facts
+        from ssios.scope import AccountScope
+
+        facts = []
+        if language:
+            facts.append({"path": "preferences.md", "key": "Language", "value": language})
+        if units:
+            facts.append({"path": "preferences.md", "key": "Units", "value": units})
+        if facts:
+            try:
+                commit_preference_facts(AccountScope(plane, session["account"]), facts, "127.0.0.1")
+            except SsiosError:
+                return Page(500, _page(session, "Settings", "<p>The setting was not saved.</p>"))
+    elif location is not None:
+        plane.skills.set_account(account_id, location=str(location))
+    return Page(200, _settings(plane, session))
+
+
+APP_CSS = """
+:root {
+  color-scheme: light dark;
+  --bg: #fafafa; --ink: #171717; --muted: #525252; --panel: #ffffff; --line: #e7e7e7;
+  --user: #dbe7ff; --accent: #1d4ed8; --on-accent: #ffffff; --hover: #f3f4f6; --ok-dot: #15803d;
+  --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #166534; --warn: #92400e; --warn-bg: #fef3c7; --ok-bg: #dcfce7;
+  --code: #f4f4f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f10; --ink: #f5f5f5; --muted: #a3a3a3; --panel: #171717; --line: #2a2a2a;
+    --user: #1e3a5f; --accent: #93c5fd; --on-accent: #0f0f10; --hover: #222226; --ok-dot: #4ade80;
+    --danger: #fecaca; --danger-bg: #3f1515; --ok: #bbf7d0; --warn: #fde68a; --warn-bg: #3f2e12; --ok-bg: #14301f;
+    --code: #1c1c1f;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; overflow: auto; font: 15px/1.6 -apple-system, "SF Pro", "PingFang SC", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--bg); }
+body.app-body { overflow: hidden; }
+h1, h2, h3, p, ul, ol, figure { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+a { color: inherit; text-decoration: none; }
+summary { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+button, input, textarea, select { font: inherit; color: inherit; }
+.page a, main a, .msg a { color: var(--accent); }
+.page a.button, .page a.button:hover { color: var(--on-accent); text-decoration: none; }
+.msg ul { list-style: disc; padding-left: 1.25rem; margin: 8px 0; }
+h1 { font-weight: 600; font-size: 1.35rem; margin: 0 0 16px; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+button, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
+button { background: transparent; cursor: pointer; width: auto; }
+button.primary, a.button.primary { display: inline-block; background: var(--accent); color: var(--on-accent); border-color: transparent; text-decoration: none; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.danger, .card.danger button.primary { background: var(--danger); color: #fff; border-color: transparent; }
+@media (prefers-color-scheme: dark) {
+  button.danger, .card.danger button.primary { color: #3f1515; }
+}
+label { display: grid; gap: 4px; }
+form { display: grid; gap: 12px; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.goal-actions button { width: auto; }
+.badge { display: inline-block; min-width: 1.2em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: 12px; text-align: center; }
+pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
+.app { height: 100%; display: flex; min-height: 0; }
+.rail { width: 64px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 6px; border-right: 1px solid var(--line); background: var(--bg); }
+.rail a, .rail button { width: 44px; min-height: 36px; display: grid; place-items: center; border-radius: 12px; text-decoration: none; color: var(--ink); font-size: 12px; padding: 4px; }
+.rail a:hover, .rail a:focus-visible, .rail button:hover, .rail button:focus-visible { background: var(--panel); }
+.rail form { margin: 0; }
+.rail-gap { flex: 1; }
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
+.finder { display: grid; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.pin { display: block; padding: 8px 12px; border-radius: 12px; text-decoration: none; color: var(--ink); font-weight: 600; }
+.side-head { display: flex; align-items: center; justify-content: space-between; }
+.plus { text-decoration: none; color: var(--ink); border: 1px solid var(--line); border-radius: 999px; width: 28px; height: 28px; display: grid; place-items: center; }
+.muted { color: var(--muted); font-size: 13px; }
+.threads { list-style: none; margin: 0; padding: 0; }
+.workspace { flex: 1; min-height: 0; display: flex; }
+.thread-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
+.thread-head h1 { margin: 0; font-size: 1rem; }
+.info { width: 320px; flex: none; border-left: 1px solid var(--line); overflow: auto; padding: 16px; background: var(--bg); }
+.who { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+.who .avatar { width: 44px; height: 44px; font-size: 18px; }
+.presence { display: flex; align-items: center; gap: 6px; color: var(--ok); font-size: 13px; margin: 0; }
+.model-chip { display: inline-block; margin: 0 0 12px; font-size: 12px; color: var(--muted); background: var(--hover); border-radius: 999px; padding: 2px 8px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 16px; padding: 3px; background: var(--hover); border-radius: 12px; }
+.tabs button { flex: 1; border: 0; border-radius: 9px; background: transparent; font-size: 12px; display: inline-flex; gap: 4px; align-items: center; justify-content: center; padding: 6px 4px; }
+.tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.routines, .activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.routines li { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.routines li p, .activity li p { color: var(--muted); font-size: 13px; margin: 0; }
+.activity li { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: start; background: transparent; border: 0; padding: 8px 0; }
+.activity time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.day-group { margin-top: 8px; }
+.day-group summary { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.quote, .quote-bar { border-left: 3px solid var(--accent); margin: 0 0 6px; padding: 2px 8px; color: var(--muted); font-size: 13px; }
+.rail .new-chat { display: grid; margin: 0; width: 44px; border: 0; padding: 4px; }
+.thumb { display: block; max-width: 180px; border-radius: 12px; margin-top: 6px; cursor: pointer; }
+.paste-preview { display: flex; flex-wrap: wrap; gap: 8px; }
+.paste-thumb { position: relative; margin: 0; }
+.paste-thumb img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
+.paste-x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border: 0; border-radius: 999px; background: var(--ink); color: var(--bg); line-height: 20px; padding: 0; cursor: pointer; }
+.lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 30; }
+.lightbox[hidden] { display: none; }
+.lightbox img { max-width: 90vw; max-height: 90vh; }
+.day { align-self: center; color: var(--muted); font-size: 12px; }
+.attach input { width: 1px; height: 1px; opacity: 0; position: absolute; }
+.attach { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
+.sidebar { width: 260px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); padding: 16px 12px; background: var(--bg); }
+.brand { font-weight: 650; color: var(--ink); text-decoration: none; }
+.new-chat { display: block; margin: 16px 0; text-align: center; text-decoration: none; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; color: var(--ink); }
+.rail .new-chat { display: grid; margin: 0; width: 44px; min-height: 36px; border: 0; padding: 4px; text-align: center; }
+.convs { flex: 1; overflow: auto; min-height: 0; }
+.sidebar h2, .convs h2 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 16px 8px 4px; }
+.sidebar .pin, .sidebar .conv a { border-radius: 10px; }
+.sidebar .pin:hover, .sidebar .conv:hover, .sidebar .pin:focus-within, .sidebar .conv:focus-within { background: var(--hover); }
+.sidebar .pin.active, .sidebar .conv.active { background: var(--user); }
+.convs ul { margin: 0; padding: 0; list-style: none; }
+.conv { display: flex; align-items: center; gap: 4px; border-radius: 12px; }
+.conv a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; padding: 8px 12px; }
+.conv:hover, .conv:focus-within { background: var(--panel); }
+.kebab { position: relative; }
+.kebab summary { list-style: none; cursor: pointer; opacity: 0; border-radius: 8px; padding: 4px 8px; }
+.conv:hover .kebab summary, .kebab[open] summary, .kebab summary:focus { opacity: 1; }
+.conv .kebab form { position: absolute; right: 0; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; width: 200px; }
+tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
+.dock { margin-top: auto; position: relative; }
+.account-row { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; }
+.account-row:hover { background: var(--panel); }
+.avatar, .mark { width: 28px; height: 28px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--user); font-size: 13px; flex: none; }
+.popover { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); z-index: 5; display: grid; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+.popover a, .popover button { display: block; width: 100%; box-sizing: border-box; margin: 0; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); text-align: left; text-decoration: none; }
+.popover a:hover, .popover button:hover, .popover a:focus-visible, .popover button:focus-visible { background: var(--bg); }
+.popover form { display: block; }
+.menu-label { margin: 8px 12px 4px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.page { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: none; margin: 0; padding: 0; }
+.sheet { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+.menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
+.thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.log { flex: 1; overflow: auto; min-height: 0; }
+.column { max-width: 720px; margin: 0 auto; padding: 24px 16px 8px; display: flex; flex-direction: column; gap: 16px; }
+.msg { display: flex; gap: 8px; align-items: flex-end; }
+.msg.user { justify-content: flex-end; }
+.msg.user .bubble { max-width: min(75%, 520px); background: var(--user); border-radius: 18px 18px 6px 18px; padding: 10px 14px; }
+.msg.assistant .body { min-width: 0; flex: 1; max-width: min(100%, 560px); background: var(--panel); border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; padding: 10px 14px; }
+.msg .body { min-width: 0; flex: 1; }
+.tools { display: flex; gap: 8px; align-items: center; }
+.copy, .stamp { opacity: 0; font-size: 12px; color: var(--muted); background: transparent; border: 0; padding: 0; }
+.msg:hover .copy, .msg:focus-within .copy, .msg:hover .stamp, .msg:focus-within .stamp, .codeblock:hover .copy, .codeblock:focus-within .copy { opacity: 1; }
+.pill { align-self: flex-start; width: auto; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: transparent; padding: 2px 8px; cursor: help; }
+.codeblock { background: var(--code); border-radius: 12px; margin: 8px 0; }
+.codehead { display: flex; justify-content: space-between; padding: 4px 8px; color: var(--muted); font-size: 12px; }
+.codeblock pre { margin: 0; padding: 8px 12px 12px; white-space: pre-wrap; }
+.empty { text-align: center; margin: auto; padding: 48px 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chip { border-radius: 999px; }
+.composer { padding: 8px 16px 20px; }
+.composer-box { max-width: 720px; margin: 0 auto; border: 1px solid var(--line); border-radius: 28px; background: var(--panel); padding: 8px 8px 8px 16px; box-shadow: 0 10px 30px rgba(0,0,0,.08); display: grid; gap: 4px; }
+.composer-box textarea { border: 0; resize: none; min-height: 24px; max-height: 160px; padding: 8px 0; background: transparent; width: 100%; outline: none; }
+.composer-bar { display: flex; align-items: center; gap: 8px; }
+.composer-bar .send { margin-left: auto; }
+.route-chip select { border: 0; background: var(--hover); border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+.send, #mic, .attach { width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; }
+.send:disabled { opacity: .4; }
+.hint { max-width: 720px; margin: 8px auto 0; color: var(--muted); font-size: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.card.danger { border-color: var(--danger); background: var(--danger-bg); }
+.card header, .card .actions { display: flex; align-items: center; gap: 8px; }
+.card .actions { justify-content: flex-end; }
+.card dl { display: grid; grid-template-columns: 8rem 1fr; gap: 4px 12px; margin: 12px 0; }
+.card dt { color: var(--muted); }
+.status { font-size: 12px; border-radius: 999px; padding: 2px 8px; background: var(--warn-bg); color: var(--warn); }
+.status.approved { background: var(--ok-bg); color: var(--ok); }
+.status.denied, .status.expired, .status.missing { background: var(--danger-bg); color: var(--danger); }
+.diff s { color: var(--muted); }
+.diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; align-items: flex-start; }
+.steps li[data-step="checks"] { display: flex; flex-direction: column; align-items: flex-start; }
+.step-details { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.step-details summary { cursor: pointer; }
+.step-details:not([open]) > :not(summary) { display: none; }
+.steps .done::before { content: "\\2713  "; color: var(--ok); }
+.steps .spin::before { content: "\\25CC  "; }
+.steps .fail::before { content: "\\2717  "; color: var(--danger); }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.choices .choice { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+.codex-steps { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.codex-step { margin: 0; color: var(--muted); font-size: 13px; }
+.badge.read, .badge.write { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.badge.read { background: var(--user); color: var(--ink); }
+.badge.write { background: var(--danger-bg); color: var(--danger); }
+.error-card { border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; padding: 12px 16px; background: var(--panel); }
+.error-card .code { font-family: ui-monospace, monospace; font-size: 13px; }
+.notice { margin: 0 0 12px; padding: 8px 12px; border-radius: 12px; background: var(--warn-bg); color: var(--warn); }
+.notice.ok { background: var(--ok-bg); color: var(--ok); }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: var(--muted); }
+.setup-steps .done { color: var(--ink); font-weight: 600; }
+.help { list-style: decimal; padding-left: 1.25rem; }
+.result-block { display: grid; gap: 8px; margin: 4px 0 12px; padding-top: 8px; }
+.result-block + .result-block { border-top: 1px solid var(--line); }
+.result-block h2, .result-block h3 { margin: 0; font-size: 0.95rem; }
+.event-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.event-card h3, .event-card h4 { margin: 0; font-size: 1rem; }
+.event-card p { margin: 4px 0 0; }
+.file-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.file-filters a { text-decoration: none; }
+.file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
+.file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.file-list { display: grid; gap: 12px; }
+.file-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.file-card input { width: 100%; }
+.file-card img, img.preview { width: 100%; max-height: 160px; object-fit: cover; border-radius: 8px; }
+iframe.preview { width: 100%; height: 360px; border: 1px solid var(--line); border-radius: 12px; }
+.file-card form { margin-top: 8px; }
+.type-badge { display: inline-block; width: max-content; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
+.technical { margin-top: 12px; color: var(--muted); }
+.svc-grid { display: grid; gap: 16px; }
+.svc { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.svc .body { display: grid; gap: 8px; min-width: 0; }
+.svc-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.svc form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 0; }
+.consent { display: grid; gap: 8px; }
+a.button { display: inline-flex; align-items: center; width: auto; border-radius: 12px; padding: 8px 12px; border: 1px solid transparent; }
+a.button.primary { background: var(--accent); }
+.manage summary { padding: 8px 0; }
+.dot { width: 8px; height: 8px; border-radius: 99px; background: #737373; }
+.dot.on { background: #15803d; }
+.dot.warn { background: #b45309; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); }
+td, th { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--line); }
+body.sidebar-closed .sidebar { display: none; }
+@media (max-width: 800px) {
+  .menu-btn { display: inline-flex; }
+  .sidebar { display: none; position: fixed; inset: 0 auto 0 64px; z-index: 4; width: min(260px, 86vw); }
+  body.sidebar-open .sidebar { display: flex; }
+  .info { display: none; }
+  body.info-open .info { display: block; position: fixed; inset: 0 0 0 64px; z-index: 5; width: auto; }
+  .rail { width: 52px; }
+}
 """
+
+
+def _asset_hash(text: str) -> str:
+    return sha256_bytes(text.encode("utf-8"))[:12]
+
+
+STYLE_PATH = "/ui/assets/app-" + _asset_hash(APP_CSS) + ".css"
+NOTICES_JS = r"""
+(function () {
+  var count = document.getElementById("notice-count");
+  var banner = document.getElementById("notice-banner");
+  if (!count && !banner) return;
+  function paint(data) {
+    var n = Number(data && data.count) || 0;
+    var item = (data && data.items && data.items[0]) || {};
+    if (count) {
+      count.hidden = n < 1;
+      count.textContent = n ? String(n) : "";
+    }
+    var site = ((data && data.items) || []).filter(function (row) { return row && !row.due; })[0];
+    if (site) item = site;
+    if (banner) {
+      banner.hidden = n < 1;
+      if (!n) banner.textContent = "";
+      else if (item.due) banner.textContent = "Reminder: " + (item.text || "") + " was due " + item.due;
+      else banner.textContent = item.text || "";
+    }
+  }
+  function poll() {
+    fetch("/ui/notices", {headers: {"Accept": "application/json"}, credentials: "same-origin"})
+      .then(function (response) { return response.ok ? response.json() : {count: 0, items: []}; })
+      .then(paint)
+      .catch(function () {});
+  }
+  poll();
+  setInterval(poll, 15000);
+  var search = document.getElementById("thread-search");
+  if (search) {
+    search.addEventListener("input", function () {
+      var needle = search.value.trim().toLowerCase();
+      document.querySelectorAll(".conv, .pin").forEach(function (row) {
+        var title = (row.getAttribute("data-title") || row.textContent || "").toLowerCase();
+        row.hidden = needle && title.indexOf(needle) < 0;
+      });
+    });
+  }
+  document.querySelectorAll(".tabs [role=tab]").forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      document.querySelectorAll(".tabs [role=tab]").forEach(function (other) {
+        var on = other === tab;
+        other.setAttribute("aria-selected", String(on));
+        var panel = document.getElementById(other.getAttribute("aria-controls"));
+        if (panel) panel.hidden = !on;
+      });
+    });
+  });
+  var infoToggle = document.getElementById("info-toggle");
+  if (infoToggle) {
+    infoToggle.addEventListener("click", function () {
+      var open = document.body.classList.toggle("info-open");
+      infoToggle.setAttribute("aria-expanded", String(open || window.matchMedia("(min-width: 801px)").matches));
+    });
+  }
+})();
+"""
+NOTICES_PATH = "/ui/assets/notices-" + _asset_hash(NOTICES_JS) + ".js"
+CONN_JS = """
+"use strict";
+document.querySelectorAll("[data-copy]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    var value = button.getAttribute("data-copy") || "";
+    function mark() { button.textContent = "Copied"; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(mark).catch(mark);
+      return;
+    }
+    mark();
+  });
+});
+"""
+CONN_PATH = "/ui/assets/conn-" + _asset_hash(CONN_JS) + ".js"
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+def _style_link() -> str:
+    return f'<link rel="stylesheet" href="{STYLE_PATH}">'
+
+
+def _static_asset(method: str, path: str) -> Page | None:
+    if method != "GET":
+        return None
+    if path == STYLE_PATH:
+        return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path == NOTICES_PATH:
+        return Page(200, NOTICES_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path.startswith("/ui/assets/chat-") and path.endswith(".js"):
+        from ssios.ui_household import CHAT_JS, CHAT_PATH
+
+        if path == CHAT_PATH:
+            return Page(200, CHAT_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path == CONN_PATH:
+        return Page(200, CONN_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    vendor = _vendor_asset(path)
+    if vendor is not None:
+        return vendor
+    return None
+
+
+def _vendor_asset(path: str) -> Page | None:
+    """Same-origin KaTeX and the markdown renderer. No CDN."""
+    prefix = "/ui/vendor/"
+    if not path.startswith(prefix):
+        return None
+    rel = path[len(prefix):]
+    if not rel or ".." in rel.split("/") or rel.startswith("/"):
+        return None
+    allowed = rel in {"render.js", "katex/katex.min.js", "katex/katex.min.css"} or (
+        rel.startswith("katex/fonts/") and rel.endswith(".woff2") and rel.count("/") == 2
+    )
+    if not allowed:
+        return None
+    root = Path(__file__).resolve().parent / "vendor"
+    file = (root / rel).resolve()
+    if root not in file.parents or not file.is_file():
+        return None
+    kinds = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
+    return Page(200, file.read_bytes(), content_type=kinds[file.suffix], cache_control=_ASSET_CACHE)
 
 
 def _login_page(code: str) -> str:
     value = html.escape(code)
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sign in</title>"
-        + _STYLE
+        + _style_link()
         + "<body><main><h1>Sign in</h1><form method=\"post\" action=\"/ui/login\">"
+        "<label>Username <input name=\"username\" autocomplete=\"username\"></label>"
+        "<label>Password <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>"
         f"<label>One-time code <input name=\"code\" value=\"{value}\"></label>"
-        "<label>Human token <input name=\"token\" type=\"password\"></label>"
-        "<button type=\"submit\">Sign in</button></form></main></body></html>"
+        "<button class=\"primary\" type=\"submit\">Sign in</button></form>"
+        "<p><a href=\"/ui/signup\">Request an account</a></p>"
+        "<p>The first admin is created on the host with <code>ssios user add --admin</code>. There is no default password.</p>"
+        "</main></body></html>"
     )
 
 
-def _page(session: dict, title: str, body: str) -> str:
-    csrf = html.escape(str(session.get("csrf") or ""))
+def icon(name: str) -> str:
+    """A small inline icon. The link or button carries the accessible name."""
+    paths = {
+        "chat": '<path d="M5 6h14v9H8l-3 3z"/>',
+        "search": '<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>',
+        "notes": '<path d="M7 4h8l4 4v12H7z"/><path d="M15 4v4h4"/>',
+        "files": '<path d="M4 7h6l2 2h8v9H4z"/>',
+        "memory": '<path d="M12 4a5 5 0 0 1 5 5c0 4-5 11-5 11S7 13 7 9a5 5 0 0 1 5-5z"/>',
+        "tasks": '<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M8 12l2.5 2.5L16 9"/>',
+        "link": '<path d="M10 13a4 4 0 0 0 6 0l2-2a4 4 0 0 0-6-6l-1 1"/><path d="M14 11a4 4 0 0 0-6 0l-2 2a4 4 0 0 0 6 6l1-1"/>',
+        "plus": '<path d="M12 5v14M5 12h14"/>',
+        "settings": '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/>',
+        "logout": '<path d="M9 6H6v12h3"/><path d="M10 12h9M16 8l4 4-4 4"/>',
+        "admin": '<path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"/>',
+        "bell": '<path d="M6 16V11a6 6 0 1 1 12 0v5l1 2H5z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+        "repeat": '<path d="M7 7h9l-2-2M17 17H8l2 2"/><path d="M17 7v4M7 17v-4"/>',
+        "check": '<circle cx="12" cy="12" r="8"/><path d="M8 12l2.5 2.5L16 9"/>',
+        "mic": '<rect x="9" y="4" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
+        "paperclip": '<path d="M8 12l6-6a3 3 0 0 1 4 4l-7 7a4 4 0 0 1-6-6l7-7"/>',
+    }
+    body = paths.get(name, paths["chat"])
     return (
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>"
-        + html.escape(title)
-        + "</title>"
-        + _STYLE
-        + "<body><nav><a href=\"/ui\">Console</a> <a href=\"/ui/tasks\">Tasks</a> "
-        "<a href=\"/ui/approvals\">Approvals</a> <a href=\"/ui/ingest\">Ingest</a> <a href=\"/ui/summary\">Summary</a> "
-        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a> <a href=\"/ui/settings\">Settings</a></nav>"
-        f"<main><h1>{html.escape(title)}</h1>{body}"
-        f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<button type=\"submit\">Sign out</button></form></main></body></html>"
+        '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" '
+        'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">'
+        + body + "</svg>"
+    )
+
+
+def _rail(session: dict) -> str:
+    csrf = html.escape(str(session.get("csrf") or ""))
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    admin = f'<a href="/ui/admin" title="Admin" aria-label="Admin">{icon("admin")}</a>' if account.get("role") == "admin" else ""
+    return (
+        '<nav class="rail" aria-label="Sections">'
+        f'<a href="/ui/chat" title="Chat" aria-label="Chat">{icon("chat")}</a>'
+        f'<a href="#thread-search" title="Search" aria-label="Search">{icon("search")}</a>'
+        f'<a href="/ui/vault" title="Notes" aria-label="Notes">{icon("notes")}</a>'
+        f'<a href="/ui/files" title="Files" aria-label="Files">{icon("files")}</a>'
+        f'<a href="/ui/memory?project_id=local-summary" title="Memory" aria-label="Memory">{icon("memory")}</a>'
+        f'<a href="/ui/tasks" title="Tasks" aria-label="Tasks">{icon("tasks")}</a>'
+        f'<a href="/ui/connections" title="Connections" aria-label="Connections">{icon("link")}</a>'
+        f'<a class="new-chat" href="/ui/chat" title="New chat" aria-label="New chat"><span class="sr">New chat</span>{icon("plus")}</a>'
+        '<span class="rail-gap"></span>'
+        f'<a href="/ui/settings" title="Settings" aria-label="Settings">{icon("settings")}</a>'
+        + admin
+        + f'<form method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<button type="submit" title="Sign out" aria-label="Sign out">{icon("logout")}</button></form>'
+        "</nav>"
+    )
+
+
+def _shell(session: dict, main: str, conversations: str = "") -> str:
+    csrf = html.escape(str(session.get("csrf") or ""))
+    account = session.get("account") if isinstance(session.get("account"), dict) else {}
+    who = html.escape(str(account.get("username") or ""))
+    initial = html.escape((str(account.get("username") or "?")[:1] or "?").upper())
+    admin = "<a href=\"/ui/admin\">Admin</a>" if account.get("role") == "admin" else ""
+    threads = conversations or (
+        "<section><h2>Main</h2><a class=\"pin\" href=\"/ui/chat\">Main chat</a></section>"
+        "<section><h2>Channels</h2><p class=\"muted\">No channels yet.</p></section>"
+        "<section class=\"side-head\"><h2>Side chats</h2><a class=\"plus\" href=\"/ui/chat\" aria-label=\"New chat\">+</a></section>"
+    )
+    return (
+        "<div class=\"app\">" + _rail(session) + "<aside id=\"sidebar\" class=\"sidebar\">"
+        "<a class=\"brand\" href=\"/ui/chat\">SSIOS</a>"
+        "<label class=\"finder\">Search<input id=\"thread-search\" type=\"search\" placeholder=\"Search\" aria-label=\"Search threads\"></label>"
+        + threads
+        + "<div class=\"dock\"><details class=\"account\"><summary><span class=\"account-row\"><span class=\"avatar\">"
+        + initial
+        + "</span><span>Signed in as "
+        + who
+        + "</span></span></summary><div class=\"popover\" role=\"menu\">"
+        "<a href=\"/ui/connections\">Connections</a>"
+        "<a href=\"/ui/memory?project_id=local-summary\">Memory</a>"
+        "<a href=\"/ui/vault\">Notes</a>"
+        "<a href=\"/ui/tasks\">Tasks <span id=\"notice-count\" class=\"badge\" hidden></span></a>"
+        "<a href=\"/ui/settings\">Settings</a>"
+        + admin
+        + "<p class=\"menu-label\">More</p>"
+        "<a href=\"/ui\">Console</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
+        "<a href=\"/ui/ingest\">Ingest</a><a href=\"/ui/summary\">Summary</a><a href=\"/ui/approvals\">Approvals</a>"
+        + f"<form method=\"post\" action=\"/ui/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<button type=\"submit\">Sign out</button></form></div></details></div></aside>"
+        "<div class=\"stage\"><p id=\"notice-banner\" class=\"notice\" hidden></p>"
+        "<button type=\"button\" class=\"menu-btn\" id=\"sidebar-toggle\" aria-controls=\"sidebar\" aria-expanded=\"true\">Menu</button>"
+        + main
+        + "</div></div>"
+    )
+
+
+def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "") -> str:
+    main = body if chat else f"<div class=\"page\"><div class=\"sheet\"><h1>{html.escape(title)}</h1>{body}</div></div>"
+    return (
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>" + html.escape(title) + "</title>" + _style_link()
+        + "<body class=\"app-body\">" + _shell(session, main, conversations)
+        + f"<script src=\"{NOTICES_PATH}\"></script></body></html>"
     )

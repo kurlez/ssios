@@ -1,138 +1,166 @@
 # SSIOS
 
-## The microVM cannot run tasks yet
+SSIOS is a local household assistant. Chat runs on this computer. A plain question is answered by local Ollama. A request that edits files or a workspace starts a guest with no network interface. Gmail, Drive, and Calendar are read on the host. Calendar changes wait for approval. There is no cloud model fallback.
 
-The Cloud Hypervisor code only builds launch arguments and runs preflight. It has not booted a guest, and it is not a production execution environment. If KVM, `cloud-hypervisor`, `virtiofsd`, the kernel, or the disk is missing, it fails closed and does not run the task on the host instead. `dev-guard` is only an in-process tool allowlist.
+The day-to-day commands are `./scripts/ssios start|stop|restart|status|logs|diagnose`. The script fills in the state directory and the config. It does not read or write `.ssios`, `.ssios-demo`, or `.ssios-memfs`, and it does not delete them.
 
-## Two memory modes
+## Requirements
 
-The default `letta-memfs-compat` is this repository's own Git Markdown compatibility library. It lets the mock demo run when the Letta CLI is absent. It is not Letta MemFS.
+- Python 3.11 or newer, and Git 2.x
+- [Ollama](https://ollama.com) on `127.0.0.1:11434` when the config provider is `ollama`
+- On a Mac, [vfkit](https://github.com/crc-org/vfkit) 0.6.x when chat should start the guest (`brew install vfkit`)
 
-The optional `letta-memfs-upstream` mode calls the pinned Letta Code `0.34.45` (Apache-2.0) local backend. It runs only the documented JSON subcommands: `agents create`, `memory tokens`, `memory export`, and `memory status`. It then makes an approved git commit in the `memfs/<agent-id>/memory` repository Letta created. It does not run `letta -p` and does not add `--yolo`. If the CLI is missing or the version does not match, it fails. It does not fall back to the compatibility library.
+`./scripts/ssios setup` creates `.venv` when it is missing and installs `keyring` there. No other pip packages are required.
 
-The control plane, approvals, audit log, and project storage stay on this machine. The dev profile binds only to `127.0.0.1` by default, and the model is the deterministic `mock`.
+## State directory and config
 
-## Environment
-
-- Python 3.11 or newer (this repository is tested on Python 3.12)
-- Git 2.x (the MemFS compatibility library uses it for version commits)
-- No third-party pip packages, cloud keys, Docker, or root
-
-The dev profile binds only to `127.0.0.1` by default. The model provider is the deterministic `mock`. It does not use the network and does not download a model.
-
-## Commands
+On macOS the state directory is `$HOME/Library/Application Support/ssios`. On Linux it is `$XDG_STATE_HOME/ssios`, or `$HOME/.local/state/ssios` when `XDG_STATE_HOME` is unset. `SSIOS_STATE` overrides that path. `SSIOS_CONFIG` overrides the config file, which otherwise is `$SSIOS_STATE/ollama.toml`.
 
 ```bash
-make test      # regression tests, no keys required
-make demo      # mock demo. Picks a free port and can run beside make up
-make up        # start the dev profile in the foreground, 127.0.0.1:8765 by default, Ctrl-C to stop
-make preflight # print the Cloud Hypervisor preflight. This does not boot a virtual machine
-make memfs-info
+./scripts/ssios setup
 ```
 
-`make demo` resolves `--state .ssios-demo` to an absolute path from the current working directory before handing it to Git. Internal Git can change its working directory to `git-home` without resolving a relative `-C` against the wrong place. It does not delete an existing `.ssios` or `.ssios-demo`. An expired approval stays expired. The original approval is not extended and its nonce is not reused. Running `make demo` again opens a new approval for the current revision and approves that new approval with the demo human token. A result that is already published with the same content is not published again. A task that was denied, cancelled, failed, or timed out is not retried in a loop by the same command. If that state directory should stay untouched, use a new directory and leave the old one as it is:
+`setup` copies `config/ssios.example.toml` only when that config is missing or empty. Edit the copy. The sample ships with `provider = "mock"` and `ollama_model = "llama3.1:8b"`. For a real local model set:
+
+```toml
+[llm]
+provider = "ollama"
+ollama_model = "qwen2.5:7b"
+```
+
+`qwen2.5:7b` is the chat model used for Chinese and English calendar sentences. `[agent.codex] model` is a different name, `qwen3:14b`, and is used only inside the guest. `qwen2.5-coder:7b` and `qwen3-coder:30b` are alternatives. `muse-glimmer:30b-mlx` is a candidate on Apple Silicon and is not the default. Pull models by hand. This program does not pull models and has no telemetry.
 
 ```bash
-PYTHONPATH=src python3 -m ssios demo --state .ssios-demo-retry --config config/ssios.example.toml
+ollama pull qwen2.5:7b
+ollama pull qwen3:14b
 ```
 
-Upstream MemFS smoke (the pinned version must already be installed, and this does not start an agent conversation):
+On a Mac set the guest pair in the same file:
+
+```toml
+[runtime]
+backend = "macos-vz"
+agent = "codex"
+
+[ui]
+time_zone = "America/Los_Angeles"
+```
+
+An empty `time_zone` uses the computer's zone. Set `[connectors] enabled` to the Google services this computer may use. Do not put an OAuth client secret in the file.
+
+## First account
+
+There is no default password. Create the first admin on the host. The username is 3 to 32 characters: a lowercase letter, then lowercase letters, digits, or hyphens. The password is 12 to 200 characters, hashed with scrypt, and not printed. Type it twice.
 
 ```bash
-npm install --prefix "$HOME/.ssios-letta" --no-fund --no-audit @letta-ai/letta-code@0.34.45
-PYTHONPATH=src python3 -m ssios memfs-upstream-smoke \
-  --state .ssios-upstream --letta-bin "$HOME/.ssios-letta/node_modules/.bin/letta"
+./scripts/ssios user add --admin --username owner
 ```
 
-The integrity check is in `third_party/letta-code.pin.json`. Node must satisfy that package's engines field. Do not put `LETTA_API_KEY` in the environment; this command drops that variable from the parent process.
+Other people can request an account at `/ui/signup`. Those accounts stay pending until an admin approves them at `/ui/admin`. `./scripts/ssios user add --username ada` creates an active member directly. An admin cannot read another account's chat, memory, or mail.
 
-You can also call the commands directly:
+## Start, stop, and logs
+
+If this shell is an SSH session, unlock the login keychain before starting. `start` uses `nohup`. It does not call `setsid` and it does not install a launchd agent, so macOS will not show a Keychain dialog. A locked keychain fails later with `keychain_locked` (`-25308`, `errSecInteractionNotAllowed`).
 
 ```bash
-PYTHONPATH=src python3 -m ssios demo --state .ssios-demo --config config/ssios.example.toml
-PYTHONPATH=src python3 -m ssios health --state .ssios --config config/ssios.example.toml
+security unlock-keychain ~/Library/Keychains/login.keychain-db
+./scripts/ssios start
+./scripts/ssios status
+./scripts/ssios logs
+./scripts/ssios restart
+./scripts/ssios stop
+./scripts/ssios diagnose
 ```
 
-`make up` creates `.ssios/secrets/human.token` and `worker.token` on the first run, mode `0600`. Both files are gitignored. The human control token and the worker token are different. Only the human token can approve.
+`start` prints the URLs from `<state>/listen.url` and returns. Open that page and sign in. Chat is at `/ui/chat`. `logs` follows `<state>/run/ui.log` and redacts lines that look like secrets. `stop` signals only the process in `<state>/run/ui.pid` after checking that it is this UI. `./scripts/ssios fg` runs the same server in the foreground.
 
-The demo submits a summary for the synthetic project `demo-alpha`, waits for human approval, writes memory, publishes, then restarts the process and reads the result back. The audit log records only the action and the payload hash.
+`diagnose` runs `vm-diagnose` and `ui --check`. It prints whether vfkit, the kernel, the initramfs, the Codex binary, and Ollama are present, plus a keychain probe that writes and deletes a throwaway item. It does not boot a guest and does not print tokens.
 
-## Connect local Ollama
+## Home network
 
-mock and Ollama are two separate configs. There is no automatic fallback. Copy the sample and edit the copy. Do not write a real choice back into the tracked sample:
+The default bind is `127.0.0.1`. To serve other computers on the home LAN:
 
 ```bash
-cp config/ssios.example.toml .ssios/ollama.toml
+./scripts/ssios restart --lan
 ```
 
-Change `provider` in `.ssios/ollama.toml` to `ollama`, and set `ollama_model` to the local model name. Start with a quantized 7B or 8B model. The name is configuration, not a hardcoded dependency. Ollama listens on `127.0.0.1:11434` by default. The first `ollama pull` downloads the model; inference can stay offline after that. This program does not pull models automatically and has no telemetry.
+The server then speaks HTTPS with a self-signed certificate under `<state>/ui/tls/` and prints the certificate fingerprint. Only private source addresses are accepted. The same choice can be saved as `[ui] bind = "0.0.0.0"`. Details are in [docs/chat-ui.md](docs/chat-ui.md).
+
+## VM route
+
+A plain question stays on local Ollama. A request to run code or change a workspace starts the guest named by `[runtime] backend` and `agent`. On a Mac that pair is `macos-vz` and `codex` (vfkit, no virtio-net). On Linux it is `cloud-hypervisor` and `codex`. `dev-guard` does not boot a guest.
 
 ```bash
-PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios --config .ssios/ollama.toml
+brew install vfkit
+./scripts/ssios vm-prepare
+./scripts/ssios diagnose
 ```
 
-If the model is missing or the port is closed, the task fails with `llm_unavailable`. An Ollama process that can answer only shows that the process is listening. It does not mean the SSIOS task succeeded.
+`vm-prepare` reads `profile` from the config file. It does not accept `--profile`. It prepares the pinned Codex binary and the aarch64 kernel. After `diagnose` reports the prerequisites present, send a workspace request such as `edit readme.md` from chat. The turn shows booting, the isolation checks, and an approval card. Nothing is applied until that account approves it.
 
-## Summarize against a service that is already running
+A full boot that does not use the household state directory is `bash scripts/macos-vz-codex-smoke.sh` on Apple Silicon. See [docs/macos-vz.md](docs/macos-vz.md). The Cloud Hypervisor preflight on Ubuntu is [docs/deployment-ubuntu.md](docs/deployment-ubuntu.md). If a prerequisite is missing, the task fails closed and is not run on the host instead.
 
-`ssios summary` connects to a service that is already running. It does not start another process and it does not approve by itself. It runs only the synthetic project `local-summary` and does not change memory for `demo-alpha` or any other project. Use the same `--state` and `--config` as `ssios up`.
+## Google
 
-After updating the code, stop the old `ssios up` (do not delete the state directory), then start it once with the original arguments so the new code adds the `local-summary` export:
+Enable the Gmail API, the Google Drive API, and the Google Calendar API in the Cloud project. Leave the app in Testing, add only the Google account you will use as a test user, and create a Desktop OAuth client. Do not publish the app. Connect from the Connections page while signed in, or install the client with:
 
 ```bash
-PYTHONPATH=src python3 -m ssios up --profile dev --state .ssios-memfs --config .ssios/memfs.toml
+./scripts/ssios oauth-install-client --account YOUR_ACCOUNT_ID
 ```
 
-In another terminal, send the synthetic notes into memory. Read the diff, then type `yes`. This step does not bypass approval:
+`YOUR_ACCOUNT_ID` is the id on the Admin row (`acct-` and 16 hex digits). The secret is read from a hidden prompt and stored in the Keychain.
+
+From another computer on the LAN, Connect opens Google in that browser. Google redirects to `http://127.0.0.1:<port>/oauth/callback` on the Mac, which that other browser cannot load. Copy the full redirect address and paste it into Finish consent on the Connections page. The steps, scopes, and the paste flow are in [docs/google-connector.md](docs/google-connector.md).
+
+## Where files live
+
+Paths below are relative to the state directory. The account id is the Admin row, not the username.
+
+| Path | What it is |
+| --- | --- |
+| `ollama.toml` | The config this script starts with |
+| `listen.url` | URLs printed by `start` |
+| `run/ui.log` | UI log (`./scripts/ssios logs`) |
+| `run/ui.pid` | PID of the UI this script started |
+| `accounts/registry.json` | Usernames, roles, and password hashes |
+| `accounts/acct-…/` | That account's chat, approvals, and workspace |
+| `accounts/acct-…/memory/notes/repo` | That account's MemFS git repository |
+| `vaults/acct-…/` | That account's Obsidian vault (notes and clippings) |
+| `audit/security.jsonl` | Hash-chained audit log, metadata only |
+
+Memory is one repository per account. Every conversation and every route (local, guest, and Google) reads and writes that same repo. Conversation text stays in the account chat files and is not the memory repository.
+
+The config key `[memory] mode` defaults to `letta-memfs-compat`. A log line with that name is this repository's git markdown library, not the upstream Letta process. `letta-memfs-upstream` is optional and is not used unless the pinned Letta CLI is installed. See [docs/memfs.md](docs/memfs.md).
+
+Inspect memory with git. This prints commit subjects only:
 
 ```bash
-PYTHONPATH=src python3 -m ssios ingest examples/notes \
-  --project local-summary --state .ssios-memfs --config .ssios/memfs.toml
-PYTHONPATH=src python3 -m ssios summary \
-  --project local-summary --topic local-summary \
-  --state .ssios-memfs --config .ssios/memfs.toml
+git -C "$HOME/Library/Application Support/ssios/accounts/acct-0123456789abcdef/memory/notes/repo" log
 ```
 
-`summary` summarizes only note bodies under `topics/<topic>/`. The default templates in `human.md` and `persona.md` are not content. When there are no notes it returns `no_content` and does not write a restatement of the template into memory.
+Replace the account id. A new account has a seed commit. Approved memory writes add later commits. `./scripts/ssios audit-verify` checks the audit hash chain. The Memory page in the UI lists the same files for the signed-in account.
 
-The command prints the summary it would publish and the memory diff first. `yes` approves, `no` denies, and ending input with no line leaves the approval pending. `approve`, `message.thinking`, and `<think>` in the model output are not treated as approval. The Ollama request includes a JSON schema. The answer is read only from `message.content`.
-
-Failed tasks stay in the state directory. Truncated output, output that contains only thinking, and a summary that restates internal fields do not reach approval. Running `ssios summary` again creates a new task. If a bad summary was already approved, a new `yes` makes another git commit that replaces `topics/fixtures/last-summary.md`. The old commit remains. The state directory does not need to be deleted.
-
-Thinking models receive `think: false`. The answer budget is `max_output_tokens` in the config (1024 by default). You can check whether the local Ollama accepts structured output before creating a task:
+## Tests
 
 ```bash
-PYTHONPATH=src python3 -m ssios ollama-probe --state .ssios-memfs --config .ssios/memfs.toml
+make test
 ```
 
-`dev-guard` finishes the task inside the control-plane process. `macos-vm` puts the summary worker in a guest after `krunvm` is installed; the model call is still proxied by the host. Without a guest the task fails closed. `isolated` is true only when the guest actually wrote the result. See [docs/macos-vm.md](docs/macos-vm.md).
-
-Each Letta `memory export` leaves a full copy in the state directory. After the read, that run's `exports/<agent>/scratch` is deleted. Copies already accumulated under `exports/<agent>/<four hex digits>/` are not deleted automatically. Stop `ssios up` first, then list them:
-
-```bash
-PYTHONPATH=src python3 -m ssios gc --dry-run --state .ssios-memfs --config .ssios/memfs.toml
-```
-
-After the list contains only export copies, drop `--dry-run` and type `yes`. This command does not delete Git history under `backend/memfs`.
-
-The local page listens only on `127.0.0.1`. The API still uses a Bearer token. Sign in from the browser first:
-
-```bash
-PYTHONPATH=src python3 -m ssios ui-login --state .ssios-memfs --config .ssios/memfs.toml
-```
-
-The printed address includes a one-time code that is valid for about two minutes. You can also open `http://127.0.0.1:8765/ui/login` and paste the human token. The token does not appear in the session file.
-
-A Linux guest cannot reach `127.0.0.1` on the macOS host. Do not bind Ollama to `0.0.0.0` by default. If the guest must call the host model, forward only that guest address and restrict the source in the firewall. See [docs/macos-m4.md](docs/macos-m4.md).
+The suite uses a fake Ollama client and a fake guest. It does not call Google and it does not boot vfkit.
 
 ## Docs
 
+- [Chat, accounts, and the home-network UI](docs/chat-ui.md)
+- [Goals and tasks](docs/tasks.md)
+- [Mac end-to-end test](docs/mac-e2e-test.md)
+- [Gmail, Drive, and Calendar](docs/google-connector.md)
+- [vfkit guest](docs/macos-vz.md)
+- [Mac mini M4](docs/macos-m4.md)
 - [Architecture and trust boundary](docs/architecture.md)
 - [MemFS integration boundary](docs/memfs.md)
 - [Implementation status](docs/status.md)
 - [Threat model](docs/security.md)
-- [Mac mini M4 24GB](docs/macos-m4.md)
-- [macOS guest preflight](docs/macos-vm.md)
+- [Older macOS summary guest](docs/macos-vm.md)
 - [Ubuntu and Cloud Hypervisor](docs/deployment-ubuntu.md)
 - [Licenses](docs/licenses.md)
 - Sample config: [config/ssios.example.toml](config/ssios.example.toml)

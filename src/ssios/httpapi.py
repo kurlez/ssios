@@ -2,13 +2,90 @@
 
 from __future__ import annotations
 
+import html
 import json
-import traceback
+import re
+import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from ssios.config import lan_enabled
 from ssios.errors import SsiosError
+from ssios.netguard import is_loopback, origin_allowed, require_host, require_peer
 from ssios.ui import Page, handle as handle_ui
+
+
+def _multipart_memory(content_type: str, raw: bytes) -> dict:
+    """Read a form upload into strings. The bytes are not written to a file."""
+    match = re.search(r"boundary=([^;]+)", content_type)
+    if match is None:
+        raise SsiosError("bad_request", "upload rejected", 400)
+    marker = match.group(1).strip().strip('"')
+    if not marker or len(marker) > 200:
+        raise SsiosError("bad_request", "upload rejected", 400)
+    try:
+        boundary = b"--" + marker.encode("ascii")
+    except UnicodeError as exc:
+        raise SsiosError("bad_request", "upload rejected", 400) from exc
+    result: dict[str, str] = {}
+    for chunk in raw.split(boundary):
+        chunk = chunk.strip(b"\r\n")
+        if not chunk or chunk == b"--":
+            continue
+        if chunk.endswith(b"--"):
+            chunk = chunk[:-2].rstrip(b"\r\n")
+        if b"\r\n\r\n" not in chunk:
+            continue
+        header, body = chunk.split(b"\r\n\r\n", 1)
+        found = re.search(br'name="([^"]+)"', header)
+        if found is None:
+            continue
+        name = found.group(1).decode("ascii", "replace")
+        if name in {"image", "file"}:
+            if len(body) > 512_000:
+                raise SsiosError("too_large", "upload rejected", 413)
+            filename = ""
+            named = re.search(br'filename="([^"]*)"', header)
+            if named:
+                filename = named.group(1).decode("utf-8", "replace")
+            result.setdefault("uploads", [])
+            result["uploads"].append({"name": filename, "bytes": body})
+            if name == "image":
+                result["image_bytes"] = body
+            continue
+        if len(body) > 100000:
+            raise SsiosError("too_large", "upload rejected", 413)
+        if name not in {
+            "csrf",
+            "op",
+            "service",
+            "client_id",
+            "client_secret",
+            "client_file",
+            "confirm",
+            "redirect_url",
+            "account_id",
+            "message",
+            "override",
+            "conversation",
+            "quote",
+        }:
+            continue
+        try:
+            result[name] = body.decode("utf-8")
+        except UnicodeError as exc:
+            raise SsiosError("oauth_client_invalid", "the client file is not text", 400) from exc
+    return result
+
+
+def _image_magic(raw: bytes) -> bool:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if raw.startswith(b"\xff\xd8\xff"):
+        return True
+    if raw.startswith(b"GIF87a") or raw.startswith(b"GIF89a"):
+        return True
+    return raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
 
 
 class AppHTTPServer(ThreadingHTTPServer):
@@ -36,6 +113,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def do_OPTIONS(self) -> None:
+        path = urlsplit(self.path).path.rstrip("/")
+        if path == "/ui/clip":
+            self.send_response(204)
+            self._cors_clip()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self._send(403, {"error": "cors_denied", "detail": "browser origins are rejected"})
 
     def log_message(self, fmt: str, *args) -> None:
@@ -45,11 +129,26 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             if self.command not in ("GET", "POST"):
                 raise SsiosError("method_not_allowed", "method rejected", 405)
-            self._check_host()
+            lan = lan_enabled(self.server.plane.settings)
+            peer = self.client_address[0]
+            require_peer(peer, lan=lan)
+            require_host(self.headers.get("Host", ""), lan=lan)
             parts = urlsplit(self.path)
+            if self.command == "GET" and parts.path == "/" and _accepts_html(self.headers):
+                origin = self.headers.get("Origin") or ""
+                if origin:
+                    port = self.server.plane.bound_port or self.server.plane.settings.port
+                    if not origin_allowed(origin, lan=lan, port=int(port)):
+                        raise SsiosError("cors_denied", "browser origins are rejected", 403)
+                self._redirect(_browser_home(self.server.plane, self.headers))
+                return
+            if (self.headers.get("Upgrade") or "").lower() == "websocket" and not (parts.path == "/ui" or parts.path.startswith("/ui/")):
+                raise SsiosError("unauthorized", "authentication required", 401)
             if parts.path == "/ui" or parts.path.startswith("/ui/"):
                 self._ui()
                 return
+            if lan and not is_loopback(peer):
+                raise SsiosError("unauthorized", "authentication required", 401)
             if self.headers.get("Origin"):
                 raise SsiosError("cors_denied", "browser origins are rejected", 403)
             token = self._bearer()
@@ -57,9 +156,11 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send(status, payload)
         except SsiosError as exc:
             self._send(exc.status, {"error": exc.code, "detail": exc.detail})
-        except Exception:
-            traceback.print_exc()
-            self._send(500, {"error": "internal", "detail": "internal error"})
+        except Exception as exc:
+            from ssios.logsafe import INTERNAL_HINT, log_failure
+
+            log_failure(exc)
+            self._send(500, {"error": "internal", "detail": INTERNAL_HINT})
 
     def _route(self, token: str) -> tuple[int, dict]:
         plane = self.server.plane
@@ -104,22 +205,91 @@ class AppHandler(BaseHTTPRequestHandler):
         raise SsiosError("not_found", "route not found", 404)
 
     def _ui(self) -> None:
-        body = self._form() if self.command == "POST" else {}
-        page = handle_ui(self.server.plane, self.command, self.path, self.headers, body)
+        try:
+            body = self._form() if self.command == "POST" else {}
+            page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
+        except SsiosError as exc:
+            if _ui_wants_html(self.headers):
+                page = self._browser_failure(exc)
+            else:
+                raise
+        except Exception as exc:
+            if not _ui_wants_html(self.headers):
+                raise
+            from ssios.logsafe import INTERNAL_HINT, log_failure
+
+            log_failure(exc)
+            page = self._browser_failure(SsiosError("internal", INTERNAL_HINT, 500))
         if not isinstance(page, Page):
-            raise SsiosError("internal", "internal error", 500)
-        data = page.body.encode("utf-8")
+            from ssios.logsafe import INTERNAL_HINT
+
+            raise SsiosError("internal", INTERNAL_HINT, 500)
+        if page.stream is not None:
+            self._stream(page)
+            return
+        data = page.body if isinstance(page.body, bytes) else page.body.encode("utf-8")
         self.send_response(page.status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        if page.location:
+            self.send_header("Location", page.location)
+        self.send_header("Content-Type", page.content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", page.cache_control or "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'")
         self.send_header("Referrer-Policy", "same-origin")
-        if page.cookie:
-            self.send_header("Set-Cookie", page.cookie)
+        for key, value in (getattr(page, "extra_headers", None) or {}).items():
+            self.send_header(str(key), str(value))
+        for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
+            self.send_header("Set-Cookie", item)
         self.end_headers()
         self.wfile.write(data)
+
+    def _cors_clip(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type, x-ssios-clip-token")
+        self.send_header("Access-Control-Max-Age", "600")
+
+    def _browser_failure(self, exc: SsiosError) -> Page:
+        from ssios.chat import public_error
+        from ssios.ui import browser_error_page
+
+        detail = public_error(exc)
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path == "/ui/connections":
+            try:
+                from ssios.ui import _session
+                from ssios.ui_household import _connections_page
+
+                session = _session(self.server.plane, self.headers)
+                if session is not None:
+                    notice = f"<p class=\"notice\">{html.escape(detail)}</p>"
+                    return Page(exc.status, _connections_page(self.server.plane, session, notice, self.client_address[0]))
+            except Exception as nested:
+                from ssios.logsafe import log_failure
+
+                log_failure(nested)
+        return browser_error_page(detail, exc.status)
+
+    def _stream(self, page: Page) -> None:
+        self.send_response(page.status)
+        self.send_header("Content-Type", page.content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'")
+        self.send_header("Referrer-Policy", "same-origin")
+        for item in getattr(page, "cookies", None) or ([page.cookie] if page.cookie else []):
+            self.send_header("Set-Cookie", item)
+        self.end_headers()
+        try:
+            for chunk in page.stream:
+                data = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+                self.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        self.wfile.write(b"0\r\n\r\n")
 
     def _form(self) -> dict:
         try:
@@ -129,7 +299,10 @@ class AppHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         if not raw:
             return {}
-        if "application/json" in self.headers.get("Content-Type", ""):
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("multipart/form-data"):
+            return _multipart_memory(content_type, raw)
+        if "application/json" in content_type:
             data = json.loads(raw.decode("utf-8"))
             if not isinstance(data, dict):
                 raise SsiosError("bad_request", "json object required", 400)
@@ -175,6 +348,14 @@ class AppHandler(BaseHTTPRequestHandler):
             raise SsiosError("bad_request", "json object required", 400)
         return data
 
+    def _redirect(self, target: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+
     def _send(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -186,9 +367,35 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _ui_wants_html(headers) -> bool:
+    """Browser page loads and form posts. Event streams and JSON clients stay JSON."""
+    accept = str(headers.get("Accept") or "").lower()
+    if "text/event-stream" in accept:
+        return False
+    if "application/json" in accept and "text/html" not in accept:
+        return False
+    if str(headers.get("X-Requested-With") or "").lower() == "xmlhttprequest" and "text/html" not in accept:
+        return False
+    if "text/html" in accept:
+        return True
+    return str(headers.get("Sec-Fetch-Mode") or "").lower() == "navigate"
+
+
+def _accepts_html(headers) -> bool:
+    return "text/html" in str(headers.get("Accept") or "").lower()
+
+
+def _browser_home(plane, headers) -> str:
+    from ssios.ui import _session
+
+    if _session(plane, headers) is not None:
+        return "/ui/chat"
+    return "/ui/login"
+
+
 class ControlServer:
     def __init__(self, plane) -> None:
-        host = plane.settings.host
+        host = plane.settings.ui_bind or plane.settings.host
         if host == "localhost":
             host = "127.0.0.1"
         try:
@@ -199,6 +406,16 @@ class ControlServer:
                 f"cannot bind {host}:{plane.settings.port} ({exc.errno})",
                 500,
             ) from exc
+        self.fingerprint = ""
+        if lan_enabled(plane.settings):
+            from ssios.tlsutil import ensure_certificate
+
+            cert, key, digest = ensure_certificate(plane.settings.state_dir)
+            self.fingerprint = digest
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+            self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
         plane.bound_port = self.httpd.server_address[1]
         self._thread = None
         self._stopped = False
@@ -208,6 +425,20 @@ class ControlServer:
 
         self._thread = threading.Thread(target=self.httpd.serve_forever, name="ssios-http", daemon=True)
         self._thread.start()
+        self._reminder_thread = threading.Thread(target=self._reminders, name="ssios-reminders", daemon=True)
+        self._reminder_thread.start()
+
+    def _reminders(self) -> None:
+        import time
+
+        from ssios.reminders import sweep_accounts
+
+        while not self._stopped:
+            try:
+                sweep_accounts(self.httpd.plane)
+            except Exception:
+                pass
+            time.sleep(30)
 
     def stop(self) -> None:
         if self._stopped:
