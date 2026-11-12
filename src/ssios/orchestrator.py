@@ -39,6 +39,18 @@ def choose_route(message: str, *, guest_ready: bool, override: str = "auto", llm
     if _explicit_host(message) and override != "force_vm":
         return classify(message, override, llm=llm), ""
     decision = classify(message, override, llm=llm)
+    if override == "force_vm" and guest_ready:
+        return (
+            RouteDecision(
+                route="codex",
+                reason="You chose the guest for this message.",
+                reason_code="override_vm",
+                source="override",
+                services=decision.services,
+                skill=decision.skill,
+            ),
+            "",
+        )
     if not _needs_codex(message, decision, pending_fill):
         return decision, ""
     if guest_ready and override != "force_direct":
@@ -129,7 +141,27 @@ def codex_prompt(message: str, *, pending_value: str = "") -> str:
     extra = ""
     if pending_value:
         extra = f"\n\nThe previous question was waiting for a value. The user answered: {pending_value}\n"
+    note = _direct_answer_note(message)
+    if note:
+        extra += "\n" + note
     return repo_agents() + extra + "\n\nUSER\n" + message
+
+
+def _direct_answer_note(message: str) -> str:
+    """A no-tool request is answered in the final message, not with a clarifying question."""
+    from ssios.calendar_intent import creative_request
+
+    text = " ".join(str(message or "").split())
+    if not creative_request(text):
+        return ""
+    if re.search(r"翻译|改写|润色|\b(translate|rewrite|rephrase)\b", text, re.IGNORECASE):
+        return "This request needs no tool. Do the translation or rewrite in the final message. Do not ask a question first."
+    return (
+        "This request needs no tool. Write it in the final message. "
+        "Do not ask for a theme, characters, or plot first. "
+        "A short story is about 300 to 600 Chinese characters when the user writes Chinese, "
+        "or about 200 to 400 English words. After the piece, you may offer one optional change."
+    )
 
 
 def _explicit_host(message: str) -> bool:

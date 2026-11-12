@@ -912,23 +912,26 @@ CHAT_JS = r"""
       if (name === current) { li.className = checks ? "done" : "spin"; seen = true; }
       else if (!seen) li.className = "done";
     });
-    if (checks) {
-      var old = holder.node.nextElementSibling;
-      if (old && old.classList && old.classList.contains("step-details")) old.remove();
-      var details = document.createElement("details");
-      details.className = "step-details";
-      var summary = document.createElement("summary");
-      summary.textContent = "Details";
-      details.appendChild(summary);
-      var list = document.createElement("ul");
-      [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]].forEach(function (pair) {
-        var li = document.createElement("li");
-        li.textContent = pair[0] + ": " + pair[1];
-        list.appendChild(li);
-      });
-      details.appendChild(list);
-      holder.node.insertAdjacentElement("afterend", details);
-    }
+    if (checks) attachCheckDetails(holder.node.querySelector('[data-step="checks"]'), checks);
+  }
+
+  function attachCheckDetails(chip, checks) {
+    if (!chip) return;
+    var old = chip.querySelector("details.step-details");
+    if (old) old.remove();
+    var details = document.createElement("details");
+    details.className = "step-details";
+    var summary = document.createElement("summary");
+    summary.textContent = "Details";
+    details.appendChild(summary);
+    var list = document.createElement("ul");
+    [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]].forEach(function (pair) {
+      var li = document.createElement("li");
+      li.textContent = pair[0] + ": " + pair[1];
+      list.appendChild(li);
+    });
+    details.appendChild(list);
+    chip.appendChild(details);
   }
 
   function choiceButtons(labels) {

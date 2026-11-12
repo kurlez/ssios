@@ -1437,9 +1437,11 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .status.denied, .status.expired, .status.missing { background: var(--danger-bg); color: var(--danger); }
 .diff s { color: var(--muted); }
 .diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
-.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; }
-.step-details { margin: 4px 0 12px; color: var(--muted); font-size: 12px; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; align-items: flex-start; }
+.steps li[data-step="checks"] { display: flex; flex-direction: column; align-items: flex-start; }
+.step-details { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 .step-details summary { cursor: pointer; }
+.step-details:not([open]) > :not(summary) { display: none; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }
 .steps .fail::before { content: "\\2717  "; color: var(--danger); }

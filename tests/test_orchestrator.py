@@ -55,6 +55,12 @@ class RouteTableTest(PlaneTest):
             self.assertEqual(note, "", phrase)
         pending, _note = choose_route("我在Bellevue", guest_ready=True, pending_fill=True)
         self.assertEqual(pending.route, "codex")
+        story = "帮我写一个小故事"
+        auto, _note = choose_route(story, guest_ready=True)
+        self.assertEqual(auto.route, "direct")
+        chosen, note = choose_route(story, guest_ready=True, override="force_vm")
+        self.assertEqual(chosen.route, "codex")
+        self.assertEqual(note, "")
 
     def test_citations_drop_unknown_markers_and_keep_the_text(self) -> None:
         text = present_answer("Ada wrote. [w1] Invented. [z9]", [{"id": "w1", "tool": "weather"}])
@@ -120,6 +126,12 @@ class CodexTurnTest(PlaneTest):
         self.assertNotIn("[z9]", page)
         self.assertIn("Sources", page)
         self.assertIn("You have no network", self.guest.prompt)
+        from ssios.orchestrator import codex_prompt
+
+        story_prompt = codex_prompt("帮我写一个小故事")
+        self.assertIn("final message", story_prompt)
+        self.assertIn("300 to 600", story_prompt)
+        self.assertIn("Do not ask for a theme", story_prompt)
         self.assertIn("Plan", page)
         self.assertIn("badge read", page)
         self.assertIn("weather</p>", page)
@@ -127,6 +139,46 @@ class CodexTurnTest(PlaneTest):
         status, fallen, _cookie = _form(self.base, "/ui/chat/send", {"csrf": self._csrf(), "message": "帮我总结一下最近的邮件"}, cookie=self.cookie)
         self.assertIn("Codex guest is not available", fallen)
         self.assertNotIn("Route: codex", fallen)
+
+    def test_a_chosen_vm_story_is_written_and_checks_stay_out_of_the_answer(self) -> None:
+        class _Story:
+            orchestrator_ready = True
+
+            def __init__(self) -> None:
+                self.prompt = ""
+
+            def run(self, plane, request, on_status):
+                del plane
+                self.prompt = request.prompt
+                checks = {"nic": ["lo"], "outbound": False, "marker": True, "sandbox_denied": True, "outside_write": False}
+                on_status({"phase": "booting", "backend": "stub"})
+                on_status({"phase": "running", "backend": "stub"})
+                on_status({"phase": "isolation", "backend": "stub", "checks": checks})
+                return {
+                    "text": "从前有一次开会，没有结果。\nNetwork: [\"lo\"]\nSandbox denied: true",
+                    "isolated": True,
+                    "boot_ms": 1,
+                    "backend": "stub",
+                    "checks": checks,
+                }
+
+        guest = _Story()
+        self.plane.chat_guest = guest
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(), "message": "帮我写一个小故事", "override": "force_vm"},
+            cookie=self.cookie,
+        )
+        self.assertEqual(status, 200, page)
+        self.assertIn("Route: codex", page)
+        self.assertIn("从前有一次开会", page)
+        self.assertNotIn("Sandbox denied", page)
+        self.assertNotIn("Network:", page)
+        self.assertIn("final message", guest.prompt)
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("guest.isolation", audit)
+        self.assertIn("sandbox_denied", audit)
 
     def test_a_codex_write_shows_an_approval_card(self) -> None:
         class _Writer:

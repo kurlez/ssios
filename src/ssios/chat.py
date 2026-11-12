@@ -602,7 +602,10 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     if calls and any(item.get("status") == "pending" for item in session.results):
         yield from _codex_approvals(scope, conversation_id, session.results)
         return
-    answer = present_answer("" if calls else raw_text, session.results)
+    answer = _without_check_lines(present_answer("" if calls else raw_text, session.results))
+    checks = outcome.get("checks") if isinstance(outcome.get("checks"), dict) else {}
+    if checks:
+        _audit_isolation(plane, scope, conversation_id, peer_ip, checks)
     if calls or not answer.strip():
         note = "The guest did not produce an answer, so this stayed on this computer. Run ssios vm-diagnose for the details."
         scope.chat().append(conversation_id, {"role": "assistant", "text": note})
@@ -615,11 +618,40 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
         {
             "role": "assistant",
             "text": answer,
+            "checks": checks,
             "route": {"route": "codex", "reason": "Codex answered from the host tools.", "source": "rule"},
         },
     )
     yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
     yield from _codex_approvals(scope, conversation_id, session.results)
+
+
+_CHECK_LINE = re.compile(r"^(Network|Outbound|Marker|Sandbox denied|Outside write):.*$")
+
+
+def _without_check_lines(text: str) -> str:
+    kept = [line for line in str(text or "").splitlines() if not _CHECK_LINE.match(line.strip())]
+    return "\n".join(kept).strip()
+
+
+def _audit_isolation(plane, scope, conversation_id: str, peer_ip: str, checks: dict) -> None:
+    """Record the guest checks. They are not part of the answer."""
+    nic = checks.get("nic") if isinstance(checks.get("nic"), list) else []
+    plane.security_audit.write(
+        actor=scope.account_id,
+        ip=peer_ip or "127.0.0.1",
+        action="guest.isolation",
+        target=conversation_id,
+        result="ok" if checks.get("sandbox_denied") else "failed",
+        extra={
+            "phase": "isolation",
+            "nic": ",".join(str(item) for item in nic),
+            "outbound": "true" if checks.get("outbound") else "false",
+            "marker": "true" if checks.get("marker") else "false",
+            "sandbox_denied": "true" if checks.get("sandbox_denied") else "false",
+            "outside_write": "true" if checks.get("outside_write") else "false",
+        },
+    )
 
 
 def _record_guest_failure(scope, conversation_id: str, error: BaseException | None) -> None:

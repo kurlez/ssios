@@ -34,6 +34,11 @@ _ALLOWED_EXTRA = {
     "host",
     "http_status",
     "byte_count",
+    "nic",
+    "outbound",
+    "marker",
+    "sandbox_denied",
+    "outside_write",
 }
 
 
