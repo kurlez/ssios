@@ -36,8 +36,9 @@ def local_directory(path: str, state_dir: Path, lang: str = "en") -> Path:
 
 
 def set_watch(plane, account_id: str, library_id: str, path: str, enabled: bool, peer_ip: str, *, delete_source: bool = False) -> dict:
-    from ssios.library import _audit, _lang
+    from ssios.library import _audit, _lang, _require
 
+    _require(plane, account_id, library_id, "organize")
     lang = _lang(plane, account_id)
     stored = ""
     if str(path or "").strip():

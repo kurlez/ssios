@@ -1677,7 +1677,9 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-switch.active { font-weight: 600; }
 .lib-badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
 .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; min-height: 180px; }
-.lib-card { display: grid; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+.lib-card { position: relative; display: grid; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+.lib-avatar, .lib-mini { width: 22px; height: 22px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 11px; display: inline-grid; place-items: center; }
+.lib-avatar { position: absolute; top: 12px; left: 12px; }
 .lib-card img { width: 100%; height: 96px; object-fit: cover; border-radius: 8px; }
 .type-tile { display: grid; place-items: center; height: 96px; background: var(--hover); border-radius: 8px; font-weight: 600; }
 @media (max-width: 800px) { .library { grid-template-columns: 1fr; } }
@@ -1882,6 +1884,7 @@ def icon(name: str) -> str:
         "mic": '<rect x="9" y="4" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
         "paperclip": '<path d="M8 12l6-6a3 3 0 0 1 4 4l-7 7a4 4 0 0 1-6-6l7-7"/>',
         "person": '<circle cx="12" cy="8" r="3"/><path d="M6 19c1.2-3 3.2-4.5 6-4.5S16.8 16 18 19"/>',
+        "people": '<circle cx="9" cy="8" r="2.5"/><circle cx="16" cy="9" r="2"/><path d="M4.5 18c.8-2.2 2.2-3.4 4.5-3.4s3.7 1.2 4.5 3.4"/><path d="M13 14.7c.8-.4 1.7-.6 2.7-.6 1.7 0 3 .9 3.8 2.6"/>',
     }
     body = paths.get(name, paths["chat"])
     return (

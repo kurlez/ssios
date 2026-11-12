@@ -85,7 +85,7 @@ Analysis is on demand, not a background job. Text uses `qwen3:14b`. Images use `
 
 ### M5 — household sharing
 
-Shared libraries with an owner-set ACL: view, add files and tags, organize folders. Private libraries stay private. A member's recall of a shared item stops as soon as the item or the membership is removed. Only the owner permanently deletes or changes who is invited. The shared library has its own trash. Badges match iCloud: a shared library shows a multi-person icon, `共享`, and member avatars; a private library shows a single-person icon and `个人`; a library shared with you says `由 <name> 共享`. A thumbnail may show the adder's avatar. Every share change is audited. Admin accounts still cannot open another household's private library.
+A library other than the default personal one can be shared. The bytes move to `shared-libraries/<library-id>/` with an ACL. Roles are view, add files and tags, and organize folders. The default personal library stays private. A member cannot trash another person's item. Only the owner permanently deletes or changes who is invited. Removing a member or the item forgets that member's `topics/library/<item-id>.md` immediately, so recall stops. Badges: a shared library shows a multi-person icon, the localized word for shared (`共享`), and member initials; a private library shows one person and `个人`; a library shared with you says `由 <name> 共享`. A shared thumbnail shows the adder's initial. Share changes are audited as `library.share` with the member account id and the role. The file name is not in the audit log. An admin still cannot open another account's private library. These role names are the conservative default and can be changed in `library_share.py`.
 
 ## Decisions chosen for review
 

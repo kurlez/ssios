@@ -78,8 +78,9 @@ class LocalLibraryModel:
 
 
 def analyze_item(plane, account_id: str, library_id: str, item_id: str, peer_ip: str, model=None) -> dict:
-    from ssios.library import _audit, _lang, _write_item
+    from ssios.library import _audit, _lang, _require, _write_item
 
+    _require(plane, account_id, library_id, "add")
     lang = _lang(plane, account_id)
     item = get_item(plane, account_id, library_id, item_id)
     raw, _mime = item_bytes(plane, account_id, library_id, item_id)
@@ -111,7 +112,10 @@ def analyze_item(plane, account_id: str, library_id: str, item_id: str, peer_ip:
     item["tags"] = current[:40]
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, "library.analyze", item_id, "ok", int(item.get("size") or 0))
-    _write_topic(plane, account_id, library_id, item, peer_ip)
+    from ssios.library_share import reader_ids
+
+    for reader_id in reader_ids(plane, account_id, library_id):
+        _write_topic(plane, reader_id, library_id, item, peer_ip)
     item["result"] = "analyzed"
     return item
 
@@ -142,10 +146,9 @@ def _write_topic(plane, account_id: str, library_id: str, item: dict, peer_ip: s
     from ssios.library import _audit
     from ssios.scope import AccountScope
 
-    account = _account(plane, account_id)
-    scope = AccountScope(plane, account)
+    scope = AccountScope(plane, _account(plane, account_id))
     path = f"topics/library/{item['id']}.md"
-    content = _note(item, library_id, str(account.get("username") or account_id))
+    content = _note(item, library_id, _adder_name(plane, item))
     store = scope.memory()
     proposal = store.propose(scope.project_id(), store.head(scope.project_id()), [{"path": path, "content": content}], task_id="library")
     approval = scope.create_memory_approval(proposal)
@@ -177,6 +180,47 @@ def _note(item: dict, library_id: str, username: str) -> str:
         f"{item.get('description') or ''}\n\n"
         f"Text in the file: {item.get('ocr') or ''}\n"
     )
+
+
+def revoke_recall(plane, account_id: str, item_id: str, peer_ip: str) -> None:
+    """Drop one library note. Search stops seeing it as soon as the forget commits."""
+    from ssios.library import _audit
+    from ssios.scope import AccountScope
+
+    if not item_id.startswith("item-"):
+        return
+    scope = AccountScope(plane, _account(plane, account_id))
+    path = f"topics/library/{item_id}.md"
+    store = scope.memory()
+    try:
+        current = store.read_file(scope.project_id(), path, include_untrusted=True)
+    except SsiosError:
+        return
+    if current.get("tombstone"):
+        return
+    proposal = store.propose_forget(scope.project_id(), store.head(scope.project_id()), path, task_id="library")
+    approval = scope.create_memory_approval(proposal)
+    record = scope.approvals().get(approval["id"])
+    scope.decide(
+        approval["id"],
+        {
+            "decision": "approve",
+            "action": record["action"],
+            "payload_sha256": record["payload_sha256"],
+            "expected_revision": record["expected_revision"],
+            "bound_hash": record["bound_hash"],
+        },
+        peer_ip,
+    )
+    _audit(plane, account_id, peer_ip, "library.memory", item_id, "revoked", 0)
+
+
+def _adder_name(plane, item: dict) -> str:
+    added = str(item.get("added_by") or "")
+    for account in plane.accounts.public_list():
+        if account.get("id") == added and account.get("username"):
+            return str(account["username"])
+    return added or "account"
 
 
 def _account(plane, account_id: str) -> dict:

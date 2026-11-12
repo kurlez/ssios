@@ -321,8 +321,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         mark = " active" if row["id"] == library_id else ""
         switcher.append(
             f'<a class="lib-switch{mark}" href="/ui/library?library={html.escape(row["id"], quote=True)}">'
-            f'{icon("person")}<span>{html.escape(row["name"])}</span>'
-            f'<span class="lib-badge">{html.escape(say(lang, "library_personal"))}</span></a>'
+            f'{_library_badge(row, lang)}<span>{html.escape(row["name"])}</span></a>'
         )
     folders = []
     known = [row for row in meta.get("folders") or [] if isinstance(row, dict)]
@@ -343,8 +342,11 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             thumb = f'<img src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="">'
         else:
             thumb = f'<span class="type-tile">{ext}</span>'
+        avatar = ""
+        if chosen.get("kind") == "shared":
+            avatar = _adder_avatar(plane, item)
         cards.append(
-            f'<a class="lib-card" href="{base}&amp;item={ident}">{thumb}<span>{label}</span><span class="type-badge">{ext}</span></a>'
+            f'<a class="lib-card" href="{base}&amp;item={ident}">{avatar}{thumb}<span>{label}</span><span class="type-badge">{ext}</span></a>'
         )
     inspector = "<p>Select an item.</p>"
     if selected:
@@ -381,12 +383,15 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
                 f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
                 f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
                 "<button name=\"op\" value=\"restore\" type=\"submit\">Restore</button></form>"
-                f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-                f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-                "<label>Type delete to remove the copy <input name=\"confirm\"></label>"
-                "<button name=\"op\" value=\"purge\" type=\"submit\">Delete permanently</button></form>"
             )
+            if chosen.get("role") == "owner":
+                inspector += (
+                    f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+                    f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
+                    f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
+                    "<label>Type delete to remove the copy <input name=\"confirm\"></label>"
+                    "<button name=\"op\" value=\"purge\" type=\"submit\">Delete permanently</button></form>"
+                )
         else:
             inspector += (
                 f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -425,7 +430,9 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
         + '<label>Tag <input name="name" maxlength="40"></label>'
-        + '<button name="op" value="tag" type="submit">Add tag</button></form></div>'
+        + '<button name="op" value="tag" type="submit">Add tag</button></form>'
+        + _share_block(chosen, lang, csrf, library_id)
+        + "</div>"
     )
     grid = (
         f'<form id="library-import" method="post" action="/ui/library" enctype="multipart/form-data">'
@@ -518,6 +525,16 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
 
         stage_core_memory(plane, account_id, library_id, str(body.get("item") or ""), peer_ip)
         return Page(200, library_page(plane, session, {"library": library_id, "item": str(body.get("item") or "")}, f"<p>{html.escape(say(_language(plane, account_id), 'memory_pending'))}</p>"))
+    if op == "share":
+        from ssios.library_share import share_library
+
+        share_library(plane, account_id, library_id, str(body.get("username") or ""), str(body.get("role") or "view"), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id}, "<p>Shared.</p>"))
+    if op == "unshare":
+        from ssios.library_share import unshare_library
+
+        unshare_library(plane, account_id, library_id, str(body.get("username") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id}, "<p>Removed.</p>"))
     if op == "folder":
         add_folder(plane, account_id, library_id, str(body.get("name") or ""), peer_ip)
     elif op == "tag":
@@ -561,6 +578,62 @@ def _upload(body: dict) -> tuple[bytes, str, str]:
     if uploads and isinstance(uploads[0], dict) and isinstance(uploads[0].get("bytes"), (bytes, bytearray)):
         return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker"} else "picker"
     return b"", str(body.get("name") or ""), source
+
+
+def _library_badge(row: dict, lang: str) -> str:
+    if row.get("kind") != "shared":
+        return f'{icon("person")}<span class="lib-badge">{html.escape(say(lang, "library_personal"))}</span>'
+    if row.get("role") == "owner":
+        avatars = "".join(
+            f'<span class="lib-mini" title="{html.escape(str(member.get("username") or ""), quote=True)}">{html.escape(_initial(str(member.get("username") or "")))}</span>'
+            for member in row.get("members") or []
+            if isinstance(member, dict)
+        )
+        return f'{icon("people")}{avatars}<span class="lib-badge">{html.escape(say(lang, "library_shared"))}</span>'
+    label = say(lang, "library_shared_by", name=str(row.get("owner_name") or ""))
+    return f'{icon("people")}<span class="lib-badge">{html.escape(label)}</span>'
+
+
+def _adder_avatar(plane, item: dict) -> str:
+    from ssios.library import _username
+
+    name = _username(plane, str(item.get("added_by") or ""))
+    if not name:
+        return ""
+    return f'<span class="lib-avatar" title="{html.escape(name, quote=True)}">{html.escape(_initial(name))}</span>'
+
+
+def _initial(name: str) -> str:
+    return (name[:1] or "?").upper()
+
+
+def _share_block(chosen: dict, lang: str, csrf: str, library_id: str) -> str:
+    if chosen.get("role") != "owner":
+        return ""
+    options = "".join(
+        f'<option value="{key}">{html.escape(say(lang, label))}</option>'
+        for key, label in (("view", "share_view"), ("add", "share_add"), ("organize", "share_organize"))
+    )
+    members = []
+    for member in chosen.get("members") or []:
+        if not isinstance(member, dict) or not member.get("username"):
+            continue
+        members.append(
+            f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+            f'<input type="hidden" name="username" value="{html.escape(str(member.get("username") or ""), quote=True)}">'
+            f'<span>{html.escape(str(member.get("username") or ""))}</span> '
+            f'<button name="op" value="unshare" type="submit">{html.escape(say(lang, "share_remove"))}</button></form>'
+        )
+    return (
+        "<h2>" + html.escape(say(lang, "library_shared")) + "</h2>"
+        + "".join(members)
+        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + f'<label>{html.escape(say(lang, "share_with"))} <input name="username" maxlength="32"></label>'
+        + f'<label><select name="role">{options}</select></label>'
+        + f'<button name="op" value="share" type="submit">{html.escape(say(lang, "library_shared"))}</button></form>'
+    )
 
 
 def _analysis_block(selected: dict, lang: str, csrf: str, library_id: str, ident: str) -> str:

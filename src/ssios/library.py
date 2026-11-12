@@ -58,8 +58,38 @@ def list_libraries(plane, account_id: str) -> list[dict]:
     index = read_json(plane.accounts.home(account_id) / "library" / "libraries.json", {})
     rows = []
     for row in index.get("libraries") or []:
-        if isinstance(row, dict) and _ID.fullmatch(str(row.get("id") or "")):
-            rows.append({"id": row["id"], "name": str(row.get("name") or "Files"), "kind": "personal"})
+        if not isinstance(row, dict) or not _ID.fullmatch(str(row.get("id") or "")):
+            continue
+        library_id = str(row["id"])
+        if _shared_acl_path(plane, library_id).is_file():
+            role = _role_of(plane, account_id, library_id)
+            if role is None:
+                continue
+            acl = read_json(_shared_acl_path(plane, library_id), {})
+            owner_id = str(acl.get("owner_id") or "")
+            rows.append(
+                {
+                    "id": library_id,
+                    "name": str(acl.get("name") or row.get("name") or "Files"),
+                    "kind": "shared",
+                    "role": role,
+                    "owner_id": owner_id,
+                    "owner_name": _username(plane, owner_id),
+                    "members": _member_rows(plane, acl),
+                }
+            )
+            continue
+        rows.append(
+            {
+                "id": library_id,
+                "name": str(row.get("name") or "Files"),
+                "kind": "personal",
+                "role": "owner",
+                "owner_id": account_id,
+                "owner_name": "",
+                "members": [],
+            }
+        )
     return rows
 
 
@@ -114,6 +144,7 @@ def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str,
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
     if parent_id and not _FOLDER.fullmatch(parent_id):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    _require(plane, account_id, library_id, "organize")
     folder_id = "fld-" + hashlib.sha256(f"{library_id}:{parent_id}:{title}:{_now()}".encode()).hexdigest()[:8]
     data = _metadata(plane, account_id, library_id, create=False, name="")
     data.setdefault("folders", []).append({"id": folder_id, "name": title, "parent_id": parent_id or ""})
@@ -126,6 +157,7 @@ def add_tag(plane, account_id: str, library_id: str, name: str, peer_ip: str) ->
     title = " ".join(str(name or "").split())[:40]
     if not title:
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    _require(plane, account_id, library_id, "add")
     data = _metadata(plane, account_id, library_id, create=False, name="")
     tags = [str(tag) for tag in data.get("tags") or []]
     if title not in tags:
@@ -149,7 +181,7 @@ def import_bytes(
 ) -> dict:
     """Store one finished file. A name or byte conflict is staged until the owner chooses."""
     lang = _lang(plane, account_id)
-    library_or_default(plane, account_id, library_id)
+    _require(plane, account_id, library_id, "add")
     filename = _check_name(name, lang)
     if not isinstance(raw, bytes) or not raw:
         raise SsiosError("library_empty", say(lang, "library_empty"), 400)
@@ -194,7 +226,7 @@ def import_path(
     from pathlib import Path
 
     lang = _lang(plane, account_id)
-    library_or_default(plane, account_id, library_id)
+    _require(plane, account_id, library_id, "add")
     filename = _check_name(name, lang)
     src = Path(path)
     if not src.is_file() or src.is_symlink():
@@ -336,6 +368,15 @@ def item_bytes(plane, account_id: str, library_id: str, item_id: str) -> tuple[b
 
 def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_ip: str, folder_id: str = "", tag: str = "", star: int | None = None, annotation: str | None = None, trash: bool | None = None, restore: bool = False) -> dict:
     item = get_item(plane, account_id, library_id, item_id)
+    if folder_id:
+        _require(plane, account_id, library_id, "organize")
+    elif trash or restore:
+        _require(plane, account_id, library_id, "add")
+        role = _role_of(plane, account_id, library_id) or ""
+        if role != "owner" and str(item.get("added_by") or "") != account_id:
+            raise SsiosError("library_denied", say(_lang(plane, account_id), "library_denied"), 403)
+    else:
+        _require(plane, account_id, library_id, "add")
     action = "library.update"
     if folder_id:
         if not _FOLDER.fullmatch(folder_id):
@@ -371,11 +412,17 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
 
 
 def purge_item(plane, account_id: str, library_id: str, item_id: str, confirm: str, peer_ip: str) -> None:
+    _require(plane, account_id, library_id, "owner")
     if confirm != "delete":
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
     item = get_item(plane, account_id, library_id, item_id)
     if not item.get("trashed"):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    from ssios.library_analyze import revoke_recall
+    from ssios.library_share import reader_ids
+
+    for reader_id in reader_ids(plane, account_id, library_id):
+        revoke_recall(plane, reader_id, item_id, peer_ip)
     path = _item_path(plane, account_id, library_id, item_id)
     if path.is_file() and not path.is_symlink():
         path.unlink()
@@ -810,12 +857,61 @@ def _item_path(plane, account_id: str, library_id: str, item_id: str):
     return _library_root(plane, account_id, library_id) / "items" / f"{item_id}.json"
 
 
+def _shared_acl_path(plane, library_id: str):
+    return plane.settings.state_dir / "shared-libraries" / library_id / "acl.json"
+
+
 def _library_root(plane, account_id: str, library_id: str):
     if not _ID.fullmatch(library_id):
         raise SsiosError("path_rejected", "library id rejected", 400)
+    if _shared_acl_path(plane, library_id).is_file():
+        if _role_of(plane, account_id, library_id) is None:
+            raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
+        return _shared_acl_path(plane, library_id).parent
     root = plane.accounts.home(account_id) / "library" / library_id
     secure_mkdir(root)
     return root
+
+
+_RANK = {"view": 1, "add": 2, "organize": 3, "owner": 4}
+
+
+def _role_of(plane, account_id: str, library_id: str) -> str | None:
+    path = _shared_acl_path(plane, library_id)
+    if not path.is_file():
+        return "owner"
+    acl = read_json(path, {})
+    if not isinstance(acl, dict):
+        return None
+    if acl.get("owner_id") == account_id:
+        return "owner"
+    for member in acl.get("members") or []:
+        if isinstance(member, dict) and member.get("account_id") == account_id and member.get("role") in _RANK:
+            return str(member["role"])
+    return None
+
+
+def _require(plane, account_id: str, library_id: str, minimum: str) -> str:
+    role = _role_of(plane, account_id, library_id)
+    if role is None or _RANK[role] < _RANK[minimum]:
+        raise SsiosError("library_denied", say(_lang(plane, account_id), "library_denied"), 403)
+    return role
+
+
+def _username(plane, account_id: str) -> str:
+    for item in plane.accounts.public_list():
+        if item.get("id") == account_id:
+            return str(item.get("username") or "")
+    return ""
+
+
+def _member_rows(plane, acl: dict) -> list[dict]:
+    rows = []
+    for member in acl.get("members") or []:
+        if not isinstance(member, dict):
+            continue
+        rows.append({"account_id": str(member.get("account_id") or ""), "username": _username(plane, str(member.get("account_id") or "")), "role": str(member.get("role") or "")})
+    return rows
 
 
 def _lang(plane, account_id: str) -> str:
@@ -828,7 +924,7 @@ def _lang(plane, account_id: str) -> str:
 
 def _audit(plane, account_id: str, peer_ip: str, action: str, target: str, result: str, size: int, kind_name: str = "") -> None:
     extra = {"service": "library", "byte_count": str(int(size))}
-    if kind_name in {"identical", "name"}:
+    if kind_name in {"identical", "name", "view", "add", "organize"}:
         extra["reason_code"] = kind_name
     plane.security_audit.write(
         actor=account_id,

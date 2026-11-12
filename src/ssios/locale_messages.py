@@ -84,6 +84,13 @@ MESSAGES = {
         "memory_core": "Copy to core memory",
         "memory_pending": "Waiting for approval before core memory changes.",
         "search_files": "Search files",
+        "library_denied": "You cannot change that.",
+        "library_private": "The personal library stays private. Create another library to share.",
+        "share_with": "Share with",
+        "share_view": "Can view",
+        "share_add": "Can add files and tags",
+        "share_organize": "Can organize folders",
+        "share_remove": "Remove",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -161,6 +168,13 @@ MESSAGES = {
         "memory_core": "复制到核心记忆",
         "memory_pending": "核心记忆要等你批准后才会改。",
         "search_files": "搜索文件",
+        "library_denied": "你不能改这个。",
+        "library_private": "个人库保持私人。要共享请另建一个库。",
+        "share_with": "共享给",
+        "share_view": "可查看",
+        "share_add": "可添加文件和标签",
+        "share_organize": "可整理文件夹",
+        "share_remove": "移除",
     },
 }
 

@@ -32,8 +32,9 @@ def parse_smart_query(text: str) -> dict:
 
 
 def add_smart_folder(plane, account_id: str, library_id: str, name: str, query_text: str, peer_ip: str) -> dict:
-    from ssios.library import _audit, _lang
+    from ssios.library import _audit, _lang, _require
 
+    _require(plane, account_id, library_id, "organize")
     lang = _lang(plane, account_id)
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 1 or title.startswith(".") or "/" in title:
