@@ -2129,7 +2129,7 @@ def english_connector_error(exc: SsiosError) -> str:
 
 
 def public_error(exc: SsiosError) -> str:
-    """A sentence a browser can show. It includes the stable code and no secret."""
+    """A sentence a chat transcript can show. It includes the stable code and no secret."""
     text = english_connector_error(exc)
     code = f"Error code: {exc.code}"
     if code not in text:

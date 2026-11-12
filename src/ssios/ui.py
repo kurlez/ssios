@@ -96,6 +96,10 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         from ssios.library_page import library_raw
 
         return library_raw(plane, session, query)
+    if method == "GET" and path == "/ui/library/thumb":
+        from ssios.library_page import library_thumb
+
+        return library_thumb(plane, session, query)
     if method == "GET" and path == "/ui/tasks":
         return Page(200, _tasks(plane, session, query.get("status", "all")))
     if method == "POST" and path == "/ui/tasks":
@@ -319,12 +323,20 @@ def browser_error_page(detail: str, status: int, *, code: str = "", lang: str = 
     else:
         href, label = "/ui/chat", say(choice, "chat_link")
     title = say(choice, "page_failed_title")
+    code_html = ""
+    if code:
+        code_html = (
+            f'<details class="error-code"><summary>{html.escape(say(choice, "error_details"))}</summary>'
+            f"<p>{html.escape(code)}</p></details>"
+        )
     body = (
         f"<!doctype html><html lang=\"{choice}\"><meta charset=\"utf-8\"><title>{html.escape(title)}</title>"
         + _style_link()
         + f"<body><main><h1>{html.escape(title)}</h1><p>"
         + safe
-        + f'</p><p><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></p></main></body></html>'
+        + "</p>"
+        + code_html
+        + f'<p><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></p></main></body></html>'
     )
     return Page(status, body)
 
@@ -1590,6 +1602,8 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .page { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: none; margin: 0; padding: 0; }
 .sheet { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 .sheet.wide { max-width: 1100px; }
+.page-bleed { max-width: none; height: 100%; overflow: auto; padding: 12px 16px 28px; }
+.page-bleed > h1 { margin: 0 0 12px; font-size: 1.35rem; }
 .menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow: auto; min-height: 0; }
@@ -1661,7 +1675,8 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .file-filters a { text-decoration: none; }
 .file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.library { position: relative; display: grid; grid-template-columns: 200px minmax(0, 1fr) 240px; gap: 16px; align-items: start; }
+.library { position: relative; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.library.has-selection { grid-template-columns: 220px minmax(0, 1fr) 280px; }
 .drop-overlay { position: fixed; inset: 16px; display: none; align-items: center; justify-content: center; border: 3px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--ink); font-size: 1.5rem; font-weight: 600; z-index: 30; pointer-events: none; }
 .drop-overlay.show { display: flex; }
 .lib-folder.drop-hot { outline: 2px solid var(--accent); border-radius: 8px; }
@@ -1671,18 +1686,46 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .drop-log li.ask label { display: flex; flex-direction: row; gap: 6px; align-items: center; }
 .drop-log .bad { color: var(--danger); }
 .drop-log button, .conflict-choice button { width: auto; }
-.conflict-choice { display: flex; gap: 8px; align-items: center; }
-.lib-side, .lib-inspector { display: grid; gap: 8px; align-content: start; }
-.lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 0; }
-.lib-switch.active { font-weight: 600; }
+.conflict-choice { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lib-side, .lib-inspector { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 10px; text-decoration: none; color: var(--ink); }
+.lib-switch.active { background: var(--hover); font-weight: 600; }
 .lib-badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
-.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; min-height: 180px; }
-.lib-card { position: relative; display: grid; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+.lib-nav, .lib-tree { display: grid; gap: 2px; }
+.lib-nav a, .lib-tree a { display: flex; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 8px; text-decoration: none; color: var(--ink); }
+.lib-nav a.active, .lib-tree a.active { background: var(--hover); }
+.lib-count { color: var(--muted); font-size: 12px; }
+.lib-section { border-top: 1px solid var(--line); padding-top: 8px; }
+.lib-section summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-weight: 600; }
+.lib-add { width: 28px; height: 28px; border-radius: 8px; padding: 0; }
+.lib-settings summary { cursor: pointer; color: var(--muted); }
+.lib-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.lib-toolbar form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
+.lib-toolbar label { display: flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+.lib-import { margin-left: auto; }
+.lib-import input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
+.lib-import label.button { border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; cursor: pointer; background: var(--panel); }
+.drop-zone { display: grid; place-items: center; gap: 8px; min-height: 220px; margin-bottom: 12px; border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 12px; min-height: 120px; }
+.lib-card { position: relative; display: grid; gap: 6px; align-content: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-decoration: none; color: var(--ink); min-width: 0; }
+.lib-card .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; line-height: 1.3; }
 .lib-avatar, .lib-mini { width: 22px; height: 22px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 11px; display: inline-grid; place-items: center; }
 .lib-avatar { position: absolute; top: 12px; left: 12px; }
-.lib-card img { width: 100%; height: 96px; object-fit: cover; border-radius: 8px; }
-.type-tile { display: grid; place-items: center; height: 96px; background: var(--hover); border-radius: 8px; font-weight: 600; }
-@media (max-width: 800px) { .library { grid-template-columns: 1fr; } }
+.lib-card img, .lib-thumb { width: 100%; height: 112px; object-fit: contain; background: var(--hover); border-radius: 8px; }
+.lib-preview { width: auto; max-width: 100%; height: auto; max-height: 220px; object-fit: contain; background: var(--hover); border-radius: 12px; }
+.type-tile { display: grid; place-items: center; height: 112px; background: var(--hover); border-radius: 8px; font-weight: 600; }
+.type-tile.modest { width: 120px; height: 150px; }
+.lib-stars { display: flex; gap: 4px; }
+.lib-stars button { width: 32px; padding: 4px 0; }
+.lib-stars .on { color: var(--warn); }
+.lib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lib-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+.lib-actions { display: grid; gap: 8px; margin-top: 8px; }
+@media (max-width: 1100px) {
+  .library, .library.has-selection { grid-template-columns: 200px minmax(0, 1fr); }
+  .lib-inspector { grid-column: 1 / -1; }
+}
+@media (max-width: 800px) { .library, .library.has-selection { grid-template-columns: 1fr; } }
 .file-list { display: grid; gap: 12px; }
 .file-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .file-card input { width: 100%; }
@@ -1956,9 +1999,12 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
     )
 
 
-def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "", wide: bool = False) -> str:
+def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "", wide: bool = False, bleed: bool = False) -> str:
     sheet = "sheet wide" if wide else "sheet"
-    main = body if chat else f"<div class=\"page\"><div class=\"{sheet}\"><h1>{html.escape(title)}</h1>{body}</div></div>"
+    if bleed:
+        main = f'<div class="page page-bleed"><h1>{html.escape(title)}</h1>{body}</div>'
+    else:
+        main = body if chat else f"<div class=\"page\"><div class=\"{sheet}\"><h1>{html.escape(title)}</h1>{body}</div></div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _style_link()

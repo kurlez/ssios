@@ -16,3 +16,4 @@ These are specified there and were not part of the smart-folder, watch, analysis
 ## Still needs a Mac
 
 7. Embedding scores. `./scripts/ssios library-embed-bench` is in place. On this machine the bench stops with `ollama-unreachable` and records no dimensions. Run it on the Mac. It only talks to loopback Ollama and does not download a model. No embedding model is pinned.
+8. PDF first-page thumbnails. The page asks `pdftoppm`, `pdftocairo`, `qlmanage`, or `sips`, in that order, and caches a PNG. This environment has none of those tools, so a PDF shows a drawn PDF tile instead of a broken image. On a Mac, `qlmanage` or `sips` is enough for a real first page.

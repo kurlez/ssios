@@ -141,7 +141,7 @@ def _owned(plane, account_id: str, library_id: str) -> dict:
 def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str, parent_id: str = "") -> dict:
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 1 or "/" in title or title.startswith("."):
-        raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+        raise SsiosError("library_folder_name", say(_lang(plane, account_id), "lib_folder_name"), 400)
     if parent_id and not _FOLDER.fullmatch(parent_id):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
     _require(plane, account_id, library_id, "organize")

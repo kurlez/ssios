@@ -38,11 +38,11 @@ def add_smart_folder(plane, account_id: str, library_id: str, name: str, query_t
     lang = _lang(plane, account_id)
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 1 or title.startswith(".") or "/" in title:
-        raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
+        raise SsiosError("library_smart_name", say(lang, "lib_smart_name"), 400)
     try:
         query = parse_smart_query(query_text)
     except ValueError as exc:
-        raise SsiosError("library_rejected", say(lang, "library_rejected"), 400) from exc
+        raise SsiosError("library_smart_query", say(lang, "lib_smart_query"), 400) from exc
     data = metadata(plane, account_id, library_id)
     folder_id = "smf-" + hashlib.sha256(f"{library_id}:{title}:{_now()}".encode()).hexdigest()[:8]
     while any(isinstance(row, dict) and row.get("id") == folder_id for row in data.get("smart_folders") or []):
@@ -139,7 +139,7 @@ def _positive(text: str) -> dict:
     star = _STAR.fullmatch(text)
     if star:
         return {"field": "star", "cmp": _CMP[star.group(1)], "value": int(star.group(2))}
-    if not text:
+    if not text or not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", text):
         raise ValueError("empty")
     return {"field": "text", "value": text[:80]}
 

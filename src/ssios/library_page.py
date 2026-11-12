@@ -249,6 +249,9 @@ LIBRARY_JS = r"""
     chain.then(finish);
   });
   var picker = form.querySelector("input[type=file]");
+  if (picker) picker.addEventListener("change", function () {
+    if (picker.files && picker.files.length) form.requestSubmit();
+  });
   form.addEventListener("submit", function (event) {
     if (!picker || !picker.files || !picker.files.length) return;
     event.preventDefault();
@@ -262,6 +265,19 @@ LIBRARY_JS = r"""
     });
     chain.then(finish);
   });
+  document.querySelectorAll("img[data-tile]").forEach(function (img) {
+    img.addEventListener("error", function () {
+      var tile = document.createElement("span");
+      tile.className = "type-tile modest";
+      tile.textContent = img.getAttribute("data-tile") || "";
+      img.replaceWith(tile);
+    });
+  });
+  var settings = document.getElementById("lib-settings");
+  var openSettings = document.getElementById("lib-settings-open");
+  if (settings && openSettings && settings.showModal) {
+    openSettings.addEventListener("click", function () { settings.showModal(); });
+  }
 })();
 """
 
@@ -333,122 +349,168 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     tags = []
     for name in meta.get("tags") or []:
         tags.append(f'<a href="{base}&amp;tag={html.escape(str(name), quote=True)}">{html.escape(str(name))}</a>')
+    sort = str(query.get("sort") or "newest")
+    if sort not in {"name", "newest", "size"}:
+        sort = "newest"
+    if sort == "name":
+        items = sorted(items, key=lambda item: str(item.get("name") or "").casefold())
+    elif sort == "size":
+        items = sorted(items, key=lambda item: int(item.get("size") or 0), reverse=True)
+    else:
+        items = sorted(items, key=lambda item: str(item.get("modified_at") or item.get("imported_at") or ""), reverse=True)
+    counts = {
+        "all": len(list_items(plane, account_id, library_id)),
+        "uncategorized": len(list_items(plane, account_id, library_id, uncategorized=True)),
+        "untagged": len(list_items(plane, account_id, library_id, untagged=True)),
+        "trash": len(list_items(plane, account_id, library_id, trash=True)),
+    }
     cards = []
     for item in items:
         ident = html.escape(str(item.get("id") or ""), quote=True)
         label = html.escape(str(item.get("name") or ""))
         ext = html.escape(str(item.get("ext") or "").upper())
+        avatar = _adder_avatar(plane, item) if chosen.get("kind") == "shared" else ""
         if item.get("group") == "image" and item.get("ext") in {"png", "jpg", "gif", "webp", "bmp"}:
-            thumb = f'<img src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="">'
+            thumb = f'<img class="lib-thumb" src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="" data-tile="{ext}">'
         else:
-            thumb = f'<span class="type-tile">{ext}</span>'
-        avatar = ""
-        if chosen.get("kind") == "shared":
-            avatar = _adder_avatar(plane, item)
+            thumb = f'<img class="lib-thumb" src="/ui/library/thumb?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="" data-tile="{ext}">'
         cards.append(
-            f'<a class="lib-card" href="{base}&amp;item={ident}">{avatar}{thumb}<span>{label}</span><span class="type-badge">{ext}</span></a>'
+            f'<a class="lib-card" href="{base}&amp;item={ident}">{avatar}{thumb}<span class="name">{label}</span><span class="type-badge">{ext}</span></a>'
         )
-    inspector = "<p>Select an item.</p>"
+    inspector = ""
     if selected:
         ident = html.escape(str(selected.get("id") or ""), quote=True)
-        preview = ""
-        if selected.get("group") == "image":
-            preview = f'<img class="preview" src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="">'
-        elif selected.get("ext") == "pdf":
-            preview = f'<iframe class="preview" sandbox src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" title="PDF"></iframe>'
+        ext = html.escape(str(selected.get("ext") or "").upper())
+        width, height = _preview_box(selected)
+        if selected.get("group") == "image" and selected.get("ext") in {"png", "jpg", "gif", "webp", "bmp"}:
+            src = f"/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}"
         else:
-            preview = f'<p class="type-tile">{html.escape(str(selected.get("ext") or "").upper())}</p>'
+            src = f"/ui/library/thumb?library={html.escape(library_id, quote=True)}&amp;item={ident}"
+        preview = f'<img class="lib-preview" src="{src}" width="{width}" height="{height}" alt="" data-tile="{ext}">'
         versions = len(selected.get("versions") or [])
+        version_label = say(
+            lang,
+            "lib_meta",
+            kind=str(selected.get("ext") or "").upper(),
+            size=_human_size(int(selected.get("size") or 0)),
+            versions=say(lang, "lib_versions", count=versions),
+        )
         star = int(selected.get("star") or 0)
+        stars = "".join(
+            f'<button type="submit" name="star" value="{n}" class="{"on" if n <= star else ""}" aria-label="{n}">{"★" if n <= star else "☆"}</button>'
+            for n in range(1, 6)
+        )
+        chips = "".join(f'<span class="lib-chip">{html.escape(str(tag))}</span>' for tag in selected.get("tags") or [])
         inspector = (
             preview
             + f"<h2>{html.escape(str(selected.get('name') or ''))}</h2>"
-            + f"<p>{html.escape(str(selected.get('mime') or ''))} · {int(selected.get('size') or 0)} bytes · {versions} version{'s' if versions != 1 else ''}</p>"
-            + (f"<p>Captured {html.escape(str(selected.get('captured_at') or ''))}</p>" if selected.get("captured_at") else "")
-            + f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-            + f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-            + f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-            + f"<label>Star <input name=\"star\" type=\"number\" min=\"0\" max=\"5\" value=\"{star}\"></label>"
-            + "<button name=\"op\" value=\"star\" type=\"submit\">Save rating</button></form>"
-            + f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-            + f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-            + f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-            + "<label>Tag <input name=\"tag\" maxlength=\"40\"></label>"
-            + "<button name=\"op\" value=\"tag-item\" type=\"submit\">Add tag</button></form>"
+            + f"<p>{html.escape(version_label)}</p>"
+            + (f"<p>{html.escape(str(selected.get('captured_at') or ''))}</p>" if selected.get("captured_at") else "")
+            + f"<form method=\"post\" action=\"/ui/library\">{_hidden(csrf, library_id, ident)}"
+            + f'<input type="hidden" name="op" value="star">'
+            + f'<p>{html.escape(say(lang, "lib_star"))}</p><div class="lib-stars">{stars}</div></form>'
+            + f'<div class="lib-chips">{chips}</div>'
+            + f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
+            + '<input type="hidden" name="op" value="tag-item">'
+            + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40"></label>'
+            + f'<button type="submit">{html.escape(say(lang, "lib_add_tag"))}</button></form>'
             + _analysis_block(selected, lang, csrf, library_id, ident)
         )
         if selected.get("trashed"):
             inspector += (
-                f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-                f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-                "<button name=\"op\" value=\"restore\" type=\"submit\">Restore</button></form>"
+                f'<div class="lib-actions"><form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
+                + '<input type="hidden" name="op" value="restore">'
+                + f'<button type="submit">{html.escape(say(lang, "lib_restore"))}</button></form>'
             )
             if chosen.get("role") == "owner":
                 inspector += (
-                    f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                    f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-                    f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-                    "<label>Type delete to remove the copy <input name=\"confirm\"></label>"
-                    "<button name=\"op\" value=\"purge\" type=\"submit\">Delete permanently</button></form>"
+                    f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
+                    + '<input type="hidden" name="op" value="purge">'
+                    + f'<label>{html.escape(say(lang, "lib_purge_hint"))} <input name="confirm"></label>'
+                    + f'<button type="submit">{html.escape(say(lang, "lib_purge"))}</button></form>'
                 )
+            inspector += "</div>"
         else:
             inspector += (
-                f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-                f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-                "<label>Folder <select name=\"folder\">"
+                f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
+                + '<input type="hidden" name="op" value="assign">'
+                + f'<label>{html.escape(say(lang, "lib_folder"))} <select name="folder">'
                 + "".join(
                     f'<option value="{html.escape(str(row.get("id") or ""), quote=True)}">{html.escape(str(row.get("name") or ""))}</option>'
                     for row in meta.get("folders") or []
                     if isinstance(row, dict)
                 )
-                + "</select></label><button name=\"op\" value=\"assign\" type=\"submit\">Add to folder</button></form>"
-                f"<form method=\"post\" action=\"/ui/library\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-                f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
-                f"<input type=\"hidden\" name=\"item\" value=\"{ident}\">"
-                "<button name=\"op\" value=\"trash\" type=\"submit\">Move to trash</button></form>"
+                + "</select></label>"
+                + f'<button type="submit">{html.escape(say(lang, "lib_add_folder"))}</button></form>'
+                + f'<div class="lib-actions"><form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
+                + '<input type="hidden" name="op" value="trash">'
+                + f'<button type="submit">{html.escape(say(lang, "lib_trash_item"))}</button></form></div>'
             )
+    nav = _nav(base, lang, counts, folder, trash, uncategorized, untagged, smart_id)
     left = (
-        '<div class="lib-side"><h2>' + html.escape(say(lang, "library_link")) + "</h2>"
+        '<div class="lib-side">'
         + "".join(switcher)
-        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
-        + '<label>Name <input name="name" maxlength="40"></label>'
-        + '<button name="op" value="create-library" type="submit">Create</button></form>'
-        + f'<p><a href="{base}">All</a> <a href="{base}&amp;uncategorized=1">Uncategorized</a> '
-        + f'<a href="{base}&amp;untagged=1">Untagged</a> <a href="{base}&amp;trash=1">Trash</a></p>'
-        + "<h2>Folders</h2>" + ("".join(f"<p>{row}</p>" for row in folders) or "<p>No folders.</p>")
-        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
-        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        + '<label>Folder <input name="name" maxlength="40"></label>'
-        + '<button name="op" value="folder" type="submit">Add folder</button></form>'
-        + "<h2>" + html.escape(say(lang, "smart_folder")) + "</h2>"
-        + _smart_block(meta, base, lang, csrf, library_id)
-        + "<h2>" + html.escape(say(lang, "watch_folder")) + "</h2>"
-        + _watch_form(meta, lang, csrf, library_id)
-        + "<h2>Tags</h2>" + ("".join(f"<p>{row}</p>" for row in tags) or "<p>No tags.</p>")
-        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
-        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        + '<label>Tag <input name="name" maxlength="40"></label>'
-        + '<button name="op" value="tag" type="submit">Add tag</button></form>'
-        + _share_block(chosen, lang, csrf, library_id)
+        + nav
+        + '<details class="lib-section" open><summary>'
+        + html.escape(say(lang, "lib_folders"))
+        + "</summary>"
+        + '<div class="lib-tree">'
+        + ("".join(folders) or "")
         + "</div>"
+        + "<details><summary>"
+        + html.escape(say(lang, "lib_add"))
+        + "</summary>"
+        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + '<input type="hidden" name="op" value="folder">'
+        + f'<label>{html.escape(say(lang, "lib_folder"))} <input name="name" maxlength="40"></label>'
+        + f'<button type="submit">{html.escape(say(lang, "lib_add_folder_new"))}</button></form></details></details>'
+        + '<details class="lib-section"><summary>'
+        + html.escape(say(lang, "smart_folder"))
+        + "</summary>"
+        + _smart_block(meta, base, lang, csrf, library_id)
+        + "</details>"
+        + '<details class="lib-settings"><summary>'
+        + html.escape(say(lang, "lib_settings"))
+        + "</summary>"
+        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        + '<input type="hidden" name="op" value="create-library">'
+        + f'<label>{html.escape(say(lang, "lib_new_library"))} <input name="name" maxlength="40"></label>'
+        + f'<button type="submit">{html.escape(say(lang, "lib_create"))}</button></form>'
+        + _watch_form(meta, lang, csrf, library_id)
+        + _share_block(chosen, lang, csrf, library_id)
+        + "</details></div>"
+    )
+    empty = counts["all"] == 0 and not trash
+    zone = ""
+    if empty:
+        zone = f'<div class="drop-zone"><p>{html.escape(say(lang, "lib_drop_empty"))}</p></div>'
+    options = "".join(
+        f'<option value="{key}"{" selected" if sort == key else ""}>{html.escape(say(lang, label))}</option>'
+        for key, label in (("newest", "lib_sort_newest"), ("name", "lib_sort_name"), ("size", "lib_sort_size"))
     )
     grid = (
-        f'<form id="library-import" method="post" action="/ui/library" enctype="multipart/form-data">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        f'<input type="hidden" name="op" value="import">'
-        f'<input type="hidden" name="source" value="picker">'
-        '<label>File <input name="file" type="file" multiple></label>'
-        '<button type="submit">Import</button></form>'
+        '<div class="lib-toolbar">'
+        + f'<form method="get" action="/ui/library"><input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + f'<label>{html.escape(say(lang, "search_files"))} <input name="q" value="{html.escape(text_query, quote=True)}" maxlength="200"></label>'
+        + f'<label>{html.escape(say(lang, "lib_sort"))} <select name="sort">{options}</select></label>'
+        + f'<button type="submit">{html.escape(say(lang, "search_files"))}</button></form>'
+        + f'<form id="library-import" class="lib-import" method="post" action="/ui/library" enctype="multipart/form-data">'
+        + f'<input type="hidden" name="csrf" value="{csrf}">'
+        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + '<input type="hidden" name="op" value="import">'
+        + '<input type="hidden" name="source" value="picker">'
+        + f'<label class="button">{html.escape(say(lang, "lib_import"))} <input name="file" type="file" multiple></label>'
+        + "</form></div>"
+        + zone
         + '<div id="library-grid" class="lib-grid">'
-        + ("".join(cards) or "<p>No items.</p>")
+        + ("".join(cards) or f"<p>{html.escape(say(lang, 'lib_empty_view'))}</p>")
         + "</div>"
     )
+    selected_class = " has-selection" if selected else ""
     body = (
         notice
-        + f'<div class="library" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
+        + f'<div class="library{selected_class}" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
         + f'data-overlay="{html.escape(say(lang, "drop_overlay"), quote=True)}" '
         + f'data-directory="{html.escape(say(lang, "drop_directory"), quote=True)}" '
         + f'data-keep="{html.escape(say(lang, "conflict_keep"), quote=True)}" '
@@ -456,24 +518,29 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'data-apply="{html.escape(say(lang, "conflict_apply"), quote=True)}" '
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
-        + "<div>"
-        + f'<form class="file-search" method="get" action="/ui/library">'
-        + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        + f'<label>{html.escape(say(lang, "search_files"))} <input name="q" value="{html.escape(text_query, quote=True)}" maxlength="200"></label>'
-        + f'<button type="submit">{html.escape(say(lang, "search_files"))}</button></form>'
+        + '<div class="lib-main">'
         + '<ol id="drop-log" class="drop-log"></ol><p id="drop-summary"></p>'
         + grid
         + "</div>"
-        + '<aside class="lib-inspector">'
-        + inspector
-        + "</aside>"
+        + (f'<aside class="lib-inspector">{inspector}</aside>' if selected else "")
         + f'<div id="drop-overlay" class="drop-overlay">{html.escape(say(lang, "drop_overlay"))}</div></div>'
     )
     body += f'<script src="{library_script_path()}"></script>'
-    return _page(session, say(lang, "library_link"), body, wide=True)
+    return _page(session, say(lang, "library_link"), body, bleed=True)
 
 
 def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
+    try:
+        return _library_post(plane, session, body, peer_ip)
+    except SsiosError as exc:
+        if not str(exc.code).startswith("library_"):
+            raise
+        library_id = str(body.get("library") or "")
+        notice = f'<p class="notice">{html.escape(exc.detail)}</p>'
+        return Page(200, library_page(plane, session, {"library": library_id, "item": str(body.get("item") or "")}, notice))
+
+
+def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     account_id = session["account"]["id"]
     op = str(body.get("op") or "")
     library_id = str(body.get("library") or "")
@@ -560,6 +627,60 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     return Page(200, library_page(plane, session, {"library": library_id, "item": str(body.get("item") or "")}))
 
 
+def library_thumb(plane, session: dict, query: dict) -> Page:
+    """Always an image. A PDF is a rendered page or the type tile, never the PDF bytes."""
+    from ssios.library_thumb import png_size, preview_png
+
+    account_id = session["account"]["id"]
+    chosen = library_or_default(plane, account_id, str(query.get("library") or ""))
+    item = get_item(plane, account_id, chosen["id"], str(query.get("item") or ""))
+    data = preview_png(plane, account_id, chosen["id"], item)
+    return Page(200, data, content_type="image/png" if data.startswith(b"\x89PNG") else _image_type(item))
+
+
+def _image_type(item: dict) -> str:
+    ext = str(item.get("ext") or "")
+    return {"jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}.get(ext, "image/png")
+
+
+def _preview_box(item: dict) -> tuple[int, int]:
+    if item.get("ext") == "pdf" or item.get("group") != "image":
+        return (160, 200)
+    return (160, 160)
+
+
+def _human_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{round(size / 1024)} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _hidden(csrf: str, library_id: str, item: str = "") -> str:
+    item_html = f'<input type="hidden" name="item" value="{item}">' if item else ""
+    return (
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + item_html
+    )
+
+
+def _nav(base: str, lang: str, counts: dict, folder: str, trash: bool, uncategorized: bool, untagged: bool, smart_id: str) -> str:
+    links = [
+        ("", "lib_all", "all", not folder and not trash and not uncategorized and not untagged and not smart_id),
+        ("&amp;uncategorized=1", "lib_uncategorized", "uncategorized", uncategorized),
+        ("&amp;untagged=1", "lib_untagged", "untagged", untagged),
+        ("&amp;trash=1", "lib_trash", "trash", trash),
+    ]
+    return '<nav class="lib-nav">' + "".join(
+        f'<a class="{"active" if on else ""}" href="{base}{suffix}">{html.escape(say(lang, key))}<span class="lib-count">{counts[count]}</span></a>'
+        for suffix, key, count, on in links
+    ) + "</nav>"
+
+
 def library_raw(plane, session: dict, query: dict) -> Page:
     account_id = session["account"]["id"]
     chosen = library_or_default(plane, account_id, str(query.get("library") or ""))
@@ -630,9 +751,10 @@ def _share_block(chosen: dict, lang: str, csrf: str, library_id: str) -> str:
         + "".join(members)
         + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + '<input type="hidden" name="op" value="share">'
         + f'<label>{html.escape(say(lang, "share_with"))} <input name="username" maxlength="32"></label>'
         + f'<label><select name="role">{options}</select></label>'
-        + f'<button name="op" value="share" type="submit">{html.escape(say(lang, "library_shared"))}</button></form>'
+        + f'<button type="submit">{html.escape(say(lang, "library_shared"))}</button></form>'
     )
 
 
@@ -672,9 +794,11 @@ def _smart_block(meta: dict, base: str, lang: str, csrf: str, library_id: str) -
     form = (
         f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        f'<label>{html.escape(say(lang, "smart_folder"))} <input name="name" maxlength="40"></label>'
-        f'<label>{html.escape(say(lang, "smart_query"))} <input name="query" maxlength="200"></label>'
-        f'<button name="op" value="smart" type="submit">{html.escape(say(lang, "smart_add"))}</button></form>'
+        f'<input type="hidden" name="op" value="smart">'
+        f'<label>{html.escape(say(lang, "lib_name"))} <input name="name" maxlength="40"></label>'
+        f'<label>{html.escape(say(lang, "lib_query"))} <input name="query" maxlength="200" placeholder="{html.escape(say(lang, "smart_query"), quote=True)}"></label>'
+        f'<p>{html.escape(say(lang, "smart_query"))}</p>'
+        f'<button type="submit">{html.escape(say(lang, "smart_add"))}</button></form>'
     )
     return "".join(links) + form
 
@@ -687,11 +811,12 @@ def _watch_form(meta: dict, lang: str, csrf: str, library_id: str) -> str:
     return (
         f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<input type="hidden" name="op" value="watch">'
         f'<p>{html.escape(say(lang, "watch_hint"))}</p>'
         f'<label>{html.escape(say(lang, "watch_folder"))} <input name="path" value="{path}"></label>'
         f'<label><input type="checkbox" name="enabled" value="1"{enabled}> {html.escape(say(lang, "watch_enable"))}</label>'
         f'<label><input type="checkbox" name="delete_source" value="1"{delete}> {html.escape(say(lang, "watch_delete"))}</label>'
-        f'<button name="op" value="watch" type="submit">{html.escape(say(lang, "watch_saved"))}</button></form>'
+        f'<button type="submit">{html.escape(say(lang, "watch_saved"))}</button></form>'
     )
 
 

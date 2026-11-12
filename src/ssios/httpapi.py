@@ -278,10 +278,9 @@ class AppHandler(BaseHTTPRequestHandler):
         return Page(200, data, content_type="application/json; charset=utf-8")
 
     def _browser_failure(self, exc: SsiosError) -> Page:
-        from ssios.chat import public_error
         from ssios.ui import browser_error_page
 
-        detail = public_error(exc)
+        detail = exc.detail
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if path == "/ui/connections":
             try:
