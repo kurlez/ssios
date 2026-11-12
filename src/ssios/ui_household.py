@@ -925,7 +925,9 @@ CHAT_JS = r"""
     summary.textContent = "Details";
     details.appendChild(summary);
     var list = document.createElement("ul");
-    [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]].forEach(function (pair) {
+    var rows = [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]];
+    if (checks.fallback) rows.push(["Guest fallback", String(checks.fallback)]);
+    rows.forEach(function (pair) {
       var li = document.createElement("li");
       li.textContent = pair[0] + ": " + pair[1];
       list.appendChild(li);
@@ -1509,6 +1511,20 @@ def _frame(event: dict) -> str:
     return f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
 
 
+def _check_details_html(checks: dict) -> str:
+    rows = [
+        ("Network", json.dumps(checks.get("nic") or [])),
+        ("Outbound", str(bool(checks.get("outbound"))).lower()),
+        ("Marker", str(bool(checks.get("marker"))).lower()),
+        ("Sandbox denied", str(bool(checks.get("sandbox_denied"))).lower()),
+        ("Outside write", str(bool(checks.get("outside_write"))).lower()),
+    ]
+    if checks.get("fallback"):
+        rows.append(("Guest fallback", str(checks.get("fallback"))))
+    items = "".join(f"<li>{html.escape(label)}: {html.escape(value)}</li>" for label, value in rows)
+    return '<details class="step-details"><summary>Details</summary><ul>' + items + "</ul></details>"
+
+
 def _events_html(session, events: list[dict]) -> str:
     parts = []
     technical = []
@@ -1534,10 +1550,12 @@ def _events_html(session, events: list[dict]) -> str:
                 parts.append("<p class=\"codex-step\">Plan</p>")
             elif phase == "writing":
                 parts.append("<p class=\"codex-step\">Writing the answer</p>")
+            elif phase == "isolation":
+                parts.append(_check_details_html(data.get("checks") if isinstance(data.get("checks"), dict) else {}))
             else:
                 parts.append("<p>Guest: " + html.escape(phase) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
         elif name == "isolation":
-            technical.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
+            parts.append(_check_details_html(data if isinstance(data, dict) else {}))
         elif name == "results":
             blocks = data.get("blocks") or []
             text = str(data.get("text") or "")

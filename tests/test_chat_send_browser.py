@@ -526,6 +526,8 @@ class ChatSendBrowserTest(unittest.TestCase):
             " && !document.body.innerText.includes('Assistant is writing')"
             " && document.querySelector('.steps [data-step=checks] details.step-details')"
             " && !document.querySelector('.steps [data-step=checks] details.step-details').open"
+            " && getComputedStyle(document.querySelector('.steps')).flexWrap === 'nowrap'"
+            " && getComputedStyle(document.querySelector('.steps li')).whiteSpace === 'nowrap'"
             " && !document.querySelector('.msg.assistant .content').innerText.includes('Sandbox denied')",
             timeout=20,
         )

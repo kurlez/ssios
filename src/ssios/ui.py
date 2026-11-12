@@ -1437,10 +1437,10 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .status.denied, .status.expired, .status.missing { background: var(--danger-bg); color: var(--danger); }
 .diff s { color: var(--muted); }
 .diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
-.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; align-items: flex-start; }
-.steps li[data-step="checks"] { display: flex; flex-direction: column; align-items: flex-start; }
-.step-details { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
-.step-details summary { cursor: pointer; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: nowrap; gap: 12px; color: var(--muted); font-size: 13px; align-items: center; white-space: nowrap; }
+.steps li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.step-details { display: inline-flex; margin: 0; color: var(--muted); font-size: 12px; }
+.step-details summary { cursor: pointer; display: inline; }
 .step-details:not([open]) > :not(summary) { display: none; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }

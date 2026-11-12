@@ -602,6 +602,30 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     if calls and any(item.get("status") == "pending" for item in session.results):
         yield from _codex_approvals(scope, conversation_id, session.results)
         return
+    missed = _guest_skipped_connector(message, raw_text, session.results)
+    if missed and not calls:
+        checks = outcome.get("checks") if isinstance(outcome.get("checks"), dict) else {}
+        note = "host " + missed + " read"
+        checks = {**checks, "fallback": note}
+        _audit_isolation(plane, scope, conversation_id, peer_ip, checks)
+        plane.security_audit.write(
+            actor=scope.account_id,
+            ip=peer_ip or "127.0.0.1",
+            action="guest.fallback",
+            target=missed,
+            result="host",
+            extra={"phase": "isolation"},
+        )
+        yield {"event": "status", "data": {"phase": "isolation", "checks": checks, "backend": "host"}}
+        decision = RouteDecision(
+            route="connector",
+            reason="The guest did not call the connector, so this computer read it.",
+            reason_code="guest_fallback",
+            source="rule",
+            services=(missed,),
+        )
+        yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, decision, place)
+        return
     answer = _without_check_lines(present_answer("" if calls else raw_text, session.results))
     checks = outcome.get("checks") if isinstance(outcome.get("checks"), dict) else {}
     if checks:
@@ -627,6 +651,28 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
 
 
 _CHECK_LINE = re.compile(r"^(Network|Outbound|Marker|Sandbox denied|Outside write):.*$")
+
+
+def _guest_skipped_connector(message: str, raw_text: str, results: list[dict]) -> str:
+    """A mail, calendar, or drive turn with no connector call. Empty when the guest used the tool."""
+    from ssios.chat_router import _services
+
+    services = _services(message)
+    needed = next((name for name in ("gmail", "calendar", "drive") if name in services), "")
+    if not needed:
+        return ""
+    prefix = {"gmail": "gmail", "calendar": "calendar", "drive": "drive"}[needed]
+    for item in results:
+        if str(item.get("tool") or "").startswith(prefix):
+            return ""
+    folded = str(raw_text or "").casefold()
+    missing = any(
+        phrase in folded
+        for phrase in ("not supported", "isn't supported", "is not supported", "don't have access", "do not have access", "no access", "not available")
+    )
+    if results and not missing:
+        return ""
+    return needed
 
 
 def _without_check_lines(text: str) -> str:

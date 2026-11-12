@@ -639,7 +639,7 @@ class HouseholdTest(PlaneTest):
         vm = self._send(self.owner, "edit readme.md")
         self.assertIn("Route: vm", vm)
         self.assertIn("Guest: booting", vm)
-        self.assertIn("sandbox_denied", vm)
+        self.assertIn("Sandbox denied", vm)
         self.assertIn("Synthetic guest result. Nothing was applied.", vm)
         self.assertIn("Approve", vm)
         self.assertEqual(len(self.guest.prompts), 1)
