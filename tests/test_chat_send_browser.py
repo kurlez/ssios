@@ -36,30 +36,51 @@ class _Page:
     """A few DevTools calls against headless Chrome. No extra packages."""
 
     def __init__(self, binary: str) -> None:
+        self.proc = None
+        self.profile = None
+        self._sock = None
+        self.errors: list[str] = []
+        self._id = 0
+        self._buf = b""
+        self.port = 0
+        last = "Chrome did not open a debugging port"
+        for _attempt in range(3):
+            try:
+                self._boot(binary)
+                return
+            except Exception as exc:
+                last = str(exc)
+                self.close()
+                time.sleep(0.3)
+        raise RuntimeError(last)
+
+    def _boot(self, binary: str) -> None:
         self.port = _port()
         self.profile = Path(f"/tmp/ssios-chat-browser-{self.port}")
         self.profile.mkdir(parents=True, exist_ok=True)
+        self._err = self.profile / "chrome.err"
+        self._log = self._err.open("w")
         self.proc = subprocess.Popen(
             [
                 binary,
                 "--headless=new",
                 "--disable-gpu",
                 "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
                 "--remote-allow-origins=*",
                 f"--remote-debugging-port={self.port}",
                 f"--user-data-dir={self.profile}",
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=self._log,
         )
-        self.errors: list[str] = []
-        self._id = 0
-        self._sock = None
-        self._buf = b""
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         version = None
         while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                break
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/version", timeout=0.5) as response:
                     version = json.loads(response.read().decode())
@@ -67,15 +88,19 @@ class _Page:
             except Exception:
                 time.sleep(0.1)
         if not version:
-            self.close()
-            raise RuntimeError("Chrome did not open a debugging port")
+            detail = ""
+            try:
+                self._log.flush()
+                detail = self._err.read_text(encoding="utf-8", errors="replace")[-400:]
+            except OSError:
+                detail = ""
+            raise RuntimeError("Chrome did not open a debugging port. " + " ".join(detail.split()))
         try:
             request = urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")
             with urllib.request.urlopen(request, timeout=5) as response:
                 target = json.loads(response.read().decode())
-        except Exception:
-            self.close()
-            raise
+        except Exception as exc:
+            raise RuntimeError("Chrome did not open a page target") from exc
         self._connect(target["webSocketDebuggerUrl"])
         self.call("Runtime.enable")
         self.call("Network.enable")
@@ -87,13 +112,24 @@ class _Page:
                 self._sock.close()
             except Exception:
                 pass
-        if self.proc.poll() is None:
-            self.proc.terminate()
+            self._sock = None
+        proc = getattr(self, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
             try:
-                self.proc.wait(timeout=3)
+                proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
-        shutil.rmtree(self.profile, ignore_errors=True)
+                proc.kill()
+        log = getattr(self, "_log", None)
+        if log is not None:
+            try:
+                log.close()
+            except Exception:
+                pass
+            self._log = None
+        profile = getattr(self, "profile", None)
+        if profile is not None:
+            shutil.rmtree(profile, ignore_errors=True)
 
     def call(self, method: str, params: dict | None = None, timeout: float = 10) -> dict:
         self._id += 1
