@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — 2026-11-12
+
+Household chat release. The package version is `0.2.0` (`pyproject.toml` and `ssios.__version__`). Synthetic data only. The scorecard mean is 90 / 100.
+
+- Chat UI: a three-pane page (icon rail, thread list, composer), local Markdown and KaTeX, per-account history, and an approval card that stays in the transcript.
+- Household accounts: each account has its own chat, memory, files, and tokens. An admin cannot read another account's mail or memory.
+- Gmail, Drive, and Calendar connectors. Reads run on this computer. Calendar writes still wait for one approval. A refresh `invalid_grant` clears that service's token and the card says Needs reconnect.
+- Codex on the main chat route inside the no-NIC `macos-vz` guest. Explicit commands stay on the host. Choosing VM still sends that turn to the guest. A story or other no-tool request is answered in the final message. Isolation checks sit under Details on the Checks chip and are written to the audit log.
+- Substack and WeChat article fetch on the host, with a site session for a paid page and a separate reply for a paywall, a verification check, or a deleted article.
+- Clipboard paste of screenshots, including Snipaste BMP and empty types, shown in the composer and stored once. An image is read by `qwen2.5vl:7b`.
+- Weather skill on this computer, with place disambiguation, a saved default city, and replies in the language of the latest message.
+- Per-account memory for a chosen city, stated preferences, corrections, and language or units from Settings. A name the user asks to remember still waits for approval.
+- Router: rules first, then an optional small classifier (`qwen3:1.7b` or `qwen3:4b`) that only labels the turn. A timeout or a low score stays on local chat.
+- `model-bench` and `router-bench`. `router-bench --rules-only` runs in CI and does not call Ollama.
+
 ## 0.1.0 — 2026-11-10
 
 First prototype release of SSIOS, a local personal Agent OS. The package version is `0.1.0` (`pyproject.toml` and `ssios.__version__`).
