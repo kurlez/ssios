@@ -54,7 +54,7 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Weather and web fetch on the host, SSRF checks, untrusted pages | A free-form place stays on the weather skill. A geocode miss is city_not_found, and the local model is not asked for a live forecast | `tests/test_skills.py`; `tests/test_weather_followup.py` | 86 |
 | Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes opens for a household account. An empty clip, an oversize clip, and a rejected vault path each have their own message | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; `tests/test_notes_clip.py`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
 | Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | A tool result completes the matching goal and undo reopens it. A page read does not. Pages poll notices that remain after restart. The Tasks list is a checkbox list from the stored goals. Checking a box stages an approval | `tests/test_goals.py` `GoalChatLoopTest`; `tests/test_reminders.py` `NoticeBadgeTest`; `tests/test_task_checklist.py`; screenshot `tasks-checklist-1280.png` | 90 |
-| M1 Files | Files imports a stripped image and a PDF, versions a re-import, and rejects archives, programs, hidden files, and source files. A drop can include several files. A dropped directory is skipped and is not walked. Another account cannot read the bytes | `tests/test_library.py`; `tests/test_library_drop.py`; screenshot `files-drop-1280.png` | 90 |
+| M1 Files | Files imports a stripped image and a PDF and rejects archives, programs, hidden files, and source files. A drop can include several files. A dropped directory is skipped and is not walked. The same name or the same bytes asks Keep existing or Replace with new, and that choice is audited. Another account cannot read the bytes | `tests/test_library.py`; `tests/test_library_drop.py`; screenshots `files-drop-1280.png` and `files-conflict-1280.png` | 90 |
 
 ## Total
 
@@ -62,6 +62,6 @@ Mean of the 29 rows above: **90 / 100** (2613 / 29).
 
 `PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 314 ran, 307 passed, 7 skipped.
 
-Screenshots, synthetic data only: `tasks-badge-1280.png`, `tasks-checklist-1280.png`, `files-m1-1280.png`, `files-drop-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
+Screenshots, synthetic data only: `tasks-badge-1280.png`, `tasks-checklist-1280.png`, `files-m1-1280.png`, `files-drop-1280.png`, `files-conflict-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 
 Still for a Mac: Keychain unlock, a real Google reconnect click, a real macOS notification, and KaTeX font files in the browser on that machine. This VM checked the Linux UI, the poll banner, and the vendored renderer.

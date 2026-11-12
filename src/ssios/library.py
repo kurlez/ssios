@@ -134,7 +134,7 @@ def import_bytes(
     peer_ip: str,
     folder_id: str = "",
 ) -> dict:
-    """Store one finished file. The same name gains a version. Bytes are not overwritten."""
+    """Store one finished file. A name or byte conflict is staged until the owner chooses."""
     lang = _lang(plane, account_id)
     library_or_default(plane, account_id, library_id)
     filename = _check_name(name, lang)
@@ -147,6 +147,9 @@ def import_bytes(
     captured = _captured(raw) if kind["group"] == "image" else ""
     stored = _clean(raw, kind)
     digest = hashlib.sha256(stored).hexdigest()
+    conflict = _find_conflict(plane, account_id, library_id, filename, digest, folder_id)
+    if conflict is not None:
+        return _stage_conflict(plane, account_id, library_id, stored, conflict, filename, kind, captured, source, folder_id)
     _put_blob(plane, account_id, library_id, digest, kind["ext"], stored)
     return _record_item(
             plane,
@@ -203,7 +206,14 @@ def import_path(
             peer_ip=peer_ip,
             folder_id=folder_id,
         )
-    digest, stored_size = _store_stream(plane, account_id, library_id, src, kind["ext"])
+    digest, stored_size, incoming = _write_incoming(plane, account_id, library_id, src)
+    conflict = _find_conflict(plane, account_id, library_id, filename, digest, folder_id)
+    if conflict is not None:
+        if conflict["conflict_kind"] == "identical":
+            incoming.unlink(missing_ok=True)
+            return _stage_conflict(plane, account_id, library_id, None, conflict, filename, kind, "", source, folder_id, digest=digest, size=stored_size)
+        return _stage_conflict(plane, account_id, library_id, None, conflict, filename, kind, "", source, folder_id, digest=digest, size=stored_size, incoming=incoming)
+    _publish_incoming(plane, account_id, library_id, incoming, digest, kind["ext"])
     return _record_item(
         plane,
         account_id,
@@ -252,6 +262,16 @@ def import_relative(
         )
     except SsiosError as exc:
         return {"path": shown, "status": "rejected", "code": exc.code, "reason": exc.detail, "id": ""}
+    if saved.get("result") == "conflict":
+        return {
+            "path": shown,
+            "status": "conflict",
+            "code": saved.get("conflict_kind") or "",
+            "reason": saved.get("reason") or "",
+            "id": saved.get("id") or "",
+            "conflict_id": saved.get("conflict_id") or "",
+            "default": saved.get("default") or "",
+        }
     status = "version" if saved.get("result") == "version" else "saved"
     reason = say(lang, "drop_version" if status == "version" else "drop_saved")
     return {"path": shown, "status": status, "code": "", "reason": reason, "id": saved.get("id") or ""}
@@ -260,7 +280,7 @@ def import_relative(
 def drop_summary(lang: str, results: list[dict]) -> str:
     saved = sum(1 for row in results if row.get("status") == "saved")
     versions = sum(1 for row in results if row.get("status") == "version")
-    skipped = sum(1 for row in results if row.get("status") == "rejected")
+    skipped = sum(1 for row in results if row.get("status") in {"rejected", "kept"})
     return say(lang, "drop_summary", saved=saved, versions=versions, skipped=skipped)
 
 
@@ -490,11 +510,14 @@ def _record_item(
     source: str,
     peer_ip: str,
     folder_id: str,
+    existing_id: str = "",
 ) -> dict:
     stamp = _now()
     with _LOCK:
         items = _items(plane, account_id, library_id)
-        match = next((item for item in items if not item.get("trashed") and str(item.get("name") or "").casefold() == filename.casefold()), None)
+        match = next((item for item in items if item.get("id") == existing_id), None) if existing_id else None
+        if existing_id and match is None:
+            raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
         version = {"sha256": digest, "size": size, "imported_at": stamp}
         folders = [folder_id] if folder_id else []
         if match is None:
@@ -551,7 +574,7 @@ def _record_item(
 _CHUNK = 1024 * 1024
 
 
-def _store_stream(plane, account_id: str, library_id: str, src, ext: str) -> tuple[str, int]:
+def _write_incoming(plane, account_id: str, library_id: str, src):
     import secrets
     from pathlib import Path
 
@@ -569,13 +592,133 @@ def _store_stream(plane, account_id: str, library_id: str, src, ext: str) -> tup
             out.write(chunk)
             size += len(chunk)
     incoming.chmod(0o600)
-    final = folder / f"{digest.hexdigest()}.{ext}"
+    return digest.hexdigest(), size, incoming
+
+
+def _publish_incoming(plane, account_id: str, library_id: str, incoming, digest: str, ext: str) -> None:
+    final = _library_root(plane, account_id, library_id) / "objects" / f"{digest}.{ext}"
     if final.exists():
-        incoming.unlink()
-    else:
-        incoming.replace(final)
-        final.chmod(0o600)
-    return digest.hexdigest(), size
+        incoming.unlink(missing_ok=True)
+        return
+    incoming.replace(final)
+    final.chmod(0o600)
+
+
+def _find_conflict(plane, account_id: str, library_id: str, filename: str, digest: str, folder_id: str):
+    items = [item for item in _items(plane, account_id, library_id) if not item.get("trashed")]
+    identical = next((item for item in items if item.get("sha256") == digest), None)
+    if identical is not None:
+        return {"item": identical, "conflict_kind": "identical"}
+    named = next(
+        (
+            item
+            for item in items
+            if str(item.get("name") or "").casefold() == filename.casefold() and _same_folder(item, folder_id)
+        ),
+        None,
+    )
+    if named is not None and named.get("sha256") != digest:
+        return {"item": named, "conflict_kind": "name"}
+    return None
+
+
+def _same_folder(item: dict, folder_id: str) -> bool:
+    folders = item.get("folder_ids") if isinstance(item.get("folder_ids"), list) else []
+    if folder_id:
+        return folder_id in folders
+    return not folders
+
+
+def _stage_conflict(plane, account_id, library_id, stored, conflict, filename, kind, captured, source, folder_id, digest: str = "", size: int = 0, incoming=None) -> dict:
+    import secrets
+
+    lang = _lang(plane, account_id)
+    kind_name = conflict["conflict_kind"]
+    item = conflict["item"]
+    conflict_id = "conf-" + secrets.token_hex(8)
+    folder = _library_root(plane, account_id, library_id) / "staging"
+    secure_mkdir(folder)
+    if stored is not None:
+        target = folder / f"{conflict_id}.bin"
+        target.write_bytes(stored)
+        target.chmod(0o600)
+        digest = hashlib.sha256(stored).hexdigest()
+        size = len(stored)
+    elif incoming is not None:
+        incoming.replace(folder / f"{conflict_id}.bin")
+        (folder / f"{conflict_id}.bin").chmod(0o600)
+    meta = {
+        "id": conflict_id,
+        "item_id": item["id"],
+        "conflict_kind": kind_name,
+        "filename": filename,
+        "ext": kind["ext"],
+        "mime": kind["mime"],
+        "group": kind["group"],
+        "digest": digest,
+        "size": size,
+        "captured": captured,
+        "source": source,
+        "folder_id": folder_id,
+    }
+    write_json(folder / f"{conflict_id}.json", meta)
+    return {
+        "result": "conflict",
+        "id": item["id"],
+        "conflict_id": conflict_id,
+        "conflict_kind": kind_name,
+        "reason": say(lang, "conflict_identical" if kind_name == "identical" else "conflict_name"),
+        "default": "keep" if kind_name == "identical" else "",
+        "version_count": len(item.get("versions") or []),
+    }
+
+
+def resolve_conflict(plane, account_id: str, library_id: str, conflict_id: str, decision: str, peer_ip: str) -> dict:
+    import re as _re
+
+    lang = _lang(plane, account_id)
+    if not _re.fullmatch(r"conf-[0-9a-f]{16}", conflict_id) or decision not in {"keep", "replace"}:
+        raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
+    folder = _library_root(plane, account_id, library_id) / "staging"
+    meta_path = folder / f"{conflict_id}.json"
+    blob_path = folder / f"{conflict_id}.bin"
+    meta = read_json(meta_path, {})
+    if not isinstance(meta, dict) or meta.get("id") != conflict_id:
+        raise SsiosError("library_missing", say(lang, "library_missing"), 404)
+    kind_name = str(meta.get("conflict_kind") or "")
+    if decision == "keep":
+        _audit(plane, account_id, peer_ip, "library.keep", str(meta.get("item_id") or ""), "kept", int(meta.get("size") or 0), kind_name)
+        _drop_stage(meta_path, blob_path)
+        return {"status": "kept", "code": kind_name, "reason": say(lang, "conflict_kept"), "id": meta.get("item_id") or "", "path": meta.get("filename") or ""}
+    digest = str(meta.get("digest") or "")
+    ext = str(meta.get("ext") or "")
+    if blob_path.is_file():
+        _publish_incoming(plane, account_id, library_id, blob_path, digest, ext)
+    elif not (_library_root(plane, account_id, library_id) / "objects" / f"{digest}.{ext}").is_file():
+        raise SsiosError("library_missing", say(lang, "library_missing"), 404)
+    saved = _record_item(
+        plane,
+        account_id,
+        library_id,
+        filename=str(meta.get("filename") or ""),
+        kind={"ext": meta.get("ext"), "mime": meta.get("mime"), "group": meta.get("group")},
+        digest=str(meta.get("digest") or ""),
+        size=int(meta.get("size") or 0),
+        captured=str(meta.get("captured") or ""),
+        source=str(meta.get("source") or "drag"),
+        peer_ip=peer_ip,
+        folder_id=str(meta.get("folder_id") or ""),
+        existing_id=str(meta.get("item_id") or ""),
+    )
+    _audit(plane, account_id, peer_ip, "library.replace", saved["id"], "version", int(meta.get("size") or 0), kind_name)
+    _drop_stage(meta_path, blob_path)
+    return {"status": "version", "code": kind_name, "reason": say(lang, "drop_version"), "id": saved["id"], "path": meta.get("filename") or ""}
+
+
+def _drop_stage(meta_path, blob_path) -> None:
+    for path in (meta_path, blob_path):
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
 
 
 def _put_blob(plane, account_id: str, library_id: str, digest: str, ext: str, stored: bytes) -> None:
@@ -667,14 +810,17 @@ def _lang(plane, account_id: str) -> str:
     return lang if lang in {"en", "zh"} else "en"
 
 
-def _audit(plane, account_id: str, peer_ip: str, action: str, target: str, result: str, size: int) -> None:
+def _audit(plane, account_id: str, peer_ip: str, action: str, target: str, result: str, size: int, kind_name: str = "") -> None:
+    extra = {"service": "library", "byte_count": str(int(size))}
+    if kind_name in {"identical", "name"}:
+        extra["reason_code"] = kind_name
     plane.security_audit.write(
         actor=account_id,
         ip=peer_ip or "127.0.0.1",
         action=action,
         target=str(target)[:80],
         result=result,
-        extra={"service": "library", "byte_count": str(int(size))},
+        extra=extra,
     )
 
 

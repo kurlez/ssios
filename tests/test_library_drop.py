@@ -145,10 +145,41 @@ class DropImportTest(PlaneTest):
             second = import_path(
                 self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
             )
-            self.assertEqual(second["result"], "version")
-            self.assertEqual(second["version_count"], 2)
+            self.assertEqual(second["result"], "conflict")
+            self.assertEqual(second["conflict_kind"], "name")
+            from ssios.library import get_item, resolve_conflict
+
+            kept = resolve_conflict(self.plane, self.account["id"], self.library_id, second["conflict_id"], "keep", "127.0.0.1")
+            self.assertEqual(kept["status"], "kept")
+            self.assertEqual(len(get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]), 1)
+            path.write_bytes(b"%PDF-1.4\nhello again")
+            third = import_path(
+                self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
+            )
+            replaced = resolve_conflict(self.plane, self.account["id"], self.library_id, third["conflict_id"], "replace", "127.0.0.1")
+            self.assertEqual(replaced["status"], "version")
+            versions = get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]
+            self.assertEqual(len(versions), 2)
+            self.assertNotEqual(versions[0]["sha256"], versions[1]["sha256"])
+            same = import_path(
+                self.plane, self.account["id"], self.library_id, path, name="other.pdf", source="drag", peer_ip="127.0.0.1"
+            )
+            self.assertEqual(same["conflict_kind"], "identical")
+            self.assertEqual(same["default"], "keep")
+            self.assertIn("already in the library", same["reason"])
+            kept_same = resolve_conflict(self.plane, self.account["id"], self.library_id, same["conflict_id"], "keep", "127.0.0.1")
+            self.assertEqual(kept_same["status"], "kept")
             objects = list((self.plane.accounts.home(self.account["id"]) / "library" / self.library_id / "objects").glob("*.pdf"))
             self.assertEqual(len(objects), 2)
+            import json
+
+            rows = [json.loads(line) for line in (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            keeps = [row for row in rows if row.get("action") == "library.keep"]
+            replaces = [row for row in rows if row.get("action") == "library.replace"]
+            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in keeps))
+            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "identical" for row in keeps))
+            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in replaces))
+            self.assertNotIn("sheet.pdf", json.dumps(rows))
             import ssios.library as library
 
             original = library.DOCUMENT_LIMIT
@@ -245,6 +276,13 @@ class PlaywrightDropTest(PlaneTest):
             self.assertIn("不支持拖入文件夹，请拖入文件。", text)
             self.assertNotIn("harbor.png", text)
             self.assertNotIn("notes.zip", text)
+            page.evaluate("() => window.__drop(['one.png'])")
+            page.wait_for_selector("#drop-log button.primary")
+            page.locator("#drop-log label input").check()
+            page.locator("#drop-log button.primary").click()
+            page.wait_for_function("() => (document.getElementById('drop-log').innerText || '').includes('保留了之前的文件')")
+            page.evaluate("() => window.__drop(['two.png'])")
+            page.wait_for_function("() => (document.getElementById('drop-log').innerText.match(/保留了之前的文件/g) || []).length >= 2")
             browser.close()
 
 

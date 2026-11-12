@@ -60,6 +60,12 @@ MESSAGES = {
         "drop_saved": "Saved.",
         "drop_version": "Saved as a new version.",
         "drop_summary": "Saved {saved}. New versions {versions}. Skipped {skipped}.",
+        "conflict_name": "A file with this name is already in this folder.",
+        "conflict_identical": "This file is already in the library.",
+        "conflict_keep": "Keep existing",
+        "conflict_replace": "Replace with new",
+        "conflict_apply": "Apply to all remaining conflicts",
+        "conflict_kept": "Kept the existing file.",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -113,6 +119,12 @@ MESSAGES = {
         "drop_saved": "已保存。",
         "drop_version": "已存为新版本。",
         "drop_summary": "保存了 {saved} 个。新版本 {versions} 个。跳过了 {skipped} 个。",
+        "conflict_name": "这个文件夹里已经有同名文件。",
+        "conflict_identical": "这个文件已经在文件库里。",
+        "conflict_keep": "保留之前的文件",
+        "conflict_replace": "更新为之后的文件",
+        "conflict_apply": "对剩下的冲突都这样处理",
+        "conflict_kept": "保留了之前的文件。",
     },
 }
 

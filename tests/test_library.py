@@ -19,10 +19,10 @@ def _chunk(tag: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
 
-def _png() -> bytes:
+def _png(red: int = 255) -> bytes:
     sig = b"\x89PNG\r\n\x1a\n"
     ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-    return sig + ihdr + _chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + _chunk(b"IEND", b"")
+    return sig + ihdr + _chunk(b"IDAT", zlib.compress(bytes((0, red, 0, 0)))) + _chunk(b"IEND", b"")
 
 
 PNG = _png()
@@ -30,8 +30,9 @@ PNG = _png()
 
 def _png_text() -> bytes:
     block = _chunk(b"tEXt", b"Comment\x00GPSLatitude")
-    pos = PNG.rfind(b"IEND") - 4
-    return PNG[:pos] + block + PNG[pos:]
+    raw = _png(1)
+    pos = raw.rfind(b"IEND") - 4
+    return raw[:pos] + block + raw[pos:]
 
 
 class LibraryTest(PlaneTest):
@@ -82,9 +83,20 @@ class LibraryTest(PlaneTest):
         self.assertNotIn(b"GPSLatitude", blob)
         self.assertNotIn(b"tEXt", blob)
 
-        status, again = self._file(csrf, library_id, "harbor-desk.png", PNG, "drag")
+        status, again = self._file(csrf, library_id, "harbor-desk.png", _png(2), "drag")
         self.assertEqual(status, 200, again)
-        self.assertIn("2 version", again)
+        self.assertIn("Keep existing", again)
+        self.assertIn("Replace with new", again)
+        self.assertNotIn("2 version", again)
+        conflict = again.split('name="conflict" value="', 1)[1].split('"', 1)[0]
+        status, replaced, _cookie = _form(
+            self.base,
+            "/ui/library",
+            {"csrf": csrf, "op": "resolve", "library": library_id, "conflict": conflict, "decision": "replace"},
+            cookie=self.cookie,
+        )
+        self.assertEqual(status, 200, replaced)
+        self.assertIn("Saved as a new version.", replaced)
         objects = list((self.plane.accounts.home(self.owner["id"]) / "library" / library_id / "objects").glob("*"))
         self.assertGreaterEqual(len(objects), 1)
         names = {path.name.split(".", 1)[0] for path in objects}
@@ -116,6 +128,7 @@ class LibraryTest(PlaneTest):
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertIn("library.import", audit)
         self.assertIn("library.version", audit)
+        self.assertIn("library.replace", audit)
         self.assertNotIn("harbor-desk.png", audit)
         self.assertNotIn("GPSLatitude", audit)
 

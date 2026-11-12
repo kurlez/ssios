@@ -1667,7 +1667,11 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-folder.drop-hot { outline: 2px solid var(--accent); border-radius: 8px; }
 .drop-log { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; }
 .drop-log li { font-size: 13px; }
+.drop-log li.ask { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.drop-log li.ask label { display: flex; flex-direction: row; gap: 6px; align-items: center; }
 .drop-log .bad { color: var(--danger); }
+.drop-log button, .conflict-choice button { width: auto; }
+.conflict-choice { display: flex; gap: 8px; align-items: center; }
 .lib-side, .lib-inspector { display: grid; gap: 8px; align-content: start; }
 .lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 0; }
 .lib-switch.active { font-weight: 600; }

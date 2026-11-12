@@ -36,6 +36,7 @@ LIBRARY_JS = r"""
   var overlay = document.getElementById("drop-overlay");
   var log = document.getElementById("drop-log");
   var summary = document.getElementById("drop-summary");
+  var applyChoice = "";
   var depth = 0;
   var hot = null;
   var generation = 0;
@@ -104,6 +105,14 @@ LIBRARY_JS = r"""
         var payload = {};
         try { payload = JSON.parse(xhr.responseText || "{}"); } catch (err) { payload = {}; }
         var result = (payload.results && payload.results[0]) || {path: row.path, status: "rejected", reason: xhr.statusText || "rejected"};
+        if (result.status === "conflict") {
+          if (applyChoice) {
+            postDecision(result, applyChoice, line).then(resolve);
+            return;
+          }
+          askConflict(result, line).then(resolve);
+          return;
+        }
         line.textContent = result.path + " — " + (result.reason || result.status);
         line.className = result.status === "rejected" ? "bad" : "ok";
         resolve(result);
@@ -114,6 +123,58 @@ LIBRARY_JS = r"""
         resolve({path: row.path, status: "rejected", reason: "rejected"});
       };
       xhr.send(data);
+    });
+  }
+  function postDecision(result, decision, line) {
+    return new Promise(function (resolve) {
+      var data = new FormData();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("conflict", result.conflict_id || "");
+      data.set("decision", decision);
+      data.set("relative", result.path || "");
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/ui/library/drop");
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.onload = function () {
+        var payload = {};
+        try { payload = JSON.parse(xhr.responseText || "{}"); } catch (err) { payload = {}; }
+        var decided = (payload.results && payload.results[0]) || {path: result.path, status: "rejected", reason: "rejected"};
+        line.textContent = (decided.path || result.path) + " — " + (decided.reason || decided.status);
+        line.className = decided.status === "version" || decided.status === "kept" ? "ok" : "bad";
+        resolve(decided);
+      };
+      xhr.send(data);
+    });
+  }
+  function askConflict(result, line) {
+    return new Promise(function (resolve) {
+      line.textContent = (result.path || "") + " — " + (result.reason || "");
+      line.className = "ask";
+      var keep = document.createElement("button");
+      keep.type = "button";
+      keep.textContent = app.getAttribute("data-keep") || "Keep existing";
+      if (result.default === "keep") keep.className = "primary";
+      var replace = document.createElement("button");
+      replace.type = "button";
+      replace.textContent = app.getAttribute("data-replace") || "Replace with new";
+      var apply = document.createElement("label");
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      apply.appendChild(box);
+      apply.appendChild(document.createTextNode(app.getAttribute("data-apply") || "Apply to all remaining conflicts"));
+      function choose(decision) {
+        if (box.checked) applyChoice = decision;
+        keep.disabled = true;
+        replace.disabled = true;
+        postDecision(result, decision, line).then(resolve);
+      }
+      keep.addEventListener("click", function () { choose("keep"); });
+      replace.addEventListener("click", function () { choose("replace"); });
+      line.appendChild(document.createTextNode(" "));
+      line.appendChild(keep);
+      line.appendChild(replace);
+      line.appendChild(apply);
     });
   }
   function finish(results) {
@@ -366,6 +427,9 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<div class="library" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
         + f'data-overlay="{html.escape(say(lang, "drop_overlay"), quote=True)}" '
         + f'data-directory="{html.escape(say(lang, "drop_directory"), quote=True)}" '
+        + f'data-keep="{html.escape(say(lang, "conflict_keep"), quote=True)}" '
+        + f'data-replace="{html.escape(say(lang, "conflict_replace"), quote=True)}" '
+        + f'data-apply="{html.escape(say(lang, "conflict_apply"), quote=True)}" '
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
         + "<div>"
@@ -390,9 +454,16 @@ def library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         return Page(200, library_page(plane, session, {"library": created["id"]}, "<p>Created.</p>"))
     chosen = library_or_default(plane, account_id, library_id)
     library_id = chosen["id"]
+    if op == "resolve":
+        from ssios.library import resolve_conflict
+
+        decided = resolve_conflict(plane, account_id, library_id, str(body.get("conflict") or ""), str(body.get("decision") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id, "item": decided.get("id") or ""}, f"<p>{html.escape(decided.get('reason') or '')}</p>"))
     if op == "import":
         raw, filename, source = _upload(body)
         saved = import_bytes(plane, account_id, library_id, raw, name=filename, source=source, peer_ip=peer_ip)
+        if saved.get("result") == "conflict":
+            return Page(200, library_page(plane, session, {"library": library_id}, _conflict_form(session, library_id, saved, _language(plane, account_id))))
         return Page(200, library_page(plane, session, {"library": library_id, "item": saved["id"]}, "<p>Saved the file.</p>"))
     if op == "folder":
         add_folder(plane, account_id, library_id, str(body.get("name") or ""), peer_ip)
@@ -451,12 +522,33 @@ def _folder_label(folders: list[dict], row: dict) -> str:
     return " / ".join(reversed([name for name in names if name]))
 
 
+def _conflict_form(session: dict, library_id: str, saved: dict, lang: str) -> str:
+    csrf = html.escape(str(session.get("csrf") or ""), quote=True)
+    conflict_id = html.escape(str(saved.get("conflict_id") or ""), quote=True)
+    primary = "primary" if saved.get("default") == "keep" else ""
+    return (
+        f"<p class=\"conflict\">{html.escape(str(saved.get('reason') or ''))}</p>"
+        f"<form class=\"conflict-choice\" method=\"post\" action=\"/ui/library\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"op\" value=\"resolve\">"
+        f"<input type=\"hidden\" name=\"library\" value=\"{html.escape(library_id, quote=True)}\">"
+        f"<input type=\"hidden\" name=\"conflict\" value=\"{conflict_id}\">"
+        f"<button class=\"{primary}\" name=\"decision\" value=\"keep\" type=\"submit\">{html.escape(say(lang, 'conflict_keep'))}</button>"
+        f"<button name=\"decision\" value=\"replace\" type=\"submit\">{html.escape(say(lang, 'conflict_replace'))}</button></form>"
+    )
+
+
 def accept_drop(plane, session: dict, fields: dict, files: list[dict], peer_ip: str) -> dict:
-    from ssios.library import MEDIA_LIMIT
+    from ssios.library import MEDIA_LIMIT, resolve_conflict
 
     account_id = session["account"]["id"]
     lang = _language(plane, account_id)
     chosen = library_or_default(plane, account_id, str(fields.get("library") or ""))
+    if fields.get("decision") and fields.get("conflict"):
+        decided = resolve_conflict(plane, account_id, chosen["id"], str(fields.get("conflict") or ""), str(fields.get("decision") or ""), peer_ip)
+        decided["path"] = fields.get("relative") or decided.get("path") or ""
+        results = [decided]
+        return {"results": results, "summary": drop_summary(lang, results)}
     folder_id = str(fields.get("folder") or "")
     source = str(fields.get("source") or "drag")
     relative = str(fields.get("relative") or "")

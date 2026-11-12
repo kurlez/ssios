@@ -100,7 +100,7 @@ def stream_multipart(source, content_type: str, length: int, dest: Path) -> dict
         named = re.search(br'filename="([^"]*)"', header)
         if named is None:
             text, _too = reader.read_until(b"\r\n--" + token)
-            if name in {"csrf", "library", "folder", "relative", "source", "op"} and len(text) <= 4000:
+            if name in {"csrf", "library", "folder", "relative", "source", "op", "decision", "conflict"} and len(text) <= 4000:
                 fields[name] = text.decode("utf-8", "replace")
             continue
         filename = named.group(1).decode("utf-8", "replace")
