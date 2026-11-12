@@ -52,14 +52,14 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
 | Weather and web fetch on the host, SSRF checks, untrusted pages | A free-form place stays on the weather skill. A geocode miss is city_not_found, and the local model is not asked for a live forecast | `tests/test_skills.py`; `tests/test_weather_followup.py` | 86 |
-| Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes lists the clip | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
+| Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes opens for a household account. An empty clip, an oversize clip, and a rejected vault path each have their own message | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; `tests/test_notes_clip.py`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
 | Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | A tool result completes the matching goal and undo reopens it. A page read does not. Pages poll notices that remain after restart | `tests/test_goals.py` `GoalChatLoopTest`; `tests/test_reminders.py` `NoticeBadgeTest`; screenshot `tasks-badge-1280.png` | 90 |
 
 ## Total
 
 Mean of the 28 rows above: **90 / 100** (2523 / 28).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 301 ran, 294 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 303 ran, 296 passed, 7 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 

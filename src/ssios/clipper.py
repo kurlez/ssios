@@ -160,16 +160,23 @@ def _tell(plane, account_id: str, text: str, approval_id: str = "") -> None:
 def clip_from_browser(plane, account_id: str, body: dict, peer_ip: str) -> dict:
     """Sanitize a page the user's browser already rendered and stage or save it."""
     from ssios.article_pages import prepare_html, read_page
+    from ssios.locale_messages import say
     from ssios.scope import AccountScope
     from ssios.skill_broker import looks_truncated
     from ssios.vault import html_to_markdown
 
+    lang = _account_lang(plane, account_id)
     url = str(body.get("url") or "").strip()
-    if not url.startswith("https://") or len(url) > 500:
-        raise SsiosError("skill_denied", "The clip needs one https address.", 400)
     html = str(body.get("html") or "")
-    if not html or len(html.encode("utf-8")) > _MAX_HTML:
-        raise SsiosError("skill_denied", "The clip was empty or too large.", 400)
+    if not html.strip():
+        raise SsiosError("clip_empty", say(lang, "clip_empty"), 400)
+    size = len(html.encode("utf-8"))
+    if size > _MAX_HTML:
+        raise SsiosError("clip_too_large", say(lang, "clip_too_large", limit=_MAX_HTML), 400)
+    if not url:
+        url = "pasted"
+    elif not url.startswith("https://") or len(url) > 500:
+        raise SsiosError("clip_url", say(lang, "clip_url"), 400)
     title = str(body.get("title") or "")[:180]
     page = read_page(html.encode("utf-8"), url, cookie_sent=False)
     raw = prepare_html(html.encode("utf-8"), url)
@@ -271,6 +278,14 @@ def _document(converted: dict, url: str, images: list) -> str:
         if src.startswith("https://") and len(src) < 500:
             lines.append(f"![{alt}]({src})")
     return "\n".join(lines).strip() + "\n"
+
+
+def _account_lang(plane, account_id: str) -> str:
+    try:
+        lang = plane.skills.account_prefs(account_id).get("language")
+    except Exception:
+        lang = "en"
+    return lang if lang in {"en", "zh"} else "en"
 
 
 def _hash(token: str) -> str:

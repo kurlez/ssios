@@ -269,7 +269,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 from ssios.logsafe import log_failure
 
                 log_failure(nested)
-        return browser_error_page(detail, exc.status)
+        from ssios.ui import _session, ui_language
+
+        session = _session(self.server.plane, self.headers)
+        return browser_error_page(detail, exc.status, code=exc.code, lang=ui_language(self.server.plane, session))
 
     def _stream(self, page: Page) -> None:
         self.send_response(page.status)

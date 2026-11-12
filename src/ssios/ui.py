@@ -279,16 +279,37 @@ def _bound_port(plane) -> int:
     return int(port)
 
 
-def browser_error_page(detail: str, status: int) -> Page:
-    """A normal page for a browser. API clients do not use this."""
-    safe = html.escape(detail or "The page could not be shown.")
+def ui_language(plane, session: dict | None) -> str:
+    if not session:
+        return "en"
+    try:
+        lang = plane.skills.account_prefs(session["account"]["id"]).get("language")
+    except Exception:
+        return "en"
+    return lang if lang in {"en", "zh"} else "en"
+
+
+def browser_error_page(detail: str, status: int, *, code: str = "", lang: str = "en") -> Page:
+    """A normal page for a browser. The link matches the failure, not every destination."""
+    from ssios.locale_messages import say
+
+    choice = lang if lang in {"en", "zh"} else "en"
+    safe = html.escape(detail or say(choice, "page_failed"))
+    if status == 401 or code in {"unauthorized", "login_required"}:
+        href, label = "/ui/login", say(choice, "sign_in")
+    elif code.startswith("clip_") or code == "path_rejected":
+        href, label = "/ui/vault", say(choice, "notes_link")
+    elif code.startswith("connector") or code.startswith("oauth") or code == "secure_store_unavailable":
+        href, label = "/ui/connections", say(choice, "connections_link")
+    else:
+        href, label = "/ui/chat", say(choice, "chat_link")
+    title = say(choice, "page_failed_title")
     body = (
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Something went wrong</title>"
+        f"<!doctype html><html lang=\"{choice}\"><meta charset=\"utf-8\"><title>{html.escape(title)}</title>"
         + _style_link()
-        + "<body><main><h1>Something went wrong</h1><p>"
+        + f"<body><main><h1>{html.escape(title)}</h1><p>"
         + safe
-        + "</p><p><a href=\"/ui/login\">Sign in</a> <a href=\"/ui/chat\">Chat</a> "
-        "<a href=\"/ui/connections\">Connections</a></p></main></body></html>"
+        + f'</p><p><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></p></main></body></html>'
     )
     return Page(status, body)
 
@@ -1038,9 +1059,17 @@ def _history(plane, project_id: str, path: str) -> str:
 
 
 def _vault_page(plane, session: dict, notice: str) -> str:
+    from ssios.errors import SsiosError
+    from ssios.locale_messages import say
     from ssios.vault import list_notes
 
-    notes = list_notes(plane.settings, session["account"]["id"])
+    try:
+        notes = list_notes(plane.settings, session["account"]["id"])
+    except SsiosError as exc:
+        if exc.code != "path_rejected":
+            raise
+        notes = []
+        notice = _clip_notice("clip_denied", say(ui_language(plane, session), "clip_denied"))
     items = []
     for item in notes:
         path = html.escape(item["path"], quote=True)
@@ -1049,9 +1078,11 @@ def _vault_page(plane, session: dict, notice: str) -> str:
         items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
     csrf = html.escape(str(session.get("csrf") or ""))
     paste = (
-        f"<form method=\"post\" action=\"/ui/vault\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<form method=\"post\" action=\"/ui/vault\" enctype=\"multipart/form-data\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<label>Source URL <input name=\"url\" placeholder=\"https://example.com/story\"></label>"
         "<label>Pasted article <textarea name=\"content\" rows=\"6\"></textarea></label>"
+        "<label>Or a text file <input type=\"file\" name=\"file\"></label>"
         "<button type=\"submit\">Clip pasted article</button></form>"
     )
     body = notice + paste + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
@@ -1081,13 +1112,38 @@ def _vault_note(plane, session: dict, rel: str) -> str:
     return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
 
 
+def _clip_notice(code: str, detail: str) -> str:
+    safe_code = html.escape(code, quote=True)
+    return f'<p class="notice" data-code="{safe_code}">{html.escape(detail)}</p>'
+
+
+def _pasted_text(body: dict) -> str:
+    content = str(body.get("content") or "")
+    if content.strip():
+        return content
+    uploads = body.get("uploads") if isinstance(body.get("uploads"), list) else []
+    if not uploads or not isinstance(uploads[0], dict):
+        return content
+    raw = uploads[0].get("bytes")
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return content
+    try:
+        return bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 def _vault_paste(plane, session: dict, body: dict, peer_ip: str) -> Page:
     from ssios.clipper import clip_from_browser
+    from ssios.errors import SsiosError
     from ssios.scope import AccountScope
 
     url = str(body.get("url") or "")
-    content = str(body.get("content") or "")
-    result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    content = _pasted_text(body)
+    try:
+        result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    except SsiosError as exc:
+        return Page(exc.status, _vault_page(plane, session, _clip_notice(exc.code, exc.detail)))
     if result.get("status") == "saved":
         return Page(200, _vault_page(plane, session, f"<p>Saved the clip to {html.escape(str(result.get('path') or ''))}.</p>"))
     scope = AccountScope(plane, session["account"])
@@ -1190,7 +1246,9 @@ def _clipper_post(plane, session: dict, body: dict) -> Page:
     if op == "undo-clip":
         undo_last_clip(plane, account_id)
         return Page(200, _clipper_page(plane, session, "<p>The last auto clip was removed.</p>"))
-    raise SsiosError("skill_denied", "clip action rejected", 400)
+    from ssios.locale_messages import say
+
+    raise SsiosError("clip_denied", say(ui_language(plane, session), "clip_denied"), 400)
 
 
 def _settings(plane, session: dict) -> str:
