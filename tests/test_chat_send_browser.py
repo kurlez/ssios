@@ -523,7 +523,10 @@ class ChatSendBrowserTest(unittest.TestCase):
             " && document.querySelector('.steps [data-step=checks]').className === 'done'"
             " && document.body.innerText.includes('Harbor Desk said the studio plan')"
             " && !document.body.innerText.includes('Sources (none)')"
-            " && !document.body.innerText.includes('Assistant is writing')",
+            " && !document.body.innerText.includes('Assistant is writing')"
+            " && document.querySelector('details.step-details')"
+            " && !document.querySelector('details.step-details').open"
+            " && !document.querySelector('.msg.assistant .content').innerText.includes('Sandbox denied')",
             timeout=20,
         )
         self.assertEqual(self.page.errors, [])

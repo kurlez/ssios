@@ -1438,6 +1438,8 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .diff s { color: var(--muted); }
 .diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
 .steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; }
+.step-details { margin: 4px 0 12px; color: var(--muted); font-size: 12px; }
+.step-details summary { cursor: pointer; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }
 .steps .fail::before { content: "\\2717  "; color: var(--danger); }

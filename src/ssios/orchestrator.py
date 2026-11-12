@@ -32,6 +32,10 @@ def repo_agents() -> str:
 
 def choose_route(message: str, *, guest_ready: bool, override: str = "auto", llm=None, pending_fill: bool = False) -> tuple[RouteDecision, str]:
     """Return the route and a fallback note. The note is empty when Codex ran or was not needed."""
+    from ssios.calendar_intent import no_tool_request
+
+    if no_tool_request(message) and override != "force_vm":
+        return classify(message, override, llm=llm), ""
     if _explicit_host(message) and override != "force_vm":
         return classify(message, override, llm=llm), ""
     decision = classify(message, override, llm=llm)
@@ -75,7 +79,13 @@ def guest_ready(plane) -> bool:
 
 
 def _needs_codex(message: str, decision: RouteDecision, pending_fill: bool) -> bool:
-    """Reports, several sources, workspace work, and a pending follow-up. A weather or web skill stays on the host."""
+    """Reports, several sources, workspace work, and a pending follow-up. Writing stays on local chat."""
+    from ssios.calendar_intent import no_tool_request
+
+    if no_tool_request(message) or decision.route in {"skill", "memory", "reminders", "account", "schedule"}:
+        return False
+    if decision.route == "direct" and not (_REPORT.search(message) or pending_fill):
+        return False
     if decision.route == "skill":
         return False
     if pending_fill or _REPORT.search(message):

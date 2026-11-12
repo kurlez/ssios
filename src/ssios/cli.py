@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", default="config/ssios.example.toml", help="config file")
     parser = argparse.ArgumentParser(prog="ssios", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
+    for name in ("init", "up", "ui", "demo", "health", "status", "preflight", "summary", "ingest", "diagnose", "gc", "vm-doctor", "vm-diagnose", "vm-prepare", "model-bench", "router-bench", "ui-login", "ollama-probe", "memfs-info", "memfs-upstream-smoke", "user", "audit-verify"):
         command = sub.add_parser(name, parents=[common])
         if name in ("up", "ui", "demo", "preflight", "summary"):
             command.add_argument("--profile", choices=("dev", "production"))
@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--model", default="", help="Ollama model name, such as qwen3:14b or muse-glimmer:30b-mlx")
             command.add_argument("--vision", action="store_true", help="also score one synthetic image caption")
             command.add_argument("--vision-model", default="", help="vision model, default qwen2.5vl:7b")
+        if name == "router-bench":
+            command.add_argument("--rules-only", action="store_true", help="score the rules and do not call Ollama")
+            command.add_argument("--model", action="append", default=[], help="classifier model, repeatable. Default qwen3:1.7b and qwen3:4b")
         if name == "ui":
             command.add_argument("--lan", action="store_true")
             command.add_argument("--check", action="store_true", help="print chat guest prerequisites and exit")
@@ -169,6 +172,23 @@ def main(argv: list[str] | None = None) -> int:
         report = vm_diagnose(settings)
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0 if report.get("prerequisites", {}).get("ok") else 1
+    if args.command == "router-bench":
+        from ssios.router_bench import CLASSIFIER_MODELS, score_model, score_rules
+
+        rules = score_rules()
+        if args.rules_only:
+            print(json.dumps(rules, ensure_ascii=False, indent=2), flush=True)
+            return 0 if rules.get("accuracy") == 1 else 1
+        models = list(args.model) or list(CLASSIFIER_MODELS)
+        scored = []
+        for model in models:
+            try:
+                scored.append(score_model(model, base_url=settings.ollama_base_url, timeout=settings.router_timeout_seconds))
+            except (SsiosError, OSError, TimeoutError) as exc:
+                detail = exc.detail if isinstance(exc, SsiosError) else exc.__class__.__name__
+                scored.append({"mode": model, "error": detail})
+        print(json.dumps({"rules": rules, "models": scored}, ensure_ascii=False, indent=2), flush=True)
+        return 0 if rules.get("accuracy") == 1 else 1
     if args.command == "model-bench":
         from ssios.model_bench import run_bench
 

@@ -70,6 +70,15 @@ class Settings:
     codex_turn_timeout_seconds: float
     state_dir: Path
     config_path: Path | None
+    router_model: str = "qwen3:1.7b"
+    router_timeout_seconds: float = 4.0
+
+
+def _router_timeout(llm: dict) -> float:
+    timeout = float(llm.get("router_timeout_seconds", 4))
+    if not 0.5 <= timeout <= 30:
+        raise SsiosError("config_invalid", "router_timeout_seconds must be from 0.5 to 30", 500)
+    return timeout
 
 
 def _model_name(value: str, label: str) -> str:
@@ -294,6 +303,8 @@ def load_settings(
         codex_turn_timeout_seconds=codex_turn_timeout_seconds,
         state_dir=state_path,
         config_path=config_path,
+        router_model=_model_name(str(llm.get("router_model", "qwen3:1.7b")), "router model"),
+        router_timeout_seconds=_router_timeout(llm),
     )
 
 

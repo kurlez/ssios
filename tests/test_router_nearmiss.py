@@ -4,70 +4,76 @@ from __future__ import annotations
 
 import unittest
 
+from ssios.chat import _style_instruction
 from ssios.chat_router import classify
-
-# Near misses: a meeting, weather, or mail word inside writing or a definition.
-NEAR = (
-    "帮我写一个小故事，描述一次积极开会但是却没有结果的经历。",
-    "帮我写一个关于开会的故事",
-    "写一首关于天气的诗",
-    "写一篇文章，讲一次没有结果的会议",
-    "总结一下什么是邮件",
-    "什么是会议",
-    "开会是什么意思",
-    "假如开会没有结果会怎样",
-    "想象一次没有人发言的会议",
-    "假设明天开会，故事会怎么写",
-    "write a short story about a meeting that had no outcome",
-    "write a poem about the weather",
-    "write an essay about email",
-    "explain what a meeting is",
-    "what is email",
-    "what is a meeting",
-    "what if a meeting has no outcome",
-    "suppose I had a meeting that went nowhere",
-    "imagine an email that was never sent",
-    "describe a hypothetical meeting with no result",
-)
-
-# A keyword alone is not a calendar change.
-BARE = ("开会", "会议", "meeting")
-
-# Real requests.
-HITS = (
-    ("今天天气怎么样", "skill", "weather"),
-    ("What's the weather in Seattle?", "skill", "weather"),
-    ("查一下我的邮件", "connector", "gmail"),
-    ("check my inbox", "connector", "gmail"),
-    ("这周我有什么安排", "connector", "calendar"),
-    ("what's on my calendar this week", "connector", "calendar"),
-    ("明天下午有空吗", "connector", "calendar"),
-    ("下周三下午三点和张三开会一小时", "connector", "calendar"),
-    ("schedule a meeting tomorrow at 3pm", "connector", "calendar"),
-    ("add a dentist appointment to my calendar tomorrow at 4", "connector", "calendar"),
-    ("book a meeting with Ada on Friday at 10", "connector", "calendar"),
-    ("把周五的牙医改到下午四点", "connector", "calendar"),
-    ("取消明天的站会", "connector", "calendar"),
-    ("安排明天下午三点开会", "connector", "calendar"),
-    ("创建一个会议，下周一上午十点", "connector", "calendar"),
-    ("约张三明天下午三点开会", "connector", "calendar"),
-)
+from ssios.orchestrator import choose_route
+from ssios.route_classifier import decision_from_classifier
+from ssios.router_bench import score_model, score_rules
+from ssios.router_cases import CASES
 
 
 class RouterNearMissTest(unittest.TestCase):
-    def test_near_misses_stay_in_chat(self) -> None:
-        self.assertGreaterEqual(len(NEAR) + len(BARE) + len(HITS), 30)
-        for message in NEAR + BARE:
-            decision = classify(message)
-            self.assertEqual(decision.route, "direct", message)
-            self.assertEqual(decision.services, (), message)
-            self.assertNotEqual(decision.skill, "weather", message)
-
-    def test_real_requests_keep_their_route(self) -> None:
-        for message, route, kind in HITS:
-            decision = classify(message)
-            self.assertEqual(decision.route, route, message)
-            if route == "skill":
-                self.assertEqual(decision.skill, kind, message)
+    def test_rules_match_the_synthetic_set(self) -> None:
+        self.assertGreaterEqual(len(CASES), 40)
+        prompts = {case["prompt"] for case in CASES}
+        self.assertIn("帮我写一个小故事，描述一次积极开会但是却没有结果的经历。", prompts)
+        self.assertIn("帮我写一个小故事", prompts)
+        for case in CASES:
+            decision = classify(case["prompt"])
+            self.assertEqual(decision.route, case["route"], case["id"])
+            if case["kind"] == "weather":
+                self.assertEqual(decision.skill, "weather", case["id"])
+            elif case["kind"]:
+                self.assertIn(case["kind"], decision.services, case["id"])
             else:
-                self.assertIn(kind, decision.services, message)
+                self.assertEqual(decision.services, (), case["id"])
+
+    def test_a_story_stays_out_of_the_guest_even_when_the_guest_is_ready(self) -> None:
+        for prompt in ("帮我写一个小故事", "帮我写一个小故事，描述一次积极开会但是却没有结果的经历。"):
+            decision, note = choose_route(prompt, guest_ready=True)
+            self.assertEqual(decision.route, "direct", prompt)
+            self.assertNotEqual(decision.route, "codex", prompt)
+            self.assertEqual(note, "")
+            self.assertIn("Write it now", _style_instruction(prompt))
+            self.assertIn("Do not ask for a theme", _style_instruction(prompt))
+            self.assertIn("300 to 600", _style_instruction(prompt))
+
+    def test_a_low_confidence_classifier_stays_on_chat(self) -> None:
+        chosen = decision_from_classifier({"intent": "calendar", "tools": ["calendar"], "confidence": 0.2})
+        self.assertEqual(chosen.route, "direct")
+        story = decision_from_classifier({"intent": "creative", "tools": [], "confidence": 0.95})
+        self.assertEqual(story.route, "direct")
+        tools = decision_from_classifier({"intent": "codex", "tools": ["files"], "confidence": 0.9})
+        self.assertEqual(tools.route, "vm")
+
+    def test_rules_bench_is_exact_and_a_model_timeout_falls_back_to_chat(self) -> None:
+        rules = score_rules()
+        self.assertGreaterEqual(rules["count"], 40)
+        self.assertEqual(rules["accuracy"], 1)
+        self.assertIn("direct", rules["confusion"])
+        self.assertIn("median", rules["latency_ms"])
+        self.assertIn("max", rules["latency_ms"])
+
+        def opener(url, payload, timeout):
+            del url, payload, timeout
+            raise TimeoutError("slow")
+
+        scored = score_model("qwen3:1.7b", opener=opener)
+        self.assertEqual(scored["mode"], "qwen3:1.7b")
+        self.assertTrue(all(row["predicted"] == "direct" for row in scored["rows"]))
+
+        def answer(url, payload, timeout):
+            del url, timeout
+            prompt = payload["messages"][-1]["content"]
+            intent = "creative" if "故事" in prompt or "story" in prompt else "calendar"
+            body = (
+                '{"intent":"%s","tools":%s,"confidence":0.9}'
+                % (intent, "[]" if intent == "creative" else '["calendar"]')
+            ).encode()
+            return 200, b'{"message":{"content":' + __import__("json").dumps(body.decode()).encode() + b"}}"
+
+        mixed = score_model("qwen3:4b", opener=answer)
+        story = next(row for row in mixed["rows"] if row["id"] == "story-short")
+        self.assertTrue(story["ok"])
+        week = next(row for row in mixed["rows"] if row["id"] == "cal-week")
+        self.assertEqual(week["predicted"], "connector")

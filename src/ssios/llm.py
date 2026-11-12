@@ -655,6 +655,8 @@ class OllamaLLM:
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
         self.num_ctx = num_ctx
+        self.router_model = "qwen3:1.7b"
+        self.router_timeout = 4.0
         self._think_false: bool | None = None
 
     def wants_plain_summary(self, deadline: float) -> bool:
@@ -834,6 +836,34 @@ class OllamaLLM:
         timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
         yield from _iter_chat_stream(self.base_url + "/api/chat", payload, timeout, deadline)
 
+    def classify_route(self, text: str, deadline: float | None = None) -> dict | None:
+        """One short JSON call on the small router model. Timeout and bad JSON return None."""
+        from ssios.route_classifier import CLASSIFIER_SCHEMA, CLASSIFIER_SYSTEM, parse_classifier
+
+        limit = deadline if isinstance(deadline, float) else time.monotonic() + self.router_timeout
+        if time.monotonic() >= limit:
+            return None
+        timeout = min(self.router_timeout, self.timeout, max(0.1, limit - time.monotonic()))
+        payload = _chat_payload(
+            self.router_model,
+            [
+                {"role": "system", "content": CLASSIFIER_SYSTEM},
+                {"role": "user", "content": str(text or "")[:1000]},
+            ],
+            CLASSIFIER_SCHEMA,
+            num_predict=80,
+            think=False,
+            num_ctx=min(self.num_ctx, 4096),
+            hint_schema=CLASSIFIER_SCHEMA,
+        )
+        try:
+            body = _chat_with_fallback(self.base_url + "/api/chat", payload, timeout)
+        except (SsiosError, FlowInterrupt, TimeoutError, OSError):
+            return None
+        message = body.get("message") if isinstance(body.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), str) else ""
+        return parse_classifier(content)
+
     def judge_route(self, text: str, deadline: float | None = None) -> str:
         """Local JSON judgment. Only a direct route leaves the guest. There is no cloud model."""
         limit = deadline if isinstance(deadline, float) else time.monotonic() + 10
@@ -926,11 +956,14 @@ def build_llm(settings):
     if settings.llm_provider == "mock":
         return MockLLM()
     if settings.llm_provider == "ollama":
-        return OllamaLLM(
+        client = OllamaLLM(
             settings.ollama_base_url,
             settings.ollama_model,
             settings.llm_timeout_seconds,
             settings.max_output_tokens,
             settings.num_ctx,
         )
+        client.router_model = str(getattr(settings, "router_model", "qwen3:1.7b") or "qwen3:1.7b")
+        client.router_timeout = float(getattr(settings, "router_timeout_seconds", 4.0) or 4.0)
+        return client
     raise SsiosError("config_invalid", "llm provider rejected", 500)

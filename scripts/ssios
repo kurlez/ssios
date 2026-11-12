@@ -23,6 +23,7 @@ Usage: ./scripts/ssios <command> [args]
   fg         Run the UI in this terminal
   diagnose   Run vm-diagnose and ui --check
   model-bench  Score one local Ollama model on synthetic tool choices. Nothing is saved.
+  router-bench Score the chat router. --rules-only does not call Ollama.
 
 Any other SSIOS command is passed through with --state and --config filled in.
 Example: ./scripts/ssios oauth-install-client --account kent

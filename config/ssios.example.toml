@@ -22,6 +22,11 @@ ollama_model = "llama3.1:8b"
 # An attached image is read by this local model. Text chat and the guest stay on their own models.
 # qwen3:14b remains the guest text model. Pull the vision weights by hand: ollama pull qwen2.5vl:7b
 vision_model = "qwen2.5vl:7b"
+# Small local classifier for turns the rules do not decide. It does not answer and it does not call tools.
+# ollama pull qwen3:1.7b
+# ollama pull qwen3:4b
+router_model = "qwen3:1.7b"
+router_timeout_seconds = 4
 request_timeout_seconds = 60
 # A mail report scales this by the target length and the number of batches. 20 seconds is too short for an 8B model.
 report_base_seconds = 45

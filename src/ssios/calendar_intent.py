@@ -114,8 +114,8 @@ _INTENT_SYSTEM = (
 
 
 _CREATIVE = re.compile(
-    r"(帮我写|写一个|写一篇|写首|写一首|小故事|故事|诗|文章|总结一下什么是|假如|想象|假设|会怎样|"
-    r"\b(write|story|poem|essay|explain|imagine|suppose|hypothetical)\b|what if)",
+    r"(帮我写|写一个|写一篇|写首|写一首|小故事|故事|诗|文章|总结一下什么是|假如|想象|假设|会怎样|翻译|改写|润色|"
+    r"\b(write|story|poem|essay|explain|imagine|suppose|hypothetical|translate|rewrite|rephrase)\b|what if)",
     re.IGNORECASE,
 )
 _GENERAL = re.compile(r"^(what is|what's an|what's a|explain|define)\b", re.IGNORECASE)
@@ -132,6 +132,11 @@ _CAL_VERB_EN = re.compile(
 def creative_request(message: str) -> bool:
     """Writing, a story, or a hypothetical. A meeting word inside it is not a calendar change."""
     return bool(_CREATIVE.search(" ".join(str(message or "").split())))
+
+
+def no_tool_request(message: str) -> bool:
+    """Creative writing, an explanation, a translation, or a rewrite. No connector and no guest."""
+    return creative_request(message) or general_question(message)
 
 
 def general_question(message: str) -> bool:

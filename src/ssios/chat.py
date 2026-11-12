@@ -2292,6 +2292,22 @@ def _file_screenshot(plane, scope, conversation_id: str, message: str, filing: d
     del message
 
 
+def _style_instruction(message: str) -> str:
+    """Tell the local model to write now. A creative request does not start with a question."""
+    from ssios.calendar_intent import creative_request
+
+    text = " ".join(str(message or "").split())
+    if not creative_request(text):
+        return ""
+    if re.search(r"翻译|改写|润色|\b(translate|rewrite|rephrase)\b", text, re.IGNORECASE):
+        return "Do the translation or rewrite now. Do not ask a clarifying question first."
+    return (
+        "This is creative writing. Write it now. Do not ask for a theme, characters, or plot first. "
+        "Pick a sensible default. A short story is about 300 to 600 Chinese characters when the user writes Chinese, "
+        "or about 200 to 400 English words. After the piece, you may offer one optional change."
+    )
+
+
 def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> list[dict]:
     record = scope.chat().get(conversation_id)
     last_user = ""
@@ -2303,6 +2319,9 @@ def _messages(scope: AccountScope, conversation_id: str, cloud_text: str) -> lis
 
     excerpt = memory_excerpt(scope, last_user)
     system = _SYSTEM + "\n\n" + clock_block(scope.plane, scope.account) + "\n" + say(_turn_language(scope.plane, scope.account_id, last_user), "reply_instruction")
+    style = _style_instruction(last_user)
+    if style:
+        system += "\n" + style
     if excerpt:
         system += "\n\nMEMORY-CONTEXT\n" + excerpt
     if cloud_text:

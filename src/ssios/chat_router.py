@@ -94,7 +94,9 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
     from ssios.goals import task_command
     from ssios.reminders import is_agenda, reminder_command, wants_forget, wants_remember
 
-    if (creative_request(message) or general_question(message)) and forced != "force_vm":
+    from ssios.calendar_intent import no_tool_request
+
+    if no_tool_request(message) and forced != "force_vm":
         return _decision("direct", "rule_direct", "The message asks for writing or an explanation, so the local model answers directly.", ())
     skill = match_skill(message)
     if task_command(message) and forced != "force_vm":
@@ -152,7 +154,26 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
         return _decision("direct", "rule_direct", "The message is a question, so the local model answers directly.", ())
     if _taskish(message):
         return _unsure(message, llm, deadline)
-    return _decision("direct", "rule_direct", "The message does not ask for files, commands, or a workspace change, so the local model answers directly.", ())
+    return _model_or_chat(message, llm, deadline)
+
+
+def _model_or_chat(message: str, llm, deadline: float | None) -> RouteDecision:
+    """Ambiguous text may use the small classifier. A timeout or a low score stays on local chat."""
+    reader = getattr(llm, "classify_route", None)
+    if not callable(reader):
+        return _decision("direct", "rule_direct", "The message does not ask for files, commands, or a workspace change, so the local model answers directly.", ())
+    try:
+        payload = reader(message, deadline)
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict):
+        return _decision("direct", "rule_direct", "The classifier did not answer, so this stays a local chat.", ())
+    from ssios.route_classifier import decision_from_classifier
+
+    chosen = decision_from_classifier(payload)
+    if chosen is None or chosen.route == "direct":
+        return _decision("direct", "rule_direct", "The classifier was not confident, so this stays a local chat.", ())
+    return chosen
 
 
 def _writes(message: str) -> bool:
