@@ -55,6 +55,10 @@ MESSAGES = {
         "library_type": "That file type is not saved in Files. Images, video, audio, documents, design files, and fonts can be saved.",
         "library_rejected": "That file was rejected. Archives, programs, databases, hidden files, unfinished downloads, and code repositories are not saved.",
         "library_missing": "That file was not found.",
+        "drop_overlay": "Drop files or a folder",
+        "drop_saved": "Saved.",
+        "drop_version": "Saved as a new version.",
+        "drop_summary": "Saved {saved}. New versions {versions}. Skipped {skipped}.",
     },
     "zh": {
         "which_city": "哪个城市？例如西雅图或上海。",
@@ -103,6 +107,10 @@ MESSAGES = {
         "library_type": "文件不保存这种类型。可以保存图片、视频、音频、文档、设计文件和字体。",
         "library_rejected": "已拒绝。压缩包、程序、数据库、隐藏文件、未下完的文件和代码仓库不会保存。",
         "library_missing": "没有找到这个文件。",
+        "drop_overlay": "把文件或文件夹拖到这里",
+        "drop_saved": "已保存。",
+        "drop_version": "已存为新版本。",
+        "drop_summary": "保存了 {saved} 个。新版本 {versions} 个。跳过了 {skipped} 个。",
     },
 }
 

@@ -1661,7 +1661,13 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .file-filters a { text-decoration: none; }
 .file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.library { display: grid; grid-template-columns: 200px minmax(0, 1fr) 240px; gap: 16px; align-items: start; }
+.library { position: relative; display: grid; grid-template-columns: 200px minmax(0, 1fr) 240px; gap: 16px; align-items: start; }
+.drop-overlay { position: fixed; inset: 16px; display: none; align-items: center; justify-content: center; border: 3px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--ink); font-size: 1.5rem; font-weight: 600; z-index: 30; pointer-events: none; }
+.drop-overlay.show { display: flex; }
+.lib-folder.drop-hot { outline: 2px solid var(--accent); border-radius: 8px; }
+.drop-log { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; }
+.drop-log li { font-size: 13px; }
+.drop-log .bad { color: var(--danger); }
 .lib-side, .lib-inspector { display: grid; gap: 8px; align-content: start; }
 .lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 0; }
 .lib-switch.active { font-weight: 600; }

@@ -6,6 +6,7 @@ import html
 import json
 import re
 import ssl
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -206,8 +207,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _ui(self) -> None:
         try:
-            body = self._form() if self.command == "POST" else {}
-            page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
+            path = urlsplit(self.path).path.rstrip("/") or "/"
+            if self.command == "POST" and path == "/ui/library/drop":
+                page = self._library_drop()
+            else:
+                body = self._form() if self.command == "POST" else {}
+                page = handle_ui(self.server.plane, self.command, self.path, self.headers, body, peer_ip=self.client_address[0])
         except SsiosError as exc:
             if _ui_wants_html(self.headers):
                 page = self._browser_failure(exc)
@@ -249,6 +254,28 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "content-type, x-ssios-clip-token")
         self.send_header("Access-Control-Max-Age", "600")
+
+    def _library_drop(self) -> Page:
+        import json
+        import tempfile
+
+        from ssios.library_page import accept_drop
+        from ssios.library_upload import stream_multipart
+        from ssios.ui import _check_origin, _csrf, _session
+
+        rejected = _check_origin(self.server.plane, self.headers, "POST")
+        if rejected is not None:
+            return rejected
+        session = _session(self.server.plane, self.headers)
+        if session is None:
+            raise SsiosError("unauthorized", "authentication required", 401)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        with tempfile.TemporaryDirectory(prefix="ssios-drop-") as folder:
+            parsed = stream_multipart(self.rfile, self.headers.get("Content-Type", ""), length, Path(folder))
+            _csrf(session, parsed["fields"])
+            result = accept_drop(self.server.plane, session, parsed["fields"], parsed["files"], self.client_address[0])
+        data = json.dumps(result, ensure_ascii=False)
+        return Page(200, data, content_type="application/json; charset=utf-8")
 
     def _browser_failure(self, exc: SsiosError) -> Page:
         from ssios.chat import public_error

@@ -9,8 +9,10 @@ from ssios.library import (
     add_folder,
     add_tag,
     create_library,
+    drop_summary,
     get_item,
     import_bytes,
+    import_relative,
     item_bytes,
     library_or_default,
     list_items,
@@ -25,29 +27,186 @@ from ssios.ui import Page, icon
 
 LIBRARY_JS = r"""
 (function () {
+  var app = document.getElementById("library-app");
   var form = document.getElementById("library-import");
-  var zone = document.getElementById("library-grid");
-  if (!form || !zone || form.getAttribute("data-bound") === "1") return;
-  form.setAttribute("data-bound", "1");
-  function send(file, source) {
-    if (!file) return;
-    var data = new FormData(form);
-    data.set("file", file);
-    data.set("op", "import");
-    data.set("source", source);
-    fetch(form.action, {method: "POST", body: data, credentials: "same-origin", headers: {Accept: "text/html"}}).then(function () {
-      location.reload();
+  if (!app || !form || app.getAttribute("data-bound") === "1") return;
+  app.setAttribute("data-bound", "1");
+  var csrf = app.getAttribute("data-csrf") || "";
+  var libraryId = app.getAttribute("data-library") || "";
+  var overlay = document.getElementById("drop-overlay");
+  var log = document.getElementById("drop-log");
+  var summary = document.getElementById("drop-summary");
+  var depth = 0;
+  var hot = null;
+  var generation = 0;
+  function hasFiles(event) {
+    var types = event.dataTransfer && event.dataTransfer.types;
+    if (!types) return false;
+    for (var i = 0; i < types.length; i += 1) if (types[i] === "Files") return true;
+    return false;
+  }
+  function walk(entry, prefix) {
+    return new Promise(function (resolve) {
+      if (!entry) { resolve([]); return; }
+      if (entry.isFile) {
+        entry.file(function (file) { resolve([{file: file, path: prefix + entry.name}]); });
+        return;
+      }
+      if (!entry.isDirectory || !entry.createReader) { resolve([]); return; }
+      var reader = entry.createReader();
+      var pending = [];
+      function read() {
+        reader.readEntries(function (batch) {
+          if (!batch.length) {
+            Promise.all(pending.map(function (child) { return walk(child, prefix + entry.name + "/"); })).then(function (groups) {
+              var flat = [];
+              groups.forEach(function (group) { flat = flat.concat(group); });
+              resolve(flat);
+            });
+            return;
+          }
+          pending = pending.concat(Array.prototype.slice.call(batch));
+          read();
+        });
+      }
+      read();
     });
   }
-  zone.addEventListener("dragover", function (event) { event.preventDefault(); });
-  zone.addEventListener("drop", function (event) {
+  function fromTransfer(dataTransfer) {
+    var items = dataTransfer && dataTransfer.items ? Array.prototype.slice.call(dataTransfer.items) : [];
+    var entries = [];
+    items.forEach(function (item) {
+      var entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    });
+    if (entries.length) {
+      return Promise.all(entries.map(function (entry) { return walk(entry, ""); })).then(function (groups) {
+        var flat = [];
+        groups.forEach(function (group) { flat = flat.concat(group); });
+        return flat;
+      });
+    }
+    var files = dataTransfer && dataTransfer.files ? Array.prototype.slice.call(dataTransfer.files) : [];
+    return Promise.resolve(files.map(function (file) { return {file: file, path: file.webkitRelativePath || file.name}; }));
+  }
+  function uploadOne(row, folderId) {
+    var line = document.createElement("li");
+    line.textContent = row.path + " — 0%";
+    log.appendChild(line);
+    return new Promise(function (resolve) {
+      var data = new FormData();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("folder", folderId || "");
+      data.set("relative", row.path);
+      data.set("source", "drag");
+      data.set("file", row.file, row.file.name || "file");
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/ui/library/drop");
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.upload.onprogress = function (event) {
+        if (event.lengthComputable) line.textContent = row.path + " — " + Math.round(event.loaded * 100 / event.total) + "%";
+      };
+      xhr.onload = function () {
+        var payload = {};
+        try { payload = JSON.parse(xhr.responseText || "{}"); } catch (err) { payload = {}; }
+        var result = (payload.results && payload.results[0]) || {path: row.path, status: "rejected", reason: xhr.statusText || "rejected"};
+        line.textContent = result.path + " — " + (result.reason || result.status);
+        line.className = result.status === "rejected" ? "bad" : "ok";
+        resolve(result);
+      };
+      xhr.onerror = function () {
+        line.textContent = row.path + " — rejected";
+        line.className = "bad";
+        resolve({path: row.path, status: "rejected", reason: "rejected"});
+      };
+      xhr.send(data);
+    });
+  }
+  function finish(results) {
+    var token = generation;
+    var saved = 0, versions = 0, skipped = 0;
+    results.forEach(function (row) {
+      if (row.status === "saved") saved += 1;
+      else if (row.status === "version") versions += 1;
+      else skipped += 1;
+    });
+    var text = app.getAttribute("data-summary") || "";
+    summary.textContent = text.replace("{saved}", saved).replace("{versions}", versions).replace("{skipped}", skipped);
+    if (saved || versions) setTimeout(function () {
+      if (token === generation) location.reload();
+    }, 4000);
+  }
+  function receive(dataTransfer, folderId) {
+    var token = ++generation;
+    fromTransfer(dataTransfer).then(function (rows) {
+      var chain = Promise.resolve([]);
+      rows.forEach(function (row) {
+        chain = chain.then(function (results) {
+          return uploadOne(row, folderId).then(function (result) { results.push(result); return results; });
+        });
+      });
+      return chain.then(function (results) {
+        if (token === generation) finish(results);
+      });
+    });
+  }
+  document.addEventListener("dragenter", function (event) {
+    if (!hasFiles(event)) return;
     event.preventDefault();
-    var files = event.dataTransfer && event.dataTransfer.files;
-    if (files && files[0]) send(files[0], "drag");
+    depth += 1;
+    overlay.classList.add("show");
+  });
+  document.addEventListener("dragover", function (event) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    var under = document.elementFromPoint(event.clientX, event.clientY);
+    var folder = under && under.closest ? under.closest(".lib-folder") : null;
+    if (hot && hot !== folder) hot.classList.remove("drop-hot");
+    hot = folder;
+    if (hot) hot.classList.add("drop-hot");
+  });
+  document.addEventListener("dragleave", function (event) {
+    if (!hasFiles(event)) return;
+    depth -= 1;
+    if (depth <= 0) { depth = 0; overlay.classList.remove("show"); }
+  });
+  document.addEventListener("drop", function (event) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    depth = 0;
+    overlay.classList.remove("show");
+    var folderId = hot ? hot.getAttribute("data-folder") || "" : "";
+    if (hot) hot.classList.remove("drop-hot");
+    hot = null;
+    receive(event.dataTransfer, folderId);
   });
   document.addEventListener("paste", function (event) {
     var files = event.clipboardData && event.clipboardData.files;
-    if (files && files[0]) send(files[0], "paste");
+    if (!files || !files.length) return;
+    var rows = [];
+    for (var i = 0; i < files.length; i += 1) rows.push({file: files[i], path: files[i].name});
+    var chain = Promise.resolve([]);
+    rows.forEach(function (row) {
+      chain = chain.then(function (results) {
+        return uploadOne(row, "").then(function (result) { results.push(result); return results; });
+      });
+    });
+    chain.then(finish);
+  });
+  var picker = form.querySelector("input[type=file]");
+  form.addEventListener("submit", function (event) {
+    if (!picker || !picker.files || !picker.files.length) return;
+    event.preventDefault();
+    var rows = [];
+    for (var i = 0; i < picker.files.length; i += 1) rows.push({file: picker.files[i], path: picker.files[i].name});
+    var chain = Promise.resolve([]);
+    rows.forEach(function (row) {
+      chain = chain.then(function (results) {
+        return uploadOne(row, "").then(function (result) { results.push(result); return results; });
+      });
+    });
+    chain.then(finish);
   });
 })();
 """
@@ -100,11 +259,11 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             f'<span class="lib-badge">{html.escape(say(lang, "library_personal"))}</span></a>'
         )
     folders = []
-    for row in meta.get("folders") or []:
-        if not isinstance(row, dict):
-            continue
+    known = [row for row in meta.get("folders") or [] if isinstance(row, dict)]
+    for row in known:
         folders.append(
-            f'<a href="{base}&amp;folder={html.escape(str(row.get("id") or ""), quote=True)}">{html.escape(str(row.get("name") or ""))}</a>'
+            f'<a class="lib-folder" data-folder="{html.escape(str(row.get("id") or ""), quote=True)}" '
+            f'href="{base}&amp;folder={html.escape(str(row.get("id") or ""), quote=True)}">{html.escape(_folder_label(known, row))}</a>'
         )
     tags = []
     for name in meta.get("tags") or []:
@@ -203,13 +362,27 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
         f'<input type="hidden" name="op" value="import">'
         f'<input type="hidden" name="source" value="picker">'
-        '<label>File <input name="file" type="file"></label>'
+        '<label>File <input name="file" type="file" multiple></label>'
         '<button type="submit">Import</button></form>'
         + '<div id="library-grid" class="lib-grid">'
         + ("".join(cards) or "<p>No items.</p>")
         + "</div>"
     )
-    body = notice + '<div class="library">' + left + "<div>" + grid + "</div>" + '<aside class="lib-inspector">' + inspector + "</aside></div>"
+    body = (
+        notice
+        + f'<div class="library" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
+        + f'data-overlay="{html.escape(say(lang, "drop_overlay"), quote=True)}" '
+        + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
+        + left
+        + "<div>"
+        + '<ol id="drop-log" class="drop-log"></ol><p id="drop-summary"></p>'
+        + grid
+        + "</div>"
+        + '<aside class="lib-inspector">'
+        + inspector
+        + "</aside>"
+        + f'<div id="drop-overlay" class="drop-overlay">{html.escape(say(lang, "drop_overlay"))}</div></div>'
+    )
     body += f'<script src="{library_script_path()}"></script>'
     return _page(session, say(lang, "library_link"), body, wide=True)
 
@@ -270,6 +443,66 @@ def _upload(body: dict) -> tuple[bytes, str, str]:
     if uploads and isinstance(uploads[0], dict) and isinstance(uploads[0].get("bytes"), (bytes, bytearray)):
         return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker"} else "picker"
     return b"", str(body.get("name") or ""), source
+
+
+def _folder_label(folders: list[dict], row: dict) -> str:
+    names = []
+    current = row
+    seen: set[str] = set()
+    while isinstance(current, dict) and str(current.get("id") or "") not in seen:
+        seen.add(str(current.get("id") or ""))
+        names.append(str(current.get("name") or ""))
+        parent = str(current.get("parent_id") or "")
+        current = next((item for item in folders if str(item.get("id") or "") == parent), None)
+    return " / ".join(reversed([name for name in names if name]))
+
+
+def accept_drop(plane, session: dict, fields: dict, files: list[dict], peer_ip: str) -> dict:
+    from ssios.library import MEDIA_LIMIT
+
+    account_id = session["account"]["id"]
+    lang = _language(plane, account_id)
+    chosen = library_or_default(plane, account_id, str(fields.get("library") or ""))
+    folder_id = str(fields.get("folder") or "")
+    source = str(fields.get("source") or "drag")
+    relative = str(fields.get("relative") or "")
+    results = []
+    if not files:
+        results.append(
+            {
+                "path": relative,
+                "status": "rejected",
+                "code": "library_empty",
+                "reason": say(lang, "library_empty"),
+                "id": "",
+            }
+        )
+    for item in files:
+        shown = relative or str(item.get("name") or "")
+        if item.get("too_big"):
+            results.append(
+                {
+                    "path": shown,
+                    "status": "rejected",
+                    "code": "library_too_large",
+                    "reason": say(lang, "library_too_large", limit=MEDIA_LIMIT),
+                    "id": "",
+                }
+            )
+            continue
+        results.append(
+            import_relative(
+                plane,
+                account_id,
+                chosen["id"],
+                item.get("path"),
+                relative=shown,
+                source=source if source in {"paste", "drag", "picker"} else "drag",
+                peer_ip=peer_ip,
+                folder_id=folder_id,
+            )
+        )
+    return {"results": results, "summary": drop_summary(lang, results)}
 
 
 def _language(plane, account_id: str) -> str:

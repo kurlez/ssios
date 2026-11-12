@@ -95,13 +95,15 @@ def metadata(plane, account_id: str, library_id: str) -> dict:
     return _metadata(plane, account_id, library_id, create=False, name="")
 
 
-def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str) -> dict:
+def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str, parent_id: str = "") -> dict:
     title = " ".join(str(name or "").split())[:40]
-    if len(title) < 1:
+    if len(title) < 1 or "/" in title or title.startswith("."):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
-    folder_id = "fld-" + hashlib.sha256(f"{library_id}:{title}:{_now()}".encode()).hexdigest()[:8]
+    if parent_id and not _FOLDER.fullmatch(parent_id):
+        raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    folder_id = "fld-" + hashlib.sha256(f"{library_id}:{parent_id}:{title}:{_now()}".encode()).hexdigest()[:8]
     data = _metadata(plane, account_id, library_id, create=False, name="")
-    data.setdefault("folders", []).append({"id": folder_id, "name": title, "parent_id": ""})
+    data.setdefault("folders", []).append({"id": folder_id, "name": title, "parent_id": parent_id or ""})
     _write_metadata(plane, account_id, library_id, data)
     _audit(plane, account_id, peer_ip, "library.folder", folder_id, "ok", 0)
     return {"id": folder_id, "name": title}
@@ -130,6 +132,7 @@ def import_bytes(
     name: str,
     source: str,
     peer_ip: str,
+    folder_id: str = "",
 ) -> dict:
     """Store one finished file. The same name gains a version. Bytes are not overwritten."""
     lang = _lang(plane, account_id)
@@ -138,64 +141,127 @@ def import_bytes(
     if not isinstance(raw, bytes) or not raw:
         raise SsiosError("library_empty", say(lang, "library_empty"), 400)
     kind = _classify(filename, raw, lang)
-    limit = {"image": IMAGE_LIMIT, "video": MEDIA_LIMIT, "audio": MEDIA_LIMIT}.get(kind["group"], DOCUMENT_LIMIT)
+    limit = _limit_for(kind)
     if len(raw) > limit:
         raise SsiosError("library_too_large", say(lang, "library_too_large", limit=limit), 400)
     captured = _captured(raw) if kind["group"] == "image" else ""
     stored = _clean(raw, kind)
     digest = hashlib.sha256(stored).hexdigest()
-    stamp = _now()
-    with _LOCK:
-        _put_blob(plane, account_id, library_id, digest, kind["ext"], stored)
-        items = _items(plane, account_id, library_id)
-        match = next((item for item in items if not item.get("trashed") and str(item.get("name") or "").casefold() == filename.casefold()), None)
-        version = {"sha256": digest, "size": len(stored), "imported_at": stamp}
-        if match is None:
-            item_id = "item-" + digest[:8]
-            while any(item.get("id") == item_id for item in items):
-                item_id = "item-" + hashlib.sha256(item_id.encode()).hexdigest()[:8]
-            match = {
-                "id": item_id,
-                "library_id": library_id,
-                "name": filename,
-                "ext": kind["ext"],
-                "mime": kind["mime"],
-                "group": kind["group"],
-                "size": len(stored),
-                "sha256": digest,
-                "folder_ids": [],
-                "tags": [],
-                "star": 0,
-                "annotation": "",
-                "source_kind": source if source in {"paste", "drag", "picker"} else "picker",
-                "imported_at": stamp,
-                "modified_at": stamp,
-                "captured_at": captured,
-                "added_by": account_id,
-                "versions": [version],
-                "trashed": False,
-                "trashed_at": "",
-            }
-            _write_item(plane, account_id, library_id, match)
-            action = "library.import"
-            result = "saved"
-        else:
-            match["versions"] = list(match.get("versions") or []) + [version]
-            match["sha256"] = digest
-            match["size"] = len(stored)
-            match["ext"] = kind["ext"]
-            match["mime"] = kind["mime"]
-            match["group"] = kind["group"]
-            match["modified_at"] = stamp
-            if captured:
-                match["captured_at"] = captured
-            _write_item(plane, account_id, library_id, match)
-            action = "library.version"
-            result = "version"
-    _audit(plane, account_id, peer_ip, action, match["id"], result, len(stored))
-    public = dict(match)
-    public["version_count"] = len(match.get("versions") or [])
-    return public
+    _put_blob(plane, account_id, library_id, digest, kind["ext"], stored)
+    return _record_item(
+            plane,
+            account_id,
+            library_id,
+            filename=filename,
+            kind=kind,
+            digest=digest,
+            size=len(stored),
+            captured=captured,
+            source=source,
+            peer_ip=peer_ip,
+            folder_id=folder_id,
+        )
+
+
+def import_path(
+    plane,
+    account_id: str,
+    library_id: str,
+    path,
+    *,
+    name: str,
+    source: str,
+    peer_ip: str,
+    folder_id: str = "",
+) -> dict:
+    """Import a file already on disk. The body is hashed in chunks, not held as one buffer."""
+    from pathlib import Path
+
+    lang = _lang(plane, account_id)
+    library_or_default(plane, account_id, library_id)
+    filename = _check_name(name, lang)
+    src = Path(path)
+    if not src.is_file() or src.is_symlink():
+        raise SsiosError("library_empty", say(lang, "library_empty"), 400)
+    size = src.stat().st_size
+    if size <= 0:
+        raise SsiosError("library_empty", say(lang, "library_empty"), 400)
+    with src.open("rb") as handle:
+        header = handle.read(80_000)
+    kind = _classify(filename, header, lang)
+    limit = _limit_for(kind)
+    if size > limit:
+        raise SsiosError("library_too_large", say(lang, "library_too_large", limit=limit), 400)
+    if kind["ext"] in {"png", "jpg", "gif", "webp"}:
+        return import_bytes(
+            plane,
+            account_id,
+            library_id,
+            src.read_bytes(),
+            name=filename,
+            source=source,
+            peer_ip=peer_ip,
+            folder_id=folder_id,
+        )
+    digest, stored_size = _store_stream(plane, account_id, library_id, src, kind["ext"])
+    return _record_item(
+        plane,
+        account_id,
+        library_id,
+        filename=filename,
+        kind=kind,
+        digest=digest,
+        size=stored_size,
+        captured="",
+        source=source,
+        peer_ip=peer_ip,
+        folder_id=folder_id,
+    )
+
+
+def import_relative(
+    plane,
+    account_id: str,
+    library_id: str,
+    path,
+    *,
+    relative: str,
+    source: str,
+    peer_ip: str,
+    folder_id: str = "",
+) -> dict:
+    """Import one dropped path. Hidden names are skipped. A folder prefix becomes Files folders."""
+    lang = _lang(plane, account_id)
+    parts = [part for part in str(relative or "").replace("\\", "/").split("/") if part not in {"", "."}]
+    shown = "/".join(parts) or str(relative or "")
+    if not parts or any(part in {"..", ".git"} or part.startswith(".") for part in parts):
+        return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "library_rejected"), "id": ""}
+    try:
+        parent = folder_id or ""
+        if len(parts) > 1:
+            parent = _folder_chain(plane, account_id, library_id, parts[:-1], parent, peer_ip)
+        saved = import_path(
+            plane,
+            account_id,
+            library_id,
+            path,
+            name=parts[-1],
+            source=source,
+            peer_ip=peer_ip,
+            folder_id=parent,
+        )
+    except SsiosError as exc:
+        return {"path": shown, "status": "rejected", "code": exc.code, "reason": exc.detail, "id": ""}
+    status = "version" if saved.get("result") == "version" else "saved"
+    reason = say(lang, "drop_version" if status == "version" else "drop_saved")
+    return {"path": shown, "status": status, "code": "", "reason": reason, "id": saved.get("id") or ""}
+
+
+def drop_summary(lang: str, results: list[dict]) -> str:
+    saved = sum(1 for row in results if row.get("status") == "saved")
+    versions = sum(1 for row in results if row.get("status") == "version")
+    skipped = sum(1 for row in results if row.get("status") == "rejected")
+    return say(lang, "drop_summary", saved=saved, versions=versions, skipped=skipped)
 
 
 def list_items(plane, account_id: str, library_id: str, *, folder: str = "", tag: str = "", trash: bool = False, uncategorized: bool = False, untagged: bool = False) -> list[dict]:
@@ -405,6 +471,129 @@ def _captured(raw: bytes) -> str:
     if b"DateTime" not in nearby:
         return ""
     return found.group(1).decode("ascii")
+
+
+def _limit_for(kind: dict) -> int:
+    return {"image": IMAGE_LIMIT, "video": MEDIA_LIMIT, "audio": MEDIA_LIMIT}.get(kind["group"], DOCUMENT_LIMIT)
+
+
+def _folder_chain(plane, account_id: str, library_id: str, names: list[str], parent_id: str, peer_ip: str) -> str:
+    current = parent_id or ""
+    for name in names:
+        data = _metadata(plane, account_id, library_id, create=False, name="")
+        found = next(
+            (
+                row
+                for row in data.get("folders") or []
+                if isinstance(row, dict) and row.get("name") == name and str(row.get("parent_id") or "") == current
+            ),
+            None,
+        )
+        if found is None:
+            found = add_folder(plane, account_id, library_id, name, peer_ip, parent_id=current)
+        current = str(found["id"])
+    return current
+
+
+def _record_item(
+    plane,
+    account_id: str,
+    library_id: str,
+    *,
+    filename: str,
+    kind: dict,
+    digest: str,
+    size: int,
+    captured: str,
+    source: str,
+    peer_ip: str,
+    folder_id: str,
+) -> dict:
+    stamp = _now()
+    with _LOCK:
+        items = _items(plane, account_id, library_id)
+        match = next((item for item in items if not item.get("trashed") and str(item.get("name") or "").casefold() == filename.casefold()), None)
+        version = {"sha256": digest, "size": size, "imported_at": stamp}
+        folders = [folder_id] if folder_id else []
+        if match is None:
+            item_id = "item-" + digest[:8]
+            while any(item.get("id") == item_id for item in items):
+                item_id = "item-" + hashlib.sha256(item_id.encode()).hexdigest()[:8]
+            match = {
+                "id": item_id,
+                "library_id": library_id,
+                "name": filename,
+                "ext": kind["ext"],
+                "mime": kind["mime"],
+                "group": kind["group"],
+                "size": size,
+                "sha256": digest,
+                "folder_ids": folders,
+                "tags": [],
+                "star": 0,
+                "annotation": "",
+                "source_kind": source if source in {"paste", "drag", "picker"} else "picker",
+                "imported_at": stamp,
+                "modified_at": stamp,
+                "captured_at": captured,
+                "added_by": account_id,
+                "versions": [version],
+                "trashed": False,
+                "trashed_at": "",
+            }
+            _write_item(plane, account_id, library_id, match)
+            action = "library.import"
+            result = "saved"
+        else:
+            match["versions"] = list(match.get("versions") or []) + [version]
+            match["sha256"] = digest
+            match["size"] = size
+            match["ext"] = kind["ext"]
+            match["mime"] = kind["mime"]
+            match["group"] = kind["group"]
+            match["modified_at"] = stamp
+            if captured:
+                match["captured_at"] = captured
+            if folder_id and folder_id not in (match.get("folder_ids") or []):
+                match["folder_ids"] = list(match.get("folder_ids") or []) + [folder_id]
+            _write_item(plane, account_id, library_id, match)
+            action = "library.version"
+            result = "version"
+    _audit(plane, account_id, peer_ip, action, match["id"], result, size)
+    public = dict(match)
+    public["version_count"] = len(match.get("versions") or [])
+    public["result"] = result
+    return public
+
+
+_CHUNK = 1024 * 1024
+
+
+def _store_stream(plane, account_id: str, library_id: str, src, ext: str) -> tuple[str, int]:
+    import secrets
+    from pathlib import Path
+
+    folder = _library_root(plane, account_id, library_id) / "objects"
+    secure_mkdir(folder)
+    incoming = folder / f".incoming-{secrets.token_hex(8)}"
+    digest = hashlib.sha256()
+    size = 0
+    with Path(src).open("rb") as handle, incoming.open("wb") as out:
+        while True:
+            chunk = handle.read(_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+            out.write(chunk)
+            size += len(chunk)
+    incoming.chmod(0o600)
+    final = folder / f"{digest.hexdigest()}.{ext}"
+    if final.exists():
+        incoming.unlink()
+    else:
+        incoming.replace(final)
+        final.chmod(0o600)
+    return digest.hexdigest(), size
 
 
 def _put_blob(plane, account_id: str, library_id: str, digest: str, ext: str, stored: bytes) -> None:
