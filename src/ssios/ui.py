@@ -83,6 +83,19 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return Page(200, _dashboard(plane, session))
     if method == "GET" and path == "/ui/notices":
         return _notices(plane, session)
+    if method == "GET" and path == "/ui/library":
+        from ssios.library_page import library_page
+
+        return Page(200, library_page(plane, session, query))
+    if method == "POST" and path == "/ui/library":
+        from ssios.library_page import library_post
+
+        _csrf(session, body)
+        return library_post(plane, session, body, peer_ip)
+    if method == "GET" and path == "/ui/library/raw":
+        from ssios.library_page import library_raw
+
+        return library_raw(plane, session, query)
     if method == "GET" and path == "/ui/tasks":
         return Page(200, _tasks(plane, session, query.get("status", "all")))
     if method == "POST" and path == "/ui/tasks":
@@ -297,6 +310,8 @@ def browser_error_page(detail: str, status: int, *, code: str = "", lang: str = 
     safe = html.escape(detail or say(choice, "page_failed"))
     if status == 401 or code in {"unauthorized", "login_required"}:
         href, label = "/ui/login", say(choice, "sign_in")
+    elif code.startswith("library_"):
+        href, label = "/ui/library", say(choice, "library_link")
     elif code.startswith("clip_") or code == "path_rejected":
         href, label = "/ui/vault", say(choice, "notes_link")
     elif code.startswith("connector") or code.startswith("oauth") or code == "secure_store_unavailable":
@@ -1574,6 +1589,7 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .page { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: none; margin: 0; padding: 0; }
 .sheet { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+.sheet.wide { max-width: 1100px; }
 .menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow: auto; min-height: 0; }
@@ -1645,6 +1661,16 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .file-filters a { text-decoration: none; }
 .file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.library { display: grid; grid-template-columns: 200px minmax(0, 1fr) 240px; gap: 16px; align-items: start; }
+.lib-side, .lib-inspector { display: grid; gap: 8px; align-content: start; }
+.lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 0; }
+.lib-switch.active { font-weight: 600; }
+.lib-badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; min-height: 180px; }
+.lib-card { display: grid; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+.lib-card img { width: 100%; height: 96px; object-fit: cover; border-radius: 8px; }
+.type-tile { display: grid; place-items: center; height: 96px; background: var(--hover); border-radius: 8px; font-weight: 600; }
+@media (max-width: 800px) { .library { grid-template-columns: 1fr; } }
 .file-list { display: grid; gap: 12px; }
 .file-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .file-card input { width: 100%; }
@@ -1772,6 +1798,10 @@ def _static_asset(method: str, path: str) -> Page | None:
         return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
     if path == NOTICES_PATH:
         return Page(200, NOTICES_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    from ssios.library_page import LIBRARY_JS, library_script_path
+
+    if path == library_script_path():
+        return Page(200, LIBRARY_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     if path.startswith("/ui/assets/chat-") and path.endswith(".js"):
         from ssios.ui_household import CHAT_JS, CHAT_PATH
 
@@ -1841,6 +1871,7 @@ def icon(name: str) -> str:
         "check": '<circle cx="12" cy="12" r="8"/><path d="M8 12l2.5 2.5L16 9"/>',
         "mic": '<rect x="9" y="4" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
         "paperclip": '<path d="M8 12l6-6a3 3 0 0 1 4 4l-7 7a4 4 0 0 1-6-6l7-7"/>',
+        "person": '<circle cx="12" cy="8" r="3"/><path d="M6 19c1.2-3 3.2-4.5 6-4.5S16.8 16 18 19"/>',
     }
     body = paths.get(name, paths["chat"])
     return (
@@ -1860,6 +1891,7 @@ def _rail(session: dict) -> str:
         f'<a href="#thread-search" title="Search" aria-label="Search">{icon("search")}</a>'
         f'<a href="/ui/vault" title="Notes" aria-label="Notes">{icon("notes")}</a>'
         f'<a href="/ui/files" title="Files" aria-label="Files">{icon("files")}</a>'
+        f'<a href="/ui/library" title="Library" aria-label="Library">{icon("files")}</a>'
         f'<a href="/ui/memory?project_id=local-summary" title="Memory" aria-label="Memory">{icon("memory")}</a>'
         f'<a href="/ui/tasks" title="Tasks" aria-label="Tasks">{icon("tasks")}</a>'
         f'<a href="/ui/connections" title="Connections" aria-label="Connections">{icon("link")}</a>'
@@ -1912,8 +1944,9 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
     )
 
 
-def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "") -> str:
-    main = body if chat else f"<div class=\"page\"><div class=\"sheet\"><h1>{html.escape(title)}</h1>{body}</div></div>"
+def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "", wide: bool = False) -> str:
+    sheet = "sheet wide" if wide else "sheet"
+    main = body if chat else f"<div class=\"page\"><div class=\"{sheet}\"><h1>{html.escape(title)}</h1>{body}</div></div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _style_link()
