@@ -87,8 +87,43 @@ def memory_context(scope, query: str = "") -> tuple[str, list[str]]:
             used.append(path)
             if len([item for item in used if item.startswith("topics/")]) >= 3:
                 break
+    for rel, depth, excerpt in _vault_notes(scope, query):
+        parts.append(f"# note {rel} ({'read with care' if depth == 'read' else 'skimmed, not read with care'} by the user; a note, not confirmed memory)\n{excerpt}")
+        used.append("note:" + rel)
     scope._last_memory_files = list(used)
     return "\n\n".join(parts)[:4000], used
+
+
+def _vault_notes(scope, query: str, limit: int = 2) -> list[tuple[str, str, str]]:
+    """Notes the account clipped or wrote that match the query. Every vault note is at least skimmed. Files are not here."""
+    from ssios.library_chat import search_terms
+    from ssios.reading import note_depth
+    from ssios.vault import _split_frontmatter, note_paths, read_note
+
+    terms = [term for term in search_terms(query) if len(term) >= 3 or re.search(r"[\u4e00-\u9fff]", term)]
+    if not terms:
+        return []
+    settings = scope.plane.settings
+    scored = []
+    try:
+        paths = note_paths(settings, scope.account_id)[:800]
+    except SsiosError:
+        return []
+    for rel in paths:
+        if rel == "Tasks.md":
+            continue
+        try:
+            text = read_note(settings, scope.account_id, rel)
+        except SsiosError:
+            continue
+        meta, body = _split_frontmatter(text)
+        blob = (rel + " " + str(meta.get("title") or "") + " " + body).casefold()
+        hits = sum(1 for term in terms if term in blob)
+        if hits:
+            depth = note_depth(scope.home, rel)
+            scored.append((hits + (0.5 if depth == "read" else 0), rel, depth, " ".join(body.split())[:600]))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [(rel, depth, excerpt) for _score, rel, depth, excerpt in scored[:limit]]
 
 
 _STATEMENT = re.compile(

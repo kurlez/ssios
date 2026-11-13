@@ -137,8 +137,11 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "POST" and path == "/ui/clipper":
         _csrf(session, body)
         return _clipper_post(plane, session, body)
+    if method == "POST" and path == "/ui/vault/note":
+        _csrf(session, body)
+        return _vault_note_post(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/vault":
-        return Page(200, _vault_page(plane, session, ""))
+        return Page(200, _vault_page(plane, session, "", str(query.get("tag") or "")))
     if method == "POST" and path == "/ui/vault":
         _csrf(session, body)
         return _vault_paste(plane, session, body, peer_ip)
@@ -1185,7 +1188,7 @@ def _history(plane, project_id: str, path: str) -> str:
     return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
-def _vault_page(plane, session: dict, notice: str) -> str:
+def _vault_page(plane, session: dict, notice: str, tag: str = "") -> str:
     from ssios.errors import SsiosError
     from ssios.locale_messages import say
     from ssios.vault import list_notes
@@ -1197,12 +1200,32 @@ def _vault_page(plane, session: dict, notice: str) -> str:
             raise
         notes = []
         notice = _clip_notice("clip_denied", say(ui_language(plane, session), "clip_denied"))
-    items = []
+    from urllib.parse import quote
+
+    from ssios.reading import depth_label, ledger
+
+    seen = ledger(plane.accounts.home(session["account"]["id"]))
+    wanted_tag = str(tag or "")
+    folders: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
     for item in notes:
-        path = html.escape(item["path"], quote=True)
-        title = html.escape(item["title"])
+        for name in item.get("tags") or []:
+            counts[name] = counts.get(name, 0) + 1
+        if wanted_tag and wanted_tag not in (item.get("tags") or []):
+            continue
+        href = "/ui/vault/note?path=" + quote(item["path"], safe="")
+        depth = depth_label(seen.get("note:" + item["path"], {}).get("depth") or "skimmed")
         source = html.escape(item.get("source") or "")
-        items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
+        row = f'<li><a href="{html.escape(href, quote=True)}">{html.escape(item["title"])}</a> <span class="badge">{depth}</span> <span>{source}</span></li>'
+        folders.setdefault(item.get("folder") or "", []).append(row)
+    tree = []
+    for folder in sorted(folders, key=lambda name: (name != "", name.casefold())):
+        label = html.escape(folder or "Vault root")
+        tree.append(f'<details class="vault-folder" open><summary>{label} <span class="count">{len(folders[folder])}</span></summary><ul>' + "".join(folders[folder]) + "</ul></details>")
+    tags = "".join(
+        f'<a{" class=\"active\"" if name == wanted_tag else ""} href="/ui/vault?tag={html.escape(quote(name, safe=""), quote=True)}">#{html.escape(name)} <span class="count">{count}</span></a> '
+        for name, count in sorted(counts.items(), key=lambda row: (-row[1], row[0].casefold()))[:60]
+    )
     csrf = html.escape(str(session.get("csrf") or ""))
     paste = (
         f"<form method=\"post\" action=\"/ui/vault\" enctype=\"multipart/form-data\">"
@@ -1212,31 +1235,70 @@ def _vault_page(plane, session: dict, notice: str) -> str:
         "<label>Or a text file <input type=\"file\" name=\"file\"></label>"
         "<button type=\"submit\">Clip pasted article</button></form>"
     )
-    body = notice + paste + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
+    body = (
+        notice
+        + paste
+        + "<p>These notes are on this computer. The folders are the folders of the vault, as Obsidian shows them. Open the vault folder in Obsidian.</p>"
+        + (f'<p class="vault-tags">{tags}' + (' <a href="/ui/vault">All notes</a>' if wanted_tag else "") + "</p>" if tags else "")
+        + ("".join(tree) or "<ul><li>No notes yet.</li></ul>")
+    )
     return _page(session, "Notes", body)
 
 
-def _vault_note(plane, session: dict, rel: str) -> str:
+def _vault_note(plane, session: dict, rel: str, notice: str = "") -> str:
     from urllib.parse import quote
 
-    from ssios.vault import read_note, render_markdown
+    from ssios.reading import depth_label, ledger
+    from ssios.vault import read_note, render_markdown, resolve_link
 
-    text = read_note(plane.settings, session["account"]["id"], rel)
+    account_id = session["account"]["id"]
+    text = read_note(plane.settings, account_id, rel)
 
     def link_for(url: str) -> str:
         if url.startswith(("javascript:", "data:")):
             return ""
         if url.startswith(("https://", "http://")):
             return url
-        if url.startswith("/") or ".." in url.split("/"):
+        found = resolve_link(plane.settings, account_id, rel, url)
+        if not found:
             return ""
-        if url.endswith(".md"):
-            return "/ui/vault/note?path=" + quote("Clippings/" + url)
-        return "/ui/vault/asset?path=" + quote("Clippings/" + url)
+        kind = "note" if found.casefold().endswith(".md") else "asset"
+        return f"/ui/vault/{kind}?path=" + quote(found, safe="")
 
     meta, rendered = render_markdown(text, link_for=link_for)
     props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
-    return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
+    entry = ledger(plane.accounts.home(account_id)).get("note:" + rel, {})
+    depth = entry.get("depth") or "skimmed"
+    csrf = html.escape(str(session.get("csrf") or ""))
+    path = html.escape(rel, quote=True)
+    crumbs = " / ".join(html.escape(part) for part in rel.split("/"))
+    tools = (
+        f'<section class="card reading"><p>{crumbs} <span class="badge">{depth_label(depth)}</span></p>'
+        "<p>A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.</p>"
+        f'<form method="post" action="/ui/vault/note"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="path" value="{path}">'
+        + ('<button name="op" value="read" type="submit">Mark as read</button> ' if depth != "read" else "")
+        + '<label>Remind me to read this <select name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
+        '<option value="weekend">this weekend</option><option value="week">in a week</option></select></label> '
+        '<button name="op" value="remind" type="submit">Set reminder</button></form></section>'
+    )
+    return _page(session, "Note", f"{notice}{tools}<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
+
+
+def _vault_note_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
+    from ssios.reading import mark_note, remind_to_read
+    from ssios.scope import AccountScope
+    from ssios.vault import read_note
+
+    rel = str(body.get("path") or "")
+    read_note(plane.settings, session["account"]["id"], rel)
+    scope = AccountScope(plane, _account(session))
+    if str(body.get("op") or "") == "remind":
+        when = remind_to_read(plane, scope, "note:" + rel, rel.rsplit("/", 1)[-1][:-3], str(body.get("when") or "tomorrow"))
+        notice = f"<p>Reminder set for {html.escape(when)}.</p>"
+    else:
+        mark_note(plane, scope, rel, "read", "marked", peer_ip)
+        notice = "<p>Marked as read.</p>"
+    return Page(200, _vault_note(plane, session, rel, notice))
 
 
 def _clip_notice(code: str, detail: str) -> str:

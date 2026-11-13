@@ -132,7 +132,11 @@ def _copy_notes(plane, owner_id: str, member_id: str, library_id: str, peer_ip: 
     for item in _items(plane, owner_id, library_id):
         if not (item.get("description") or item.get("ocr")):
             continue
-        _write_topic(plane, member_id, library_id, item, peer_ip)
+        # Being given access is not reading. The note reaches the member's memory when the member opens the file.
+        from ssios.reading import has_read_file
+
+        if has_read_file(plane, member_id, library_id, str(item.get("id") or "")):
+            _write_topic(plane, member_id, library_id, item, peer_ip)
 
 
 def _active(plane, username: str) -> dict:

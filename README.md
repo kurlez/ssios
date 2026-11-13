@@ -165,6 +165,7 @@ The suite uses a fake Ollama client and a fake guest. It does not call Google an
 - [Search by meaning and the host tool loop](docs/search.md)
 - [Backup and restore](docs/backup.md)
 - [Library folders, external disks, and Eagle](docs/files-storage.md)
+- [Memory from Files and Notes](docs/design/memory.md)
 - [Background jobs and start at sign-in](docs/background.md)
 - [Release checklist for the Mac](docs/release-checklist.md)
 - [Mac end-to-end test](docs/mac-e2e-test.md)

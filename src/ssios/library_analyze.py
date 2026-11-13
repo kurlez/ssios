@@ -114,8 +114,13 @@ def analyze_item(plane, account_id: str, library_id: str, item_id: str, peer_ip:
     _audit(plane, account_id, peer_ip, "library.analyze", item_id, "ok", int(item.get("size") or 0))
     from ssios.library_share import reader_ids
 
+    # The description stays in the Files catalog, where search finds it. It becomes a memory note only
+    # for an account that has opened the file. A file nobody has read is not memory.
+    from ssios.reading import has_read_file
+
     for reader_id in reader_ids(plane, account_id, library_id):
-        _write_topic(plane, reader_id, library_id, item, peer_ip)
+        if has_read_file(plane, reader_id, library_id, str(item["id"])):
+            _write_topic(plane, reader_id, library_id, item, peer_ip)
     item["result"] = "analyzed"
     return item
 

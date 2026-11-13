@@ -654,6 +654,14 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             selected = get_item(plane, account_id, library_id, item_id)
         except SsiosError:
             selected = None
+        if selected is not None and not selected.get("trashed"):
+            # Opening a file in the inspector is the account looking at it.
+            from ssios.reading import mark_file
+
+            try:
+                mark_file(plane, session["account"], library_id, item_id, "skimmed", "opened")
+            except SsiosError:
+                pass
     csrf = html.escape(str(session.get("csrf") or ""), quote=True)
     base = f"/ui/library?library={html.escape(library_id, quote=True)}"
     switcher = []
@@ -748,7 +756,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + '<input type="hidden" name="op" value="tag-item">'
             + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40"></label>'
             + f'<button type="submit">{html.escape(say(lang, "lib_add_tag"))}</button></form>'
-            + _analysis_block(selected, lang, csrf, library_id, ident)
+            + _analysis_block(selected, lang, csrf, library_id, ident, _depth(plane, account_id, library_id, selected))
         )
         if selected.get("trashed"):
             inspector += (
@@ -1001,6 +1009,18 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         if found.get("imported"):
             note += " " + say(_language(plane, account_id), "drop_saved")
         return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(note)}</p>"))
+    if op in {"opened", "mark-read", "remind-read"}:
+        from ssios.reading import mark_file, remind_to_read
+        from ssios.scope import AccountScope
+
+        item = get_item(plane, account_id, library_id, str(body.get("item") or ""))
+        if op == "remind-read":
+            when = remind_to_read(plane, AccountScope(plane, session["account"]), f"file:{library_id}:{item['id']}", str(item.get("name") or ""), str(body.get("when") or "tomorrow"))
+            return Page(200, library_page(plane, session, {"library": library_id, "item": item["id"]}, f"<p>Reminder set for {html.escape(when)}.</p>"))
+        mark_file(plane, session["account"], library_id, item["id"], "read" if op == "mark-read" else "skimmed", "marked" if op == "mark-read" else "opened", peer_ip)
+        if str(body.get("ajax") or "") == "1":
+            return Page(200, '{"ok": true}', content_type="application/json; charset=utf-8")
+        return Page(200, library_page(plane, session, {"library": library_id, "item": item["id"]}))
     if op == "analyze":
         from ssios.library_analyze import analyze_item
 
@@ -1234,7 +1254,13 @@ def _share_block(chosen: dict, lang: str, csrf: str, library_id: str) -> str:
     )
 
 
-def _analysis_block(selected: dict, lang: str, csrf: str, library_id: str, ident: str) -> str:
+def _depth(plane, account_id: str, library_id: str, item: dict) -> str:
+    from ssios.reading import depth_of
+
+    return depth_of(plane.accounts.home(account_id), f"file:{library_id}:{item['id']}")
+
+
+def _analysis_block(selected: dict, lang: str, csrf: str, library_id: str, ident: str, depth: str = "") -> str:
     description = str(selected.get("description") or "")
     ocr = str(selected.get("ocr") or "")
     shown = ""
@@ -1247,6 +1273,18 @@ def _analysis_block(selected: dict, lang: str, csrf: str, library_id: str, ident
         f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
         f'<input type="hidden" name="item" value="{ident}">'
         f'<button name="op" value="analyze" type="submit">{html.escape(say(lang, "analyze"))}</button></form>'
+    )
+    from ssios.reading import depth_label
+
+    forms += (
+        f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<input type="hidden" name="item" value="{ident}">'
+        f'<p><span class="badge">{depth_label(depth)}</span></p>'
+        + ('<button name="op" value="mark-read" type="submit">Mark as read</button> ' if depth != "read" else "")
+        + '<label>Remind me to read this <select name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
+        '<option value="weekend">this weekend</option><option value="week">in a week</option></select></label> '
+        '<button name="op" value="remind-read" type="submit">Set reminder</button></form>'
     )
     if description:
         forms += (

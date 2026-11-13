@@ -34,6 +34,18 @@ class AnalyzeTest(PlaneTest):
         self.assertEqual(analyzed["ocr"], "HARBOR")
         self.assertEqual(analyzed["analysis_model"], "scripted")
         scope = AccountScope(self.plane, self.account)
+        # Analysis alone is not reading. The description is in the catalog and not in memory.
+        from ssios.account_memory import memory_context
+        from ssios.errors import SsiosError
+        from ssios.reading import depth_of, mark_file
+
+        with self.assertRaises(SsiosError):
+            scope.memory().read_file(scope.project_id(), f"topics/library/{saved['id']}.md", include_untrusted=True)
+        self.assertNotIn(phrase, memory_context(scope, "Harbor tile")[0])
+        self.assertEqual(depth_of(scope.home, f"file:{self.library_id}:{saved['id']}"), "")
+        # The account opens the file. Now the note is memory.
+        mark_file(self.plane, self.account, self.library_id, saved["id"], "skimmed", "opened")
+        self.assertEqual(depth_of(scope.home, f"file:{self.library_id}:{saved['id']}"), "skimmed")
         note = scope.memory().read_file(scope.project_id(), f"topics/library/{saved['id']}.md", include_untrusted=False)
         self.assertIn("Added by: ada", note["content"])
         self.assertIn(phrase, note["content"])
@@ -48,6 +60,20 @@ class AnalyzeTest(PlaneTest):
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertIn("library.analyze", audit)
         self.assertIn("library.memory", audit)
+        # A note written under the old rule, for a file that was never opened, is taken out. The read one stays.
+        from ssios.library_analyze import _write_topic
+        from ssios.reading import prune_unread
+        from test_library import _png as png
+
+        unread = import_bytes(self.plane, self.account["id"], self.library_id, png(77), name="unread.png", source="picker", peer_ip="127.0.0.1")
+        analyzed_unread = analyze_item(self.plane, self.account["id"], self.library_id, unread["id"], "127.0.0.1", model=ScriptedModel("never opened 7781", [], ""))
+        _write_topic(self.plane, self.account["id"], self.library_id, analyzed_unread, "127.0.0.1")
+        self.assertEqual(prune_unread(self.plane, self.account), {"kept_read": 1, "removed_unread": 1})
+        self.assertEqual(scope.memory().search(scope.project_id(), "7781", include_untrusted=True)["hits"], [])
+        self.assertIn(phrase, scope.memory().read_file(scope.project_id(), f"topics/library/{saved['id']}.md", include_untrusted=False)["content"])
+        from ssios.library import get_item
+
+        self.assertEqual(get_item(self.plane, self.account["id"], self.library_id, unread["id"])["description"], "never opened 7781")
         self.assertNotIn(phrase, audit)
         self.assertNotIn("HARBOR", audit)
         with self.assertRaises(SsiosError) as remote:

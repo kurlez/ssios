@@ -439,6 +439,15 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
     item["modified_at"] = _now()
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, action, item_id, "ok", int(item.get("size") or 0))
+    if (star is not None and int(star) > 0) or (annotation is not None and str(annotation).strip()):
+        # A star or a note of the account's own is the account having read the file.
+        from ssios.library_analyze import _account
+        from ssios.reading import mark_file
+
+        try:
+            mark_file(plane, _account(plane, account_id), library_id, item_id, "read", "star" if star else "note", peer_ip)
+        except SsiosError:
+            pass
     return item
 
 

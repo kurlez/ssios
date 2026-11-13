@@ -723,6 +723,13 @@ CHAT_JS = r"""
     if (page) inFiles.href = page;
     box.hidden = false;
     box.querySelector(".viewer-close").focus();
+    var where = /[?&]library=([^&]+)&item=([^&]+)/.exec(src);
+    if (where) {
+      var seen = new URLSearchParams();
+      seen.set("csrf", csrf); seen.set("op", "opened"); seen.set("ajax", "1");
+      seen.set("library", decodeURIComponent(where[1])); seen.set("item", decodeURIComponent(where[2]));
+      fetch("/ui/library", { method: "POST", body: seen, credentials: "same-origin" }).catch(function () {});
+    }
   }
 
   function closeFile() {

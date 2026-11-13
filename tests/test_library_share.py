@@ -37,6 +37,13 @@ class ShareTest(PlaneTest):
         with self.assertRaises(SsiosError):
             update_item(self.plane, self.ada["id"], self.studio, saved["id"], peer_ip="127.0.0.1", trash=True)
         ada = AccountScope(self.plane, self.ada)
+        from ssios.reading import mark_file
+
+        # Being given access is not reading. The note reaches her memory when she opens the file.
+        with self.assertRaises(SsiosError):
+            ada.memory().read_file(ada.project_id(), f"topics/library/{saved['id']}.md", include_untrusted=True)
+        mark_file(self.plane, self.ada, self.studio, saved["id"], "skimmed", "opened")
+        mark_file(self.plane, self.owner, self.studio, saved["id"], "skimmed", "opened")
         note = ada.memory().read_file(ada.project_id(), f"topics/library/{saved['id']}.md", include_untrusted=False)
         self.assertIn("Added by: owner", note["content"])
         self.assertIn(phrase, note["content"])
