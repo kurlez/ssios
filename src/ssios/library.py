@@ -153,6 +153,20 @@ def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str,
     return {"id": folder_id, "name": title}
 
 
+def tag_counts(plane, account_id: str, library_id: str) -> list[tuple[str, int]]:
+    """Every tag in the library with the number of live items that carry it.
+
+    A tag made on the page, by analysis, or by a batch edit is listed the same way.
+    """
+    counts: dict[str, int] = {}
+    for name in metadata(plane, account_id, library_id).get("tags") or []:
+        counts.setdefault(str(name), 0)
+    for item in list_items(plane, account_id, library_id):
+        for name in item.get("tags") or []:
+            counts[str(name)] = counts.get(str(name), 0) + 1
+    return sorted(counts.items(), key=lambda row: (-row[1], row[0].casefold()))
+
+
 def add_tag(plane, account_id: str, library_id: str, name: str, peer_ip: str) -> str:
     title = " ".join(str(name or "").split())[:40]
     if not title:

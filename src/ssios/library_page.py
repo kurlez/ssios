@@ -624,10 +624,16 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
         from ssios.library_search import by_meaning, meaning_ids
 
-        needle = text_query.casefold()
-        close = [] if trash else meaning_ids(plane, account_id, library_id, text_query)
-        items = by_meaning([item for item in items if needle in _blob(item) or str(item.get("id") or "") in close], close, needle)
-        ranked = bool(close) and "sort" not in query
+        from ssios.library_chat import tag_filter
+
+        wanted, rest = tag_filter(text_query)
+        if wanted:
+            items = [item for item in items if all(one in {str(name).casefold() for name in item.get("tags") or []} for one in wanted)]
+        needle = rest.casefold()
+        if needle:
+            close = [] if trash else meaning_ids(plane, account_id, library_id, rest)
+            items = by_meaning([item for item in items if needle in _blob(item) or str(item.get("id") or "") in close], close, needle)
+            ranked = bool(close) and "sort" not in query
     selected = None
     item_id = str(query.get("item") or "")
     if item_id:
@@ -652,8 +658,13 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             f'href="{base}&amp;folder={html.escape(str(row.get("id") or ""), quote=True)}">{html.escape(_folder_label(known, row))}</a>'
         )
     tags = []
-    for name in meta.get("tags") or []:
-        tags.append(f'<a href="{base}&amp;tag={html.escape(str(name), quote=True)}">{html.escape(str(name))}</a>')
+    from urllib.parse import quote as _quote
+
+    from ssios.library import tag_counts
+
+    for name, count in tag_counts(plane, account_id, library_id):
+        mark = ' class="active"' if name == tag else ""
+        tags.append(f'<a{mark} href="{base}&amp;tag={html.escape(_quote(name, safe=""), quote=True)}">{html.escape(name)} <span class="count">{count}</span></a>')
     sort = str(query.get("sort") or "newest")
     if sort not in {"name", "newest", "size"}:
         sort = "newest"
@@ -761,6 +772,15 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         '<div class="lib-side">'
         + "".join(switcher)
         + nav
+        + (
+            '<details class="lib-section" open><summary>'
+            + html.escape(say(lang, "lib_tags"))
+            + '</summary><div class="lib-tree lib-tags">'
+            + "".join(tags)
+            + "</div></details>"
+            if tags
+            else ""
+        )
         + '<details class="lib-section" open><summary>'
         + html.escape(say(lang, "lib_folders"))
         + "</summary>"

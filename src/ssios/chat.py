@@ -217,6 +217,17 @@ def iter_turn(
             source="rule",
             skill="weather",
         )
+    from ssios.library_chat import try_files_first
+
+    earlier = (stored_conv.get("messages") or []) if conversation_id else []
+    if not resumed and try_files_first(plane, account["id"], message, decision.route, decision.skill, earlier):
+        planned = None
+        decision = RouteDecision(
+            route="files",
+            reason="Files on this computer has a match for this, so it is listed first. No model is asked.",
+            reason_code="rule_files",
+            source="rule",
+        )
     if decision.skill == "weather" and asks_web_weather(message) and not place and weather_place:
         place = weather_place
     _audit_route(plane, account["id"], peer_ip, decision)
@@ -294,6 +305,8 @@ def iter_turn(
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
+        elif decision.route == "files":
+            yield from _files(plane, scope, record["id"], message, decision)
         elif decision.route == "tasks":
             yield from _task_command(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "reminders":
@@ -833,6 +846,8 @@ def _dispatch_host(
         yield from _schedule(plane, scope, conversation_id, message, peer_ip)
     elif decision.route == "account":
         yield from _account_facts(scope, conversation_id, message)
+    elif decision.route == "files":
+        yield from _files(plane, scope, conversation_id, message, decision)
     elif decision.route == "vm":
         yield from _vm(plane, scope, conversation_id, message, peer_ip)
 
@@ -1509,6 +1524,17 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
         )
         return
     yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
+
+
+def _files(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:
+    """List matching Files items with links. The catalog is read. No model writes the list."""
+    from ssios.library_chat import files_text, find_files
+
+    rows = find_files(plane, scope.account_id, message)
+    text = files_text(rows, _turn_language(plane, scope.account_id, message))
+    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": decision.public()})
+    plane.security_audit.write(actor=scope.account_id, ip="127.0.0.1", action="library.search", target="chat", result="ok", extra={"service": "library", "item_count": str(len(rows))})
+    yield {"event": "results", "data": {"text": text, "blocks": [], "reply": text}}
 
 
 def _account_facts(scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
@@ -2212,6 +2238,7 @@ def failure_hint(code: str, lang: str = "en") -> str:
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "city_not_found": "No city matched that name. Try a city and a region, such as Bellevue, WA. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
+        "weather_unreachable": "This computer could not reach Open-Meteo. Check the network or proxy, or raise [skills] timeout_seconds. Nothing was invented.",
         "skill_upstream": "The site may block automated readers. Open the page in your browser and use the clipper, or paste the text or HTML.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
         "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",

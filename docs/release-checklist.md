@@ -54,6 +54,10 @@ Setup for the steps is in [mac-e2e-test.md](mac-e2e-test.md). Record the commit,
 - [ ] Share a library with a second account, remove that account, and its Files note is no longer recalled.
 - [ ] Turn on a watch folder, copy a large file in slowly, and it is imported once, after it stops changing.
 
+- [ ] In chat, `在我的文件里找<a word in a file name>` lists that file with a link that opens it. `帮我找一下<word>` does the same, and a word that is in no file goes to the usual route.
+- [ ] The Files sidebar lists tags with counts, including tags that analysis added. Clicking one filters the grid.
+- [ ] In the chat box, Enter adds a line and Ctrl+Enter or Command+Enter sends, including while a Chinese input method is composing.
+
 ## 7. Notes, tasks, and reminders
 
 - [ ] Clip a page with the browser extension, including one image.

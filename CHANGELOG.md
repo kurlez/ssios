@@ -13,6 +13,10 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - A library owner can have new files analyzed in the background, one file per timer pass. Off by default.
 - `launchd-plist` prints a LaunchAgent that starts the UI at sign-in. It installs nothing. See [docs/background.md](docs/background.md).
 - Opening one Files item reads its own row instead of the whole catalog (84 ms to under 1 ms with 3000 synthetic items on the CI machine). Listing 3000 items takes about 0.1 s, so the catalog stays as JSON files.
+- Chat finds things in Files. `在我的文件里找Anthropic`, `find my AMC file`, and `标签是数学的文件` list matching items with links, from the catalog and with no model. A bare `帮我找一下AMC`, or a short follow-up to it, lists Files matches first when there are any. `files.search` and `files.read` are host tools.
+- The Files sidebar has a Tags section with a count per tag. It lists tags from analysis and batch edits, which the page built before and never showed. The search box takes `#tag` and `tag:name`.
+- The chat box sends on Ctrl+Enter, or Command+Enter. Enter is a new line.
+- A weather timeout is retried once and reports `weather_unreachable` with the service name, not the hint for a blocked web page.
 - A PDF thumbnail waits at most 6 seconds for all drawing tools together, and a PDF that could not be drawn is not tried again on every request. On a Mac a damaged PDF could hold the request for 30 seconds.
 - Three tests no longer depend on the machine: one assumed krunvm was not installed, and two assumed the temp directory had no linked parent, which is not true on macOS.
 - [docs/release-checklist.md](docs/release-checklist.md) lists what has to be run on the Mac before a tag.

@@ -28,6 +28,8 @@ SPECS = (
     ("memory.search", "Find this account's saved notes by words or by meaning. Returns file paths.", {"q": _TEXT}, ["q"], ""),
     ("memory.read", "Read one saved note by path, for example human.md.", {"path": _TEXT}, ["path"], ""),
     ("memory.propose_write", "Propose a note. It is not saved until the user approves.", {"path": _TEXT, "content": _TEXT}, ["path", "content"], ""),
+    ("files.search", "Find items in this account's Files by name, tag, description, or meaning. Returns ids.", {"q": _TEXT, "limit": _COUNT}, ["q"], ""),
+    ("files.read", "Read what is stored about one Files item: name, tags, description, and text read from it.", {"id": _TEXT}, ["id"], ""),
     ("tasks.list", "List this account's open tasks.", {}, [], ""),
     ("tasks.add", "Propose a task. It is not added until the user approves.", {"title": _TEXT, "due": _TEXT}, ["title"], ""),
     ("reminders.list", "List this account's open reminders.", {}, [], ""),

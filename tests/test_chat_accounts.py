@@ -2067,7 +2067,7 @@ class HouseholdTest(PlaneTest):
         self.assertIn("Delete", page)
         self.assertIn("How can I help?", page)
         self.assertIn("Message SSIOS", page)
-        self.assertIn("Enter to send, Shift+Enter for a new line", page)
+        self.assertIn("Ctrl+Enter to send, Enter for a new line", page)
         self.assertNotIn("<details class=\"more\"", page)
         self.assertIn("menu-label\">More", page)
         href = page.split('rel="stylesheet" href="', 1)[1].split('"', 1)[0]

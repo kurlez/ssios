@@ -94,7 +94,7 @@ def _needs_codex(message: str, decision: RouteDecision, pending_fill: bool) -> b
     """Reports, several sources, workspace work, and a pending follow-up. Writing stays on local chat."""
     from ssios.calendar_intent import no_tool_request
 
-    if no_tool_request(message) or decision.route in {"skill", "memory", "reminders", "account", "schedule"}:
+    if no_tool_request(message) or decision.route in {"skill", "memory", "reminders", "account", "schedule", "files"}:
         return False
     if decision.route == "direct" and not (_REPORT.search(message) or pending_fill):
         return False

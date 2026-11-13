@@ -286,7 +286,7 @@ class ChatSendBrowserTest(unittest.TestCase):
         if enter:
             self.page.eval(
                 "document.querySelector('textarea[name=message]').dispatchEvent("
-                "new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); true"
+                "new KeyboardEvent('keydown', {key: 'Enter', ctrlKey: true, bubbles: true})); true"
             )
         else:
             self.page.eval("document.querySelector('button.send').click(); true")

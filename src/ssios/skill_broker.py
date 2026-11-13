@@ -317,7 +317,7 @@ class SkillBroker:
             "https://api.open-meteo.com/v1/forecast?current=temperature_2m,weather_code,wind_speed_10m"
             f"&latitude={latitude}&longitude={longitude}&timezone=auto&temperature_unit=celsius&wind_speed_unit=kmh"
         )
-        forecast = self.fetch(forecast_url, policy, account_id, "weather", peer_ip)
+        forecast = self._weather_fetch(forecast_url, policy, account_id, peer_ip)
         try:
             data = json.loads(forecast["body"].decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
@@ -379,7 +379,7 @@ class SkillBroker:
         query = place
         for name, choose in geocode_attempts(place):
             geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=5&name=" + quote(name)
-            geo = self.fetch(geo_url, policy, account_id, "weather", peer_ip)
+            geo = self._weather_fetch(geo_url, policy, account_id, peer_ip)
             try:
                 payload = json.loads(geo["body"].decode("utf-8"))
             except (UnicodeError, json.JSONDecodeError) as exc:
@@ -397,6 +397,22 @@ class SkillBroker:
         if nearby:
             return None, _ranked(nearby)[:4], "nearby", query
         raise SsiosError("city_not_found", "No matching city was found.", 404)
+
+    def _weather_fetch(self, url: str, policy: dict, account_id: str, peer_ip: str) -> dict:
+        """One retry after a timeout. A failure names the weather service, not a web page."""
+        last: SsiosError | None = None
+        for _attempt in range(2):
+            try:
+                return self.fetch(url, policy, account_id, "weather", peer_ip)
+            except SsiosError as exc:
+                if exc.code != "skill_upstream":
+                    raise
+                last = exc
+                if exc.reason != "timeout":
+                    break
+        host = urlsplit(url).hostname or "the weather service"
+        why = str(last.reason or "unreachable") if last else "unreachable"
+        raise SsiosError("weather_unreachable", f"The weather service {host} did not answer ({why}).", 502, reason=why) from last
 
     def _fetch_article(self, account_id: str, message: str, policy: dict, peer_ip: str) -> dict:
         pasted = pasted_article(message)

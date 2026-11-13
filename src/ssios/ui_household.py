@@ -54,7 +54,8 @@ CHAT_JS = r"""
   });
   box.addEventListener("input", function () { grow(); syncSend(); });
   box.addEventListener("keydown", function (event) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // Enter is a new line. Ctrl+Enter, or Command+Enter on a Mac, sends.
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing) {
       event.preventDefault();
       var pickedNow = form.querySelector("input[name=image]");
       if (box.value.trim() || pending.length || (pickedNow && pickedNow.files && pickedNow.files.length)) {
@@ -2159,7 +2160,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "<button type=\"submit\" class=\"send primary\" aria-label=\"Send\">"
         "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M3 11.5 21 3l-8.5 18-2.2-7.3z\"/></svg>"
         "</button></div></form>"
-        "<p class=\"hint\">Enter to send, Shift+Enter for a new line</p></div></section>"
+        "<p class=\"hint\">Ctrl+Enter to send, Enter for a new line</p></div></section>"
         + _info_pane(plane, session, state)
         + "</div>"
         + "<link rel=\"stylesheet\" href=\"/ui/vendor/katex/katex.min.css\">"

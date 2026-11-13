@@ -26,6 +26,8 @@ READ_TOOLS = {
     "reminders.list": "",
     "web.fetch": "",
     "weather": "",
+    "files.search": "",
+    "files.read": "",
 }
 WRITE_TOOLS = {
     "calendar.create": "calendar.create_event",
@@ -40,7 +42,8 @@ WRITE_TOOLS = {
 }
 TOOL_NAMES = tuple(READ_TOOLS) + tuple(WRITE_TOOLS)
 # Results of these carry text written by someone else. These two tools send a request to an address.
-OUTSIDE_READS = {"gmail.search", "gmail.read", "drive.list", "drive.read", "web.fetch"}
+# A file's name and the text read from it were written by whoever made the file.
+OUTSIDE_READS = {"gmail.search", "gmail.read", "drive.list", "drive.read", "web.fetch", "files.search", "files.read"}
 OUTBOUND_TOOLS = {"web.fetch", "web.clip"}
 
 
@@ -109,6 +112,8 @@ _PREFIX = {
     "web.fetch": "w",
     "web.clip": "w",
     "weather": "w",
+    "files.search": "f",
+    "files.read": "f",
 }
 _SECRET = re.compile(r"ya29\.|refresh_token|client_secret|access_token", re.IGNORECASE)
 _MIRROR_HOSTS = ("archive.is", "archive.org", "webcache.googleusercontent.com", "outline.com", "12ft.io")
@@ -228,6 +233,10 @@ def _read(plane, account: dict, tool: str, arguments: dict, peer_ip: str, result
             body, count = _tasks_list(scope)
         elif tool == "reminders.list":
             body, count = _reminders_list(scope)
+        elif tool == "files.search":
+            body, count = _files_search(plane, scope, arguments)
+        elif tool == "files.read":
+            body, count = _files_read(plane, scope, arguments)
         elif tool == "web.fetch":
             body, count = _web_fetch(plane, scope, arguments, peer_ip)
         else:
@@ -322,6 +331,21 @@ def _memory_search(scope, arguments: dict) -> tuple[str, int]:
         if path not in lines:
             lines.append(path)
     return "\n".join(lines), len(lines)
+
+
+def _files_search(plane, scope, arguments: dict) -> tuple[str, int]:
+    from ssios.library_chat import find_files
+
+    query = str(arguments.get("q") or arguments.get("query") or "")[:200]
+    rows = find_files(plane, scope.account_id, query, limit=min(int(arguments.get("limit") or 8), 20))
+    lines = [f"{row['id']} | {row['name']} | {', '.join(row['tags'])} | {row['description']}" for row in rows]
+    return "\n".join(lines), len(rows)
+
+
+def _files_read(plane, scope, arguments: dict) -> tuple[str, int]:
+    from ssios.library_chat import read_file_note
+
+    return read_file_note(plane, scope.account_id, str(arguments.get("id") or arguments.get("item_id") or "")), 1
 
 
 def _propose_memory(scope, arguments: dict) -> str:

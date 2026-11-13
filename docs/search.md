@@ -60,3 +60,17 @@ The chat model must support Ollama tool calls. `qwen2.5:7b` and `qwen3:14b` adve
 ## One web address rule for both paths
 
 Mail, a Drive file, and a web page can contain text that asks the model to open another address, with private text in the query string. The tool session now refuses `web.fetch` and `web.clip` after one of those reads unless the address appears in the user's own message. This applies to the guest and to the host loop. The refusal is audited as `denied`.
+
+## Files from chat
+
+Chat reads the Files catalog on the host. It does not ask a model and does not start the guest.
+
+- A message that names a file and a search word, such as `在我的文件里找Anthropic`, `我的照片在哪`, `find my AMC file`, or `search my files for harbor`, is route `files`. The reply is a list of items with a link to each one on the Files page. When nothing matches, the reply says so.
+- A message that only says find, such as `帮我找一下AMC`, checks Files first. When Files has a match it is listed. When it has none, the turn goes where it went before.
+- A short message right after one of those, such as `AMC8的练习题`, is treated the same way.
+- `标签是数学的文件`, `files tagged work`, `tag:contest`, and `#contest` keep only items that carry that tag.
+- A request to edit, delete, rename, create, or run something is not a Files search.
+
+A word matches the file name, tags, note, description, and text read from the file. Any one word is enough, and more matching words rank higher. A word that is exactly a tag counts for more. With `[search] embed_model` set, items close in meaning are added. A file that has not been analyzed can be found only by its name, tags, and note.
+
+The host tool loop has `files.search` and `files.read`. `files.read` returns the stored name, tags, description, and text, never the bytes. Both count as text written by someone else for the web address rule.
