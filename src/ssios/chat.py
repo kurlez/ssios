@@ -2246,7 +2246,7 @@ def failure_hint(code: str, lang: str = "en") -> str:
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "city_not_found": "No city matched that name. Try a city and a region, such as Bellevue, WA. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
-        "weather_unreachable": "This computer could not reach Open-Meteo. Check the network or proxy, or raise [skills] timeout_seconds. Nothing was invented.",
+        "weather_unreachable": "This computer could not reach Open-Meteo, MET Norway, or wttr.in. Check the network or proxy. Nothing was invented.",
         "skill_upstream": "The site may block automated readers. Open the page in your browser and use the clipper, or paste the text or HTML.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
         "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",

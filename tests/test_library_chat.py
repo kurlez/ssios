@@ -60,6 +60,13 @@ class FilesInChatTest(PlaneTest):
 
         self.assertEqual(_public_block(shown["blocks"][0])["events"][0]["link"], card["link"])
         self.assertEqual(_public_block({"events": [{"title": "x", "link": "/ui/admin"}, {"title": "y", "link": "javascript:alert(1)"}]})["events"][0]["link"], "")
+        self.assertEqual(card["preview"], card["link"].replace("/ui/library?", "/ui/library/raw?"))
+        self.assertEqual(_public_block(shown["blocks"][0])["events"][0]["preview"], card["preview"])
+        self.assertEqual(_public_block({"events": [{"title": "x", "preview": "https://evil.example/a.pdf"}]})["events"][0]["preview"], "")
+        from ssios.library_chat import files_block
+
+        self.assertEqual(files_block([{"name": "notes.docx", "url": "/ui/library?library=l&item=i"}])["events"][0]["preview"], "")
+        self.assertIn('href="/ui/library/raw?library=', _result_blocks_html(shown["blocks"]))
         self.assertIn('href="/ui/library?library=', _result_blocks_html(shown["blocks"]))
         self.assertNotIn("](", _result_blocks_html(shown["blocks"]))
         route, body, _conv = self._say("AMC8的练习题", conv)
@@ -133,28 +140,53 @@ class FilesInChatTest(PlaneTest):
         self.assertIn("AMC8 2019 练习题.pdf", body)
 
 
-class WeatherTimeoutTest(PlaneTest):
-    def test_a_weather_timeout_is_retried_once_and_names_the_service(self) -> None:
+class WeatherFallbackTest(PlaneTest):
+    def setUp(self) -> None:
         import ipaddress
 
-        from ssios.chat import failure_hint
-        from ssios.errors import SsiosError
-        from ssios.skill_broker import classify_transport
-
-        account = self.plane.accounts.add_member("ada", "other-horse-stable")
+        super().setUp()
+        self.account = self.plane.accounts.add_member("ada", "other-horse-stable")
         self.plane.skills.set_enabled(True)
         self.plane.skills.resolver = lambda host: [ipaddress.ip_address("1.1.1.1")]
-        calls = []
+        self.calls: list[str] = []
 
-        def slow(url, headers=None):
-            calls.append(url)
+    def _open(self, url, headers=None):
+        from ssios.skill_broker import classify_transport
+
+        self.calls.append(url)
+        if "open-meteo.com" in url or self.all_down:
             raise classify_transport(TimeoutError())
+        if "wttr.in" in url:
+            area = {"areaName": [{"value": "Seattle"}], "region": [{"value": "Washington"}], "country": [{"value": "United States of America"}], "latitude": "47.606", "longitude": "-122.332"}
+            return 200, {}, json.dumps({"nearest_area": [area]}).encode()
+        if "api.met.no" in url:
+            step = {"instant": {"details": {"air_temperature": 9.5, "wind_speed": 5.0}}, "next_1_hours": {"summary": {"symbol_code": "partlycloudy_day"}}}
+            return 200, {}, json.dumps({"properties": {"timeseries": [{"data": step}]}}).encode()
+        return 500, {}, b""
 
-        self.plane.skills.opener = slow
+    def test_when_open_meteo_is_down_the_second_source_answers_and_the_dead_host_is_skipped(self) -> None:
+        self.all_down = False
+        self.plane.skills.opener = self._open
+        result = self.plane.skills.run(self.account["id"], "weather in Seattle", skill="weather", place="Seattle")
+        card = result["blocks"][0]["events"][0]
+        self.assertEqual((card["title"], card["badge"], card["when"]), ("9.5°C", "Partly cloudy", "Wind 18.0 km/h"))
+        self.assertIn("Seattle", result["blocks"][0]["header"])
+        self.assertEqual(sum("open-meteo.com" in url for url in self.calls), 2)
+        self.assertIn("lat=47.6060&lon=-122.3320", self.calls[-1])
+        before = len(self.calls)
+        self.plane.skills.run(self.account["id"], "weather in Seattle", skill="weather", place="Seattle")
+        self.assertFalse(any("open-meteo.com" in url for url in self.calls[before:]), self.calls[before:])
+
+    def test_when_every_source_is_down_the_error_names_a_weather_service(self) -> None:
+        from ssios.chat import failure_hint
+        from ssios.errors import SsiosError
+        from ssios.skill_broker import _met_no_code
+
+        self.all_down = True
+        self.plane.skills.opener = self._open
         with self.assertRaises(SsiosError) as caught:
-            self.plane.skills.run(account["id"], "weather in Seattle", skill="weather", place="Seattle")
+            self.plane.skills.run(self.account["id"], "weather in Seattle", skill="weather", place="Seattle")
         self.assertEqual(caught.exception.code, "weather_unreachable")
-        self.assertIn("open-meteo.com", caught.exception.detail)
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Open-Meteo", failure_hint("weather_unreachable"))
+        self.assertIn("wttr.in", caught.exception.detail)
         self.assertNotIn("clipper", failure_hint("weather_unreachable"))
+        self.assertEqual([_met_no_code(name) for name in ("clearsky_night", "heavyrainshowers_day", "lightsnow", "rainandthunder", "fog", "")], [0, 80, 71, 95, 45, None])

@@ -18,6 +18,9 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - The chat box sends on Ctrl+Enter, or Command+Enter. Enter is a new line.
 - A weather timeout is retried once and reports `weather_unreachable` with the service name, not the hint for a blocked web page.
 - A Files result in chat is a list of cards with an Open link. The first version sent Markdown in a line the page shows as plain text.
+- A Files card in chat has Open, which shows an image or a PDF over the chat without leaving it, and Show in Files. Other kinds only have Show in Files.
+- A sent message has Copy. Every Copy button shows Copied for a moment, and copying also works on a plain http page on the home network.
+- When Open-Meteo cannot be reached, weather uses MET Norway for the conditions and wttr.in to find the place. A host that just failed is skipped for ten minutes.
 - Ticking a task box changes the task at once. It no longer opens an approval. The change is audited and Undo on the Tasks page reverses it. A task change a model asks for still waits for approval.
 - Two requests saving the same JSON file at once no longer share one temporary file. Before, one of them could fail with `internal`, or the file could hold mixed bytes.
 - A PDF thumbnail waits at most 6 seconds for all drawing tools together, and a PDF that could not be drawn is not tried again on every request. On a Mac a damaged PDF could hold the request for 30 seconds.

@@ -9,6 +9,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 import unicodedata
 from datetime import datetime, timezone
 import urllib.error
@@ -317,14 +318,20 @@ class SkillBroker:
             "https://api.open-meteo.com/v1/forecast?current=temperature_2m,weather_code,wind_speed_10m"
             f"&latitude={latitude}&longitude={longitude}&timezone=auto&temperature_unit=celsius&wind_speed_unit=kmh"
         )
-        forecast = self._weather_fetch(forecast_url, policy, account_id, peer_ip)
         try:
-            data = json.loads(forecast["body"].decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise SsiosError("skill_upstream", "The weather service returned an unreadable response.", 502) from exc
-        current = data.get("current") if isinstance(data, dict) else {}
-        if not isinstance(current, dict):
-            current = {}
+            forecast = self._weather_fetch(forecast_url, policy, account_id, peer_ip, retry=False)
+            try:
+                data = json.loads(forecast["body"].decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise SsiosError("skill_upstream", "The weather service returned an unreadable response.", 502) from exc
+            current = data.get("current") if isinstance(data, dict) else {}
+            if not isinstance(current, dict):
+                current = {}
+        except SsiosError as exc:
+            if exc.code != "weather_unreachable":
+                raise
+            # Open-Meteo cannot be reached from this network. MET Norway is the second keyless source.
+            current = self._met_no_current(latitude, longitude, policy, account_id, peer_ip)
         temp = current.get("temperature_2m")
         code = current.get("weather_code")
         wind = current.get("wind_speed_10m")
@@ -379,7 +386,12 @@ class SkillBroker:
         query = place
         for name, choose in geocode_attempts(place):
             geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=5&name=" + quote(name)
-            geo = self._weather_fetch(geo_url, policy, account_id, peer_ip)
+            try:
+                geo = self._weather_fetch(geo_url, policy, account_id, peer_ip, retry=False)
+            except SsiosError as exc:
+                if exc.code != "weather_unreachable":
+                    raise
+                return self._wttr_place(place, policy, account_id, peer_ip), [], "", place
             try:
                 payload = json.loads(geo["body"].decode("utf-8"))
             except (UnicodeError, json.JSONDecodeError) as exc:
@@ -398,10 +410,20 @@ class SkillBroker:
             return None, _ranked(nearby)[:4], "nearby", query
         raise SsiosError("city_not_found", "No matching city was found.", 404)
 
-    def _weather_fetch(self, url: str, policy: dict, account_id: str, peer_ip: str) -> dict:
-        """One retry after a timeout. A failure names the weather service, not a web page."""
+    def _weather_fetch(self, url: str, policy: dict, account_id: str, peer_ip: str, *, retry: bool = True) -> dict:
+        """Fetch from a weather host. A failure names the service, not a web page.
+
+        A host that just failed is skipped for ten minutes, so a network that cannot
+        reach it does not wait out the timeout on every question.
+        """
+        host = urlsplit(url).hostname or "the weather service"
+        down = getattr(self, "_weather_down", None)
+        if down is None:
+            down = self._weather_down = {}
+        if down.get(host, 0) > time.monotonic():
+            raise SsiosError("weather_unreachable", f"The weather service {host} did not answer (recent failure).", 502, reason="recent")
         last: SsiosError | None = None
-        for _attempt in range(2):
+        for _attempt in range(2 if retry else 1):
             try:
                 return self.fetch(url, policy, account_id, "weather", peer_ip)
             except SsiosError as exc:
@@ -410,9 +432,47 @@ class SkillBroker:
                 last = exc
                 if exc.reason != "timeout":
                     break
-        host = urlsplit(url).hostname or "the weather service"
+        down[host] = time.monotonic() + 600
         why = str(last.reason or "unreachable") if last else "unreachable"
         raise SsiosError("weather_unreachable", f"The weather service {host} did not answer ({why}).", 502, reason=why) from last
+
+    def _met_no_current(self, latitude, longitude, policy: dict, account_id: str, peer_ip: str) -> dict:
+        """Current conditions from api.met.no, in the field names the Open-Meteo reply uses."""
+        url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={float(latitude):.4f}&lon={float(longitude):.4f}"
+        got = self._weather_fetch(url, policy, account_id, peer_ip)
+        try:
+            data = json.loads(got["body"].decode("utf-8"))
+            first = data["properties"]["timeseries"][0]["data"]
+            details = first["instant"]["details"]
+        except (UnicodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise SsiosError("skill_upstream", "The weather service returned an unreadable response.", 502) from exc
+        symbol = ""
+        for span in ("next_1_hours", "next_6_hours", "next_12_hours"):
+            summary = (first.get(span) or {}).get("summary") if isinstance(first.get(span), dict) else None
+            if isinstance(summary, dict) and summary.get("symbol_code"):
+                symbol = str(summary["symbol_code"])
+                break
+        wind = details.get("wind_speed")
+        return {
+            "temperature_2m": details.get("air_temperature"),
+            "weather_code": _met_no_code(symbol),
+            # MET Norway reports metres per second.
+            "wind_speed_10m": round(float(wind) * 3.6, 1) if isinstance(wind, (int, float)) else wind,
+        }
+
+    def _wttr_place(self, place: str, policy: dict, account_id: str, peer_ip: str) -> dict:
+        """Find a place through wttr.in when the Open-Meteo geocoder cannot be reached. It returns one place."""
+        got = self._weather_fetch("https://wttr.in/" + quote(place, safe="") + "?format=j1", policy, account_id, peer_ip)
+        try:
+            area = json.loads(got["body"].decode("utf-8"))["nearest_area"][0]
+
+            def text(key: str) -> str:
+                return str(area[key][0]["value"]) if area.get(key) else ""
+
+            hit = {"name": text("areaName") or place, "admin1": text("region"), "country": text("country"), "latitude": float(area["latitude"]), "longitude": float(area["longitude"])}
+        except (UnicodeError, json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise SsiosError("city_not_found", "No matching city was found.", 404) from exc
+        return hit
 
     def _fetch_article(self, account_id: str, message: str, policy: dict, peer_ip: str) -> dict:
         pasted = pasted_article(message)
@@ -755,6 +815,24 @@ def pasted_article(message: str) -> dict | None:
     if not htmlish and not any(cue in (message or "").casefold() for cue in ("paste", "pasted")):
         return None
     return {"url": found.group(0), "html": rest}
+
+
+def _met_no_code(symbol: str) -> int | None:
+    """Map a MET Norway symbol such as partlycloudy_day to the WMO code the condition table uses."""
+    name = str(symbol or "").split("_", 1)[0]
+    if not name:
+        return None
+    if "thunder" in name:
+        return 95
+    if "snow" in name or "sleet" in name:
+        return 71
+    if "showers" in name:
+        return 80
+    if "drizzle" in name:
+        return 51
+    if "rain" in name:
+        return 61
+    return {"clearsky": 0, "fair": 1, "partlycloudy": 2, "cloudy": 3, "fog": 45}.get(name)
 
 
 def _manifest_domains(url: str) -> set[str]:

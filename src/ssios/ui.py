@@ -1597,6 +1597,14 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 30; }
 .lightbox[hidden] { display: none; }
 .lightbox img { max-width: 90vw; max-height: 90vh; }
+.file-viewer .viewer-frame { background: var(--panel); border-radius: 12px; width: min(1000px, 94vw); height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+.file-viewer .viewer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.file-viewer .viewer-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-viewer .viewer-links { display: flex; gap: 12px; align-items: center; flex: none; }
+.file-viewer .viewer-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); }
+.file-viewer iframe { width: 100%; height: 100%; border: 0; }
+.file-viewer img { max-width: 100%; max-height: 100%; }
+.open-here { border: 1px solid var(--line); background: var(--panel); color: var(--accent); border-radius: 8px; padding: 4px 10px; cursor: pointer; font: inherit; }
 .day { align-self: center; color: var(--muted); font-size: 12px; }
 .attach input { width: 1px; height: 1px; opacity: 0; position: absolute; }
 .attach { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }

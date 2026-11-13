@@ -180,6 +180,10 @@ def files_text(rows: list[dict], lang: str = "en") -> str:
     return "\n".join(lines)
 
 
+# Kinds /ui/library/raw serves as they are. Anything else gets a grey tile there, so it has no Open button.
+VIEWABLE = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"}
+
+
 def files_block(rows: list[dict], lang: str = "en") -> dict:
     """The same list as cards for the chat page: one card per item with an Open link."""
     zh = lang == "zh"
@@ -187,7 +191,8 @@ def files_block(rows: list[dict], lang: str = "en") -> dict:
     for row in rows:
         ext = row["name"].rsplit(".", 1)[-1].upper()[:5] if "." in row["name"] else ""
         meta = " · ".join(part for part in (row.get("library") or "", ", ".join(row.get("tags") or [])) if part)
-        events.append({"title": row["name"], "badge": ext, "when": "", "location": "", "meta": meta, "description": row.get("description") or "", "link": row["url"]})
+        preview = row["url"].replace("/ui/library?", "/ui/library/raw?", 1) if ext.casefold() in VIEWABLE else ""
+        events.append({"title": row["name"], "badge": ext, "when": "", "location": "", "meta": meta, "description": row.get("description") or "", "link": row["url"], "preview": preview})
     summary = f"在 Files 里找到 {len(rows)} 个" if zh else f"Found {len(rows)} in Files"
     return {"kind": "files", "header": "Files", "summary": summary, "events": events}
 

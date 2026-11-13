@@ -74,3 +74,5 @@ Chat reads the Files catalog on the host. It does not ask a model and does not s
 A word matches the file name, tags, note, description, and text read from the file. Any one word is enough, and more matching words rank higher. A word that is exactly a tag counts for more. With `[search] embed_model` set, items close in meaning are added. A file that has not been analyzed can be found only by its name, tags, and note.
 
 The host tool loop has `files.search` and `files.read`. `files.read` returns the stored name, tags, description, and text, never the bytes. Both count as text written by someone else for the web address rule.
+
+Each found item is a card. Open shows an image or a PDF in a viewer over the chat, with links to the Files page and to a new tab. Escape or Close returns to the chat. Other kinds of file have no viewer and only link to the Files page.
