@@ -128,3 +128,31 @@ class LaunchdTest(unittest.TestCase):
         self.assertEqual(body["LimitLoadToSessionType"], "Aqua")
         self.assertTrue(body["RunAtLoad"])
         self.assertFalse(body["KeepAlive"])
+
+
+class AtomicWriteTest(unittest.TestCase):
+    def test_many_writers_to_one_file_all_succeed_and_leave_whole_json(self) -> None:
+        import threading
+
+        from ssios.util import read_json, write_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "approvals.json"
+            errors: list[BaseException] = []
+
+            def work(index: int) -> None:
+                try:
+                    for turn in range(40):
+                        write_json(path, {"writer": index, "turn": turn, "pad": "x" * 4000})
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=work, args=(index,)) for index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(read_json(path, None)["turn"], 39)
+            self.assertEqual([item.name for item in path.parent.iterdir()], ["approvals.json"])
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)

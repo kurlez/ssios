@@ -180,6 +180,18 @@ def files_text(rows: list[dict], lang: str = "en") -> str:
     return "\n".join(lines)
 
 
+def files_block(rows: list[dict], lang: str = "en") -> dict:
+    """The same list as cards for the chat page: one card per item with an Open link."""
+    zh = lang == "zh"
+    events = []
+    for row in rows:
+        ext = row["name"].rsplit(".", 1)[-1].upper()[:5] if "." in row["name"] else ""
+        meta = " · ".join(part for part in (row.get("library") or "", ", ".join(row.get("tags") or [])) if part)
+        events.append({"title": row["name"], "badge": ext, "when": "", "location": "", "meta": meta, "description": row.get("description") or "", "link": row["url"]})
+    summary = f"在 Files 里找到 {len(rows)} 个" if zh else f"Found {len(rows)} in Files"
+    return {"kind": "files", "header": "Files", "summary": summary, "events": events}
+
+
 def read_file_note(plane, account_id: str, item_id: str) -> str:
     """What analysis stored about one item: name, tags, description, and text read from it. Not the bytes."""
     from ssios.library import list_items, list_libraries

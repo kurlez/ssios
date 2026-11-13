@@ -1530,11 +1530,19 @@ def _files(plane, scope: AccountScope, conversation_id: str, message: str, decis
     """List matching Files items with links. The catalog is read. No model writes the list."""
     from ssios.library_chat import files_text, find_files
 
+    from ssios.library_chat import files_block
+
     rows = find_files(plane, scope.account_id, message)
-    text = files_text(rows, _turn_language(plane, scope.account_id, message))
-    scope.chat().append(conversation_id, {"role": "assistant", "text": text, "route": decision.public()})
+    lang = _turn_language(plane, scope.account_id, message)
+    text = files_text(rows, lang)
+    blocks = [files_block(rows, lang)] if rows else []
+    stored = {"role": "assistant", "text": text, "route": decision.public()}
+    if blocks:
+        stored["results"] = blocks
+    scope.chat().append(conversation_id, stored)
     plane.security_audit.write(actor=scope.account_id, ip="127.0.0.1", action="library.search", target="chat", result="ok", extra={"service": "library", "item_count": str(len(rows))})
-    yield {"event": "results", "data": {"text": text, "blocks": [], "reply": text}}
+    # Cards carry the links. The chat page shows a reply line as plain text, so a found list is not sent as one.
+    yield {"event": "results", "data": {"text": blocks[0]["summary"] if blocks else text, "blocks": blocks, "reply": "" if blocks else text}}
 
 
 def _account_facts(scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:

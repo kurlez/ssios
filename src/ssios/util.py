@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import stat
 from pathlib import Path
 
@@ -44,17 +45,29 @@ def chmod_tree_private(path: Path) -> None:
 
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """Write beside the file, then rename over it.
+
+    Each writer has its own temporary name. With one shared name, two requests
+    saving the same file at once wrote into each other's bytes, and the slower
+    one failed because its temporary file had already been renamed away.
+    """
     secure_mkdir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
-    os.chmod(path, mode)
+        try:
+            os.write(fd, data)
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_json(path: Path, default: object) -> object:

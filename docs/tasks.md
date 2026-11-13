@@ -12,6 +12,8 @@ The default is to save the change and show `Added goal:` or `Completed:` with Un
 
 If the account vault directory exists, the same list is written to `Tasks.md` there as a Markdown checklist. Dropped goals are omitted.
 
+Ticking a task box, on the Tasks page or in the chat side panel, changes that task at once. The click on a signed-in page is the decision, so there is no approval card. The audit log records `goal.update`, and Undo reverses it. From the chat page the browser returns to the same chat. A change that a model asks for through the `tasks.complete` tool still waits for approval.
+
 The Tasks page lists Open and Done, filters by status, and can add, complete, drop, or undo a goal. Source opens the conversation that created it. A Reminders section on the same page lists open reminders and any that were missed while SSIOS was stopped.
 
 ## Task commands

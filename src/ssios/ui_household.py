@@ -594,7 +594,7 @@ CHAT_JS = r"""
           meta.textContent = item.meta;
           card.appendChild(meta);
         }
-        if (item.link && /^https?:\/\//.test(item.link)) {
+        if (item.link && (/^https?:\/\//.test(item.link) || /^\/ui\/library\?/.test(item.link))) {
           var open = document.createElement("p");
           var anchor = document.createElement("a");
           anchor.href = item.link;
@@ -682,7 +682,7 @@ CHAT_JS = r"""
       var li = document.createElement("li");
       li.className = "task " + (done ? "done" : "open");
       var writable = task.writable && task.id;
-      var hint = task.hint || (done ? "Mark open. Nothing is saved until you approve." : "Mark done. Nothing is saved until you approve.");
+      var hint = task.hint || (done ? "Mark open." : "Mark done.");
       if (!writable) hint = task.hint || "This box is read-only.";
       var label = document.createElement("span");
       label.className = "label";
@@ -1703,7 +1703,7 @@ def _result_blocks_html(blocks) -> str:
             if meta:
                 extra += f"<p>{meta}</p>"
             link = str(item.get("link") or "")
-            if link.startswith("https://") or link.startswith("http://"):
+            if link.startswith(("https://", "http://", "/ui/library?")):
                 href = html.escape(link, quote=True)
                 extra += f"<p><a href=\"{href}\" rel=\"noopener noreferrer\">Open</a></p>"
             if description:
@@ -1854,7 +1854,7 @@ def _public_block(block: dict) -> dict:
                 "description": str(item.get("description") or ""),
                 "meta": str(item.get("meta") or ""),
                 "badge": str(item.get("badge") or ""),
-                "link": str(item.get("link") or "") if str(item.get("link") or "").startswith(("http://", "https://")) else "",
+                "link": str(item.get("link") or "") if str(item.get("link") or "").startswith(("http://", "https://", "/ui/library?")) else "",
             }
         )
     return {

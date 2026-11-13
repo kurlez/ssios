@@ -17,6 +17,9 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - The Files sidebar has a Tags section with a count per tag. It lists tags from analysis and batch edits, which the page built before and never showed. The search box takes `#tag` and `tag:name`.
 - The chat box sends on Ctrl+Enter, or Command+Enter. Enter is a new line.
 - A weather timeout is retried once and reports `weather_unreachable` with the service name, not the hint for a blocked web page.
+- A Files result in chat is a list of cards with an Open link. The first version sent Markdown in a line the page shows as plain text.
+- Ticking a task box changes the task at once. It no longer opens an approval. The change is audited and Undo on the Tasks page reverses it. A task change a model asks for still waits for approval.
+- Two requests saving the same JSON file at once no longer share one temporary file. Before, one of them could fail with `internal`, or the file could hold mixed bytes.
 - A PDF thumbnail waits at most 6 seconds for all drawing tools together, and a PDF that could not be drawn is not tried again on every request. On a Mac a damaged PDF could hold the request for 30 seconds.
 - Three tests no longer depend on the machine: one assumed krunvm was not installed, and two assumed the temp directory had no linked parent, which is not true on macOS.
 - [docs/release-checklist.md](docs/release-checklist.md) lists what has to be run on the Mac before a tag.

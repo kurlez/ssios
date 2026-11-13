@@ -51,6 +51,17 @@ class FilesInChatTest(PlaneTest):
         self.assertIn(f"/ui/library?library={self.library_id}&item={self.amc['id']}", body)
         self.assertNotIn("Anthropic BP", body)
         self.assertNotIn("Synthetic local answer", body)
+        shown = next(event["data"] for event in json.loads(body) if event.get("event") == "results")
+        self.assertEqual(shown["reply"], "")
+        card = shown["blocks"][0]["events"][0]
+        self.assertEqual((card["title"], card["badge"]), ("AMC8 2019 练习题.pdf", "PDF"))
+        self.assertTrue(card["link"].startswith("/ui/library?library="))
+        from ssios.ui_household import _public_block, _result_blocks_html
+
+        self.assertEqual(_public_block(shown["blocks"][0])["events"][0]["link"], card["link"])
+        self.assertEqual(_public_block({"events": [{"title": "x", "link": "/ui/admin"}, {"title": "y", "link": "javascript:alert(1)"}]})["events"][0]["link"], "")
+        self.assertIn('href="/ui/library?library=', _result_blocks_html(shown["blocks"]))
+        self.assertNotIn("](", _result_blocks_html(shown["blocks"]))
         route, body, _conv = self._say("AMC8的练习题", conv)
         self.assertEqual(route, "files")
         self.assertIn("AMC8 2019 练习题.pdf", body)

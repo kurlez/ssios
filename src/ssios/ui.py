@@ -104,7 +104,7 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return Page(200, _tasks(plane, session, query.get("status", "all")))
     if method == "POST" and path == "/ui/tasks":
         _csrf(session, body)
-        return _tasks_post(plane, session, body, peer_ip)
+        return _tasks_post(plane, session, body, peer_ip, headers)
     if method == "GET" and path.startswith("/ui/tasks/"):
         return Page(200, _task(plane, session, path.rsplit("/", 1)[-1]))
     if method == "GET" and path == "/ui/approvals":
@@ -449,7 +449,7 @@ def _notices(plane, session: dict) -> Page:
 
 
 def task_check_control(session: dict, task: dict) -> str:
-    """A square checkbox. A saved task posts an approval. Anything else is read-only."""
+    """A square checkbox. A saved task changes when its box is ticked. Anything else is read-only."""
     title = " ".join(str(task.get("title") or "").split())
     if not title:
         return ""
@@ -474,7 +474,7 @@ def task_check_control(session: dict, task: dict) -> str:
         )
     csrf = html.escape(str(session.get("csrf") or ""), quote=True)
     goal_id = html.escape(str(task.get("id") or ""), quote=True)
-    hint = "Mark open. Nothing is saved until you approve." if status == "done" else "Mark done. Nothing is saved until you approve."
+    hint = "Mark open." if status == "done" else "Mark done."
     return (
         f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
@@ -602,7 +602,7 @@ def _tasks(plane, session: dict, status_filter: str = "open", notice: str = "") 
     return _page(session, "Tasks", body)
 
 
-def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
+def _tasks_post(plane, session, body: dict, peer_ip: str, headers=None) -> Page:
     from ssios.calendar_intent import host_clock
     from ssios.goals import manual_goal, set_goal_mode, undo_goal
     from ssios.reminders import ReminderStore
@@ -636,39 +636,42 @@ def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
     elif op == "dismiss":
         ReminderStore(scope.home).mark_seen()
     elif op == "toggle":
-        return _stage_goal_toggle(plane, session, scope, str(body.get("id") or ""))
+        # The account ticked its own box on a signed-in page with a CSRF token. That is the decision,
+        # so the status changes now. The change is audited and Undo on the Tasks page reverses it.
+        from ssios.goals import GoalStore
+
+        goal = GoalStore(scope.home).get(str(body.get("id") or ""))
+        if goal is None or goal.get("status") == "dropped":
+            raise SsiosError("goal_invalid", "goal not found", 404)
+        manual_goal(
+            scope,
+            title=str(goal.get("title") or ""),
+            description=str(goal.get("description") or ""),
+            status="open" if goal.get("status") == "done" else "done",
+            goal_id=str(goal["id"]),
+            now=now,
+            peer_ip=peer_ip,
+        )
+        back = _chat_referer(headers)
+        if back:
+            return Page(303, "", location=back)
     else:
         raise SsiosError("goal_invalid", "goal action rejected", 400)
     return Page(200, _tasks(plane, session, "open"))
 
 
-def _stage_goal_toggle(plane, session, scope, goal_id: str) -> Page:
-    import json
+def _chat_referer(headers) -> str:
+    """The chat page the box was ticked on, as a path on this site. Empty for any other page."""
+    from urllib.parse import urlsplit
 
-    from ssios.goals import GoalStore
-
-    goal = GoalStore(scope.home).get(goal_id)
-    if goal is None or goal.get("status") == "dropped":
-        raise SsiosError("goal_invalid", "goal not found", 404)
-    status = "open" if goal.get("status") == "done" else "done"
-    payload = json.dumps({"id": goal["id"], "status": status}, ensure_ascii=False).encode("utf-8")
-    approval = scope.create_approval(
-        action="goal.update",
-        project_id=scope.project_id(),
-        task_id="chat",
-        payload=payload,
-        meta={"expected_revision": "goal", "goal_id": goal["id"], "status": status, "title": str(goal.get("title") or "")[:80]},
-    )
-    record = scope.approvals().get(str(approval.get("id") or ""))
-    preview = html.escape(scope.preview(record))
-    notice = (
-        "<article class=\"card approval\"><h2>goal.update</h2><pre>"
-        + preview
-        + "</pre><p>Nothing is written until you approve it.</p>"
-        + _decision_form(session, record)
-        + "</article>"
-    )
-    return Page(200, _tasks(plane, session, "open", notice))
+    try:
+        parts = urlsplit(str(headers.get("Referer") or "")) if headers is not None else None
+    except (AttributeError, ValueError):
+        return ""
+    if parts is None or parts.path != "/ui/chat":
+        return ""
+    conversation = re.fullmatch(r"conversation=(conv-[0-9a-f]{16})", parts.query or "")
+    return "/ui/chat" + ("?" + conversation.group(0) if conversation else "")
 
 
 def _goal_title(scope, goal_id: str) -> str:
