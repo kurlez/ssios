@@ -124,7 +124,7 @@ class LaunchdTest(unittest.TestCase):
         body = plistlib.loads(launchd_plist(Path("/tmp/ssios state"), Path("/tmp/ssios state/ollama.toml")).encode("utf-8"))
         self.assertEqual(body["ProgramArguments"][1], "fg")
         self.assertTrue(body["ProgramArguments"][0].endswith("scripts/ssios"))
-        self.assertEqual(body["EnvironmentVariables"]["SSIOS_STATE"], "/tmp/ssios state")
+        self.assertEqual(body["EnvironmentVariables"]["SSIOS_STATE"], str(Path("/tmp/ssios state").resolve()))
         self.assertEqual(body["LimitLoadToSessionType"], "Aqua")
         self.assertTrue(body["RunAtLoad"])
         self.assertFalse(body["KeepAlive"])
