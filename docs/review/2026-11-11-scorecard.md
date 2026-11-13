@@ -1,6 +1,6 @@
 # SSIOS scorecard, 2026-11-11
 
-Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement group. The total is the unweighted mean. Synthetic data only.
+Branch `cursor/ssios-files-2e2e`. Scores are out of 100 for each requirement group. The total is the unweighted mean. Synthetic data only.
 
 ## P0 Correctness
 
@@ -52,15 +52,20 @@ Branch `cursor/ssios-chat-ui-2e2e`. Scores are out of 100 for each requirement g
 | Requirement | Status | Evidence | Score |
 | --- | --- | --- | --- |
 | Weather and web fetch on the host, SSRF checks, untrusted pages | A free-form place stays on the weather skill. A geocode miss is city_not_found, and the local model is not asked for a live forecast | `tests/test_skills.py`; `tests/test_weather_followup.py` | 86 |
-| Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes lists the clip | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
-| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | A tool result completes the matching goal and undo reopens it. A page read does not. Pages poll notices that remain after restart | `tests/test_goals.py` `GoalChatLoopTest`; `tests/test_reminders.py` `NoticeBadgeTest`; screenshot `tasks-badge-1280.png` | 90 |
+| Obsidian vault clips, assets, and Notes view | A clip keeps the image, strips script, and leaves page instructions as text. Notes opens for a household account. An empty clip, an oversize clip, and a rejected vault path each have their own message | `test_a_clip_saves_the_image_and_keeps_page_text_untrusted`; `tests/test_notes_clip.py`; screenshots `notes-vault-1280.png` and `note-clip-1280.png` | 90 |
+| Tasks with evidence, undo, and a Tasks.md mirror. Reminders with absolute time, recurrence, restart survival, and chat notification | A tool result completes the matching goal and undo reopens it. A page read does not. Pages poll notices that remain after restart. The Tasks list is a checkbox list from the stored goals. Checking a box stages an approval. A one-shot request such as summarizing mail is not saved as a goal. An ongoing objective or an explicit task is. Existing goals and historical failed guest tasks are left in place | `tests/test_goals.py` `GoalChatLoopTest`; `tests/test_reminders.py` `NoticeBadgeTest`; `tests/test_task_checklist.py`; screenshot `tasks-checklist-1280.png` | 90 |
+| M1 Files | Files imports a stripped image and a PDF and rejects archives, programs, hidden files, and source files. A drop can include several files. A dropped directory is skipped and is not walked. The same name or the same bytes asks Keep existing or Replace with new, and that choice is audited. Another account cannot read the bytes | `tests/test_library.py`; `tests/test_library_drop.py`; screenshots `files-drop-1280.png` and `files-conflict-1280.png` | 90 |
+| Files organize | A smart folder is a saved AND, OR, or NOT query and does not copy a file. A watch folder is off until enabled, accepts only a local path, and imports a file after it stops changing | `tests/test_library_organize.py` | 90 |
+| Files analysis | A local model can store a description, tags, and OCR on one item. The library topic names who added the file. Core memory stays pending until approval. A non-local model host is refused | `tests/test_library_analyze.py` | 90 |
+| Files search | Search matches the name, tags, description, and text read from the file. The embedding bench skips when Ollama is not on this computer and does not invent a score | `tests/test_library_search.py` | 90 |
+| Files sharing | A shared library has view, add, and organize roles. The personal library stays private. Only the owner permanently deletes or changes sharing. Removing a member forgets that member's library note. Badges use 共享, 个人, and 由名字共享 | `tests/test_library_share.py`; screenshot `files-share-1280.png` | 90 |
 
 ## Total
 
-Mean of the 28 rows above: **90 / 100** (2523 / 28).
+Mean of the 33 rows above: **90 / 100** (2973 / 33).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 300 ran, 293 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 326 ran, 319 passed, 7 skipped.
 
-Screenshots, synthetic data only: `tasks-badge-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
+Screenshots, synthetic data only: `tasks-badge-1280.png`, `tasks-checklist-1280.png`, `files-m1-1280.png`, `files-drop-1280.png`, `files-conflict-1280.png`, `files-share-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 
 Still for a Mac: Keychain unlock, a real Google reconnect click, a real macOS notification, and KaTeX font files in the browser on that machine. This VM checked the Linux UI, the poll banner, and the vendored renderer.

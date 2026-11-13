@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 — 2026-11-13
+
+Files and the Notes/Tasks fixes. The package version is `0.3.0` (`pyproject.toml` and `ssios.__version__`). Synthetic data only. CI ran 326 tests: 319 passed, 7 skipped. The scorecard mean is 90 / 100.
+
+- Files library at `/ui/library`: drag in files (a dropped folder is skipped), keep or replace on a name or byte conflict, folders, tags, and inline rename. The same bytes are stored once.
+- Smart folders are saved queries and do not copy files. A watched folder is a local path, off until the owner turns it on, and it refuses a network path.
+- On-demand local analysis (description, tags, OCR) writes `topics/library/<item-id>.md`. Copying a fact into core memory still waits for approval.
+- Search covers the name, tags, note, description, and OCR text. `./scripts/ssios library-embed-bench` probes loopback Ollama and does not pin a model.
+- Household sharing with view, add, and organize roles. The owner is the only person who can change sharing or permanently delete. A removed member loses recall immediately.
+- Multi-select (click, Command/Ctrl, Shift, marquee) and a batch bar: tag, move, trash, restore, download a zip, and analyze. Permanent delete still requires the word `delete`.
+- Tasks is a checklist. Checking an item goes through approval and the audit log. A one-shot chat request is not turned into a goal.
+- Notes clip errors and a failed guest mail read stay on the host and use the language of the latest message.
+- Codex stays the main chat route inside the no-NIC guest. Explicit commands stay on the host.
+
 ## 0.2.0 — 2026-11-12
 
 Household chat release. The package version is `0.2.0` (`pyproject.toml` and `ssios.__version__`). Synthetic data only. The scorecard mean is 90 / 100.

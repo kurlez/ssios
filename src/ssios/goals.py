@@ -19,9 +19,15 @@ _CHITCHAT = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT = (
-    re.compile(r"(?:my goal is|add a goal:?|todo:)\s+(.{3,160})", re.IGNORECASE),
-    re.compile(r"(?:i need to|i want to|please|help me(?: to)?)\s+(.{3,160})", re.IGNORECASE),
-    re.compile(r"(?:我要|帮我|请帮我|请)\s*(.{2,80})"),
+    re.compile(r"(?:my goal is|add a goal:?|add a task:?|todo:)\s+(.{3,160})", re.IGNORECASE),
+    re.compile(r"\bremind me to\s+(.{3,160})", re.IGNORECASE),
+    re.compile(
+        r"\b(?:i need to|i want to|i have to)\s+(.{3,120}?)\s+(?:by|before)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|next|\d)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:记一下|记下|加个任务|加一个任务|添加一个任务|添加任务|帮我记个任务|记个任务)\s*[:：，,]?\s*(.{2,80})"),
+    re.compile(r"提醒我\s*(?:去|要)?\s*(.{2,80})"),
+    re.compile(r"(?:我要|我想|我得|我需要)在(.{2,40}?(?:前|之前|以前).{2,60})"),
 )
 
 
@@ -146,8 +152,8 @@ def explicit_goal(message: str) -> dict | None:
         found = pattern.search(text)
         if not found:
             continue
-        title = " ".join(found.group(1).split()).strip(" .")
-        if len(title) < 3 or _CHITCHAT.match(title):
+        title = " ".join(found.group(1).split()).strip(" .，,。")
+        if len(title) < 2 or _CHITCHAT.match(title):
             return None
         return {"title": title[:80], "description": text[:240]}
     return None
@@ -176,7 +182,8 @@ def _validate_model(message: str, proposals: list, open_goals: list[dict], evide
         op = str(item.get("op") or "")
         if len(title) < 3 or title.casefold() not in user.casefold():
             continue
-        if op == "create" and not any(similar(title, goal.get("title") or "") for goal in open_goals):
+        asked = explicit_goal(user)
+        if op == "create" and asked is not None and similar(title, asked["title"]) and not any(similar(title, goal.get("title") or "") for goal in open_goals):
             kept.append({"op": "create", "title": title})
         elif op == "done" and evidence and any(similar(title, goal.get("title") or "") for goal in open_goals):
             kept.append({"op": "done", "title": title})
@@ -230,6 +237,9 @@ def plan_changes(message: str, open_goals: list[dict], *, evidence: bool, model_
     for item in model_items or []:
         title = str(item.get("title") or "")
         if item.get("op") == "create":
+            asked = explicit_goal(message)
+            if asked is None or not similar(title, asked["title"]):
+                continue
             if any(similar(title, goal.get("title") or "") for goal in open_goals):
                 continue
             if any(similar(title, change.get("title") or "") for change in changes):
@@ -296,6 +306,32 @@ def apply_turn(scope, conversation_id: str, message_id: str, message: str, *, ev
     if any(chip["kind"] in {"added", "completed"} for chip in chips):
         mirror_vault(scope, store.all())
     return chips
+
+
+def listed_goals(goals: list[dict]) -> list[dict]:
+    """Open and done goals from a store query. Dropped goals are omitted."""
+    shown = []
+    for goal in goals:
+        if not isinstance(goal, dict):
+            continue
+        if goal.get("status") not in {"open", "in_progress", "done"}:
+            continue
+        shown.append(goal)
+    return shown
+
+
+def task_view(goal: dict, *, writable: bool = True, hint: str = "") -> dict:
+    """A checklist row. The title and status come from the stored goal."""
+    view = {
+        "id": str(goal.get("id") or ""),
+        "title": str(goal.get("title") or ""),
+        "status": "done" if goal.get("status") == "done" else "open",
+        "due": str(goal.get("due") or ""),
+        "writable": bool(writable and goal.get("id")),
+    }
+    if hint:
+        view["hint"] = hint
+    return view
 
 
 def undo_goal(scope, goal_id: str, now: datetime, peer_ip: str) -> dict | None:
@@ -369,6 +405,14 @@ def mirror_vault(scope, goals: list[dict]) -> None:
         lines.append(f"- [{mark}] {goal.get('title') or ''}{due}")
     if len(lines) == 2:
         lines.append("- [ ] No open goals.")
+    try:
+        from ssios.reminders import ReminderStore
+
+        for item in ReminderStore(scope.home).open_items():
+            repeat = f" ({item['repeat']})" if item.get("repeat") else ""
+            lines.append(f"- [ ] {item.get('due')} {item.get('text')}{repeat}")
+    except (SsiosError, OSError, TypeError, ValueError):
+        pass
     path = root / "Tasks.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

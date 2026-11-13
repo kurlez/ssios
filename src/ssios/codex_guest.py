@@ -174,13 +174,13 @@ def codex_config_text(port: int, model: str) -> str:
         'command = "python3"\n'
         'args = ["/tools/ssios_mcp.py"]\n'
         "enabled_tools = [\n"
-        '  "gmail.search",\n'
-        '  "gmail.read",\n'
-        '  "drive.list",\n'
-        '  "drive.read",\n'
-        '  "calendar.list",\n'
+        '  "gmail_search",\n'
+        '  "gmail_read",\n'
+        '  "drive_list",\n'
+        '  "drive_read",\n'
+        '  "calendar_list",\n'
         '  "weather",\n'
-        '  "web.fetch",\n'
+        '  "web_fetch",\n'
         "]\n"
     )
 
@@ -188,13 +188,13 @@ def codex_config_text(port: int, model: str) -> str:
 def mcp_bridge_source(port: int) -> str:
     """Stdio MCP server inside the guest. It lists the host tools and forwards calls over vsock."""
     names = [
-        "gmail.search",
-        "gmail.read",
-        "drive.list",
-        "drive.read",
-        "calendar.list",
+        "gmail_search",
+        "gmail_read",
+        "drive_list",
+        "drive_read",
+        "calendar_list",
         "weather",
-        "web.fetch",
+        "web_fetch",
         "tasks.add",
         "reminders.add",
     ]
@@ -206,7 +206,7 @@ NAMES = [{listed}]
 def tools():
     found = []
     for name in NAMES:
-        props = {{"q": {{"type": "string"}}}} if name == "gmail.search" else {{"place": {{"type": "string"}}}} if name == "weather" else {{}}
+        props = {{"q": {{"type": "string"}}}} if name == "gmail_search" else {{"place": {{"type": "string"}}}} if name == "weather" else {{}}
         found.append({{"name": name, "description": name, "inputSchema": {{"type": "object", "properties": props}}}})
     return found
 
@@ -574,7 +574,9 @@ def responses_to_chat(payload: dict, num_ctx: int, num_predict: int) -> dict:
                 "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
             }
         if isinstance(function, dict) and function.get("name"):
-            tools.append({"type": "function", "function": function})
+            safe = dict(function)
+            safe["name"] = str(function.get("name") or "").replace(".", "_")
+            tools.append({"type": "function", "function": safe})
     if not messages:
         messages.append({"role": "user", "content": ""})
     chat = {
@@ -1080,7 +1082,7 @@ class ResponsesProxy:
     def _mcp(self, conn: socket.socket, headers: dict, body: bytes) -> None:
         """Tool call from the guest. The Authorization header is dropped here."""
         del headers
-        from ssios.mcp_host import TOOL_NAMES
+        from ssios.mcp_host import TOOL_NAMES, normalize_tool_name
         from ssios.vmguest import redact_text
 
         if self.tool_handler is None:
@@ -1097,7 +1099,7 @@ class ResponsesProxy:
         if not isinstance(payload, dict):
             conn.sendall(_json_response(400, {"error": "bad_request"}))
             return
-        name = str(payload.get("name") or "")
+        name = normalize_tool_name(str(payload.get("name") or ""))
         arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
         if name not in TOOL_NAMES:
             self._log("", "mcp_tool_denied", len(body), "")

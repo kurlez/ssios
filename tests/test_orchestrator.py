@@ -140,6 +140,66 @@ class CodexTurnTest(PlaneTest):
         self.assertIn("Codex guest is not available", fallen)
         self.assertNotIn("Route: codex", fallen)
 
+    def test_a_guest_that_misses_gmail_falls_back_to_a_chinese_host_summary(self) -> None:
+        class _Blind:
+            orchestrator_ready = True
+
+            def run(self, plane, request, on_status):
+                del plane, request
+                checks = {"nic": ["lo"], "outbound": False, "marker": True, "sandbox_denied": True, "outside_write": False}
+                on_status({"phase": "booting", "backend": "stub"})
+                on_status({"phase": "running", "backend": "stub"})
+                on_status({"phase": "isolation", "backend": "stub", "checks": checks})
+                return {
+                    "text": "It appears that the `gmail.search` tool is not supported in the current environment. Open your email inbox.",
+                    "isolated": True,
+                    "boot_ms": 1,
+                    "backend": "stub",
+                    "checks": checks,
+                }
+
+        from ssios.google_connector import GoogleConnector, GoogleEndpoints
+        from ssios.secret_store import MemorySecretStore
+
+        self.plane._google = GoogleConnector(self.plane, MemorySecretStore(), GoogleEndpoints())
+        self.plane.chat_guest = _Blind()
+        self.plane.llm.report_script = ["最近十封都是备忘。[1]"]
+        seen = []
+        real = self.plane.llm.complete_chat
+
+        def complete_chat(messages, *, cancel_event, deadline):
+            seen.append(json.dumps(messages, ensure_ascii=False))
+            return real(messages, cancel_event=cancel_event, deadline=deadline)
+
+        self.plane.llm.complete_chat = complete_chat
+
+        def read_now(session, *, project_id, tool, arguments, limits, peer_ip="127.0.0.1"):
+            del session, limits, peer_ip
+            lines = []
+            for index in range(1, 11):
+                row = {"from": f"Desk {index}", "subject": f"Note {index}", "date": "Nov 11", "snippet": "Synthetic mail."}
+                lines.append(f"msg{index} || mail-header " + json.dumps(row))
+            return {"tool": tool, "text": "\n".join(lines), "arguments": arguments, "item_count": 10, "project_id": project_id}
+
+        self.plane.google.read_now = read_now
+        status, page, _cookie = _form(
+            self.base,
+            "/ui/chat/send",
+            {"csrf": self._csrf(), "message": "总结一下我的最近10封邮件。", "override": "force_vm"},
+            cookie=self.cookie,
+        )
+        self.assertEqual(status, 200, page)
+        self.assertIn("最近十封都是备忘", page)
+        self.assertIn("Desk 1", page)
+        self.assertNotIn("not supported", page)
+        self.assertNotIn("Open your email", page)
+        self.assertIn("host gmail read", page)
+        self.assertIn('details class="step-details"', page)
+        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
+        self.assertIn("guest.fallback", audit)
+        self.assertIn("gmail", audit)
+        self.assertTrue(any("Write the report in Chinese" in item for item in seen))
+
     def test_a_chosen_vm_story_is_written_and_checks_stay_out_of_the_answer(self) -> None:
         class _Story:
             orchestrator_ready = True
@@ -173,8 +233,10 @@ class CodexTurnTest(PlaneTest):
         self.assertEqual(status, 200, page)
         self.assertIn("Route: codex", page)
         self.assertIn("从前有一次开会", page)
-        self.assertNotIn("Sandbox denied", page)
-        self.assertNotIn("Network:", page)
+        answer = page.split('class="outcome">', 1)[1].split("</p>", 1)[0]
+        self.assertNotIn("Sandbox denied", answer)
+        self.assertNotIn("Network:", answer)
+        self.assertIn("Sandbox denied", page.split('class="step-details"', 1)[1])
         self.assertIn("final message", guest.prompt)
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertIn("guest.isolation", audit)

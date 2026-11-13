@@ -454,6 +454,8 @@ CHAT_JS = r"""
         reply.className = "reply";
         reply.textContent = message.reply;
         content.appendChild(reply);
+      } else if (message.tasks && message.tasks.length) {
+        content.appendChild(renderChecklist(message.tasks));
       } else if (!(message.results && message.results.length) && (message.error_code || String(message.text || "").indexOf("Error code:") >= 0)) {
         showError(content, message.text || "");
       } else if (!(message.results && message.results.length)) {
@@ -670,6 +672,60 @@ CHAT_JS = r"""
     node.appendChild(card);
   }
 
+  function renderChecklist(tasks) {
+    var list = document.createElement("ul");
+    list.className = "checklist";
+    (tasks || []).forEach(function (task) {
+      if (!task || !task.title) return;
+      var done = task.status === "done";
+      var li = document.createElement("li");
+      li.className = "task " + (done ? "done" : "open");
+      var writable = task.writable && task.id;
+      var hint = task.hint || (done ? "Mark open. Nothing is saved until you approve." : "Mark done. Nothing is saved until you approve.");
+      if (!writable) hint = task.hint || "This box is read-only.";
+      var label = document.createElement("span");
+      label.className = "label";
+      label.textContent = task.title + (task.due ? " (due " + task.due + ")" : "");
+      if (!writable) {
+        var row = document.createElement("div");
+        row.className = "row";
+        var frozen = document.createElement("span");
+        frozen.className = "check";
+        frozen.title = hint;
+        frozen.setAttribute("aria-disabled", "true");
+        frozen.setAttribute("aria-pressed", done ? "true" : "false");
+        row.appendChild(frozen);
+        row.appendChild(label);
+        li.appendChild(row);
+      } else {
+        var taskForm = document.createElement("form");
+        taskForm.method = "post";
+        taskForm.action = "/ui/tasks";
+        function hidden(name, value) {
+          var input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value;
+          taskForm.appendChild(input);
+        }
+        hidden("csrf", csrf);
+        hidden("id", task.id);
+        var button = document.createElement("button");
+        button.className = "check";
+        button.type = "submit";
+        button.name = "op";
+        button.value = "toggle";
+        button.title = hint;
+        button.setAttribute("aria-pressed", done ? "true" : "false");
+        taskForm.appendChild(button);
+        taskForm.appendChild(label);
+        li.appendChild(taskForm);
+      }
+      list.appendChild(li);
+    });
+    return list;
+  }
+
   function renderMarkdown(node, text) {
     if (window.ssiosRender) {
       var host = node.querySelector(".md");
@@ -854,14 +910,17 @@ CHAT_JS = r"""
         column.appendChild(button);
       }
     }
-    if (name === "outcome" && (payload.visible || payload.text)) {
+    if (name === "outcome" && (payload.visible || payload.text || (payload.tasks && payload.tasks.length))) {
       answer.dataset.answered = "1";
       var typingNode = answer.querySelector(".typing");
       if (typingNode) typingNode.remove();
-      var note = document.createElement("p");
-      note.textContent = payload.visible || payload.text;
       var content = answer.querySelector(".content");
-      content.appendChild(note);
+      if (payload.tasks && payload.tasks.length) content.appendChild(renderChecklist(payload.tasks));
+      else {
+        var note = document.createElement("p");
+        note.textContent = payload.visible || payload.text;
+        content.appendChild(note);
+      }
       if (payload.choices && payload.choices.length) content.appendChild(choiceButtons(payload.choices));
     }
     return raw;
@@ -925,7 +984,9 @@ CHAT_JS = r"""
     summary.textContent = "Details";
     details.appendChild(summary);
     var list = document.createElement("ul");
-    [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]].forEach(function (pair) {
+    var rows = [["Network", JSON.stringify(checks.nic || [])], ["Outbound", String(checks.outbound)], ["Marker", String(checks.marker)], ["Sandbox denied", String(checks.sandbox_denied)], ["Outside write", String(checks.outside_write)]];
+    if (checks.fallback) rows.push(["Guest fallback", String(checks.fallback)]);
+    rows.forEach(function (pair) {
       var li = document.createElement("li");
       li.textContent = pair[0] + ": " + pair[1];
       list.appendChild(li);
@@ -1509,6 +1570,20 @@ def _frame(event: dict) -> str:
     return f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
 
 
+def _check_details_html(checks: dict) -> str:
+    rows = [
+        ("Network", json.dumps(checks.get("nic") or [])),
+        ("Outbound", str(bool(checks.get("outbound"))).lower()),
+        ("Marker", str(bool(checks.get("marker"))).lower()),
+        ("Sandbox denied", str(bool(checks.get("sandbox_denied"))).lower()),
+        ("Outside write", str(bool(checks.get("outside_write"))).lower()),
+    ]
+    if checks.get("fallback"):
+        rows.append(("Guest fallback", str(checks.get("fallback"))))
+    items = "".join(f"<li>{html.escape(label)}: {html.escape(value)}</li>" for label, value in rows)
+    return '<details class="step-details"><summary>Details</summary><ul>' + items + "</ul></details>"
+
+
 def _events_html(session, events: list[dict]) -> str:
     parts = []
     technical = []
@@ -1534,10 +1609,12 @@ def _events_html(session, events: list[dict]) -> str:
                 parts.append("<p class=\"codex-step\">Plan</p>")
             elif phase == "writing":
                 parts.append("<p class=\"codex-step\">Writing the answer</p>")
+            elif phase == "isolation":
+                parts.append(_check_details_html(data.get("checks") if isinstance(data.get("checks"), dict) else {}))
             else:
                 parts.append("<p>Guest: " + html.escape(phase) + " / " + html.escape(str(data.get("backend") or "")) + "</p>")
         elif name == "isolation":
-            technical.append("<p>Isolation: " + html.escape(json.dumps(data, ensure_ascii=False)) + "</p>")
+            parts.append(_check_details_html(data if isinstance(data, dict) else {}))
         elif name == "results":
             blocks = data.get("blocks") or []
             text = str(data.get("text") or "")
@@ -1563,7 +1640,13 @@ def _events_html(session, events: list[dict]) -> str:
                 buttons = "<div class=\"choices\">" + "".join(
                     f"<button type=\"button\" class=\"choice\">{html.escape(str(label))}</button>" for label in labels if str(label)
                 ) + "</div>"
-            parts.append("<p class=\"outcome\">" + html.escape(visible) + "</p>" + buttons)
+            tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+            if tasks:
+                from ssios.ui import task_checklist_html
+
+                parts.append(task_checklist_html(session, tasks) + buttons)
+            else:
+                parts.append("<p class=\"outcome\">" + html.escape(visible) + "</p>" + buttons)
             if full and full != visible:
                 technical.append("<p>" + html.escape(full) + "</p>")
         elif name == "approval":
@@ -1735,6 +1818,19 @@ def _transcript(plane, account: dict, record: dict) -> list[dict]:
             item["reply"] = str(message.get("reply") or "")
         if isinstance(message.get("choices"), list) and message.get("choices"):
             item["choices"] = [str(choice) for choice in message.get("choices") if str(choice)][:6]
+        task_ids = message.get("task_ids") if isinstance(message.get("task_ids"), list) else []
+        if task_ids:
+            from ssios.goals import GoalStore, task_view
+
+            store = GoalStore(AccountScope(plane, account).home)
+            views = []
+            for goal_id in task_ids:
+                goal = store.get(str(goal_id))
+                if not isinstance(goal, dict) or goal.get("status") not in {"open", "in_progress", "done"}:
+                    continue
+                views.append(task_view(goal))
+            if views:
+                item["tasks"] = views
         if message.get("approval_id"):
             item["approval"] = _approval_view(plane, account, str(message["approval_id"]), item["text"])
         results = message.get("results")
@@ -1935,9 +2031,15 @@ def _info_pane(plane, session, state: dict) -> str:
             + html.escape(str(item.get("text") or "Reminder"))
             + "</strong><p>" + html.escape(label + (" · " + when if when else "")) + "</p></div></li>"
         )
+    from ssios.goals import GoalStore, listed_goals, task_view
+    from ssios.ui import task_checklist_html
+
+    goal_rows = [task_view(goal) for goal in listed_goals(GoalStore(scope.home).all())]
+    goal_list = task_checklist_html(session, goal_rows) or "<p>No tasks.</p>"
     noun = "scheduled task" if count == 1 else "scheduled tasks"
     overview = (
-        f"<p class=\"count\">{count} {noun}</p><ul class=\"routines\">"
+        "<h3>Tasks</h3>" + goal_list
+        + f"<p class=\"count\">{count} {noun}</p><ul class=\"routines\">"
         + ("".join(rows) or "<li>No scheduled tasks.</li>")
         + "</ul><p><a href=\"/ui/tasks\">View all</a></p>"
     )
@@ -1983,7 +2085,7 @@ def _info_pane(plane, session, state: dict) -> str:
         files.append("<li><a href=\"/ui/files/" + html.escape(item["id"]) + "\">" + html.escape(item["name"]) + "</a></li>")
     library = (
         "<h3>Files</h3><ul class=\"activity\">" + ("".join(files) or "<li>No files yet.</li>") + "</ul>"
-        "<p><a href=\"/ui/files\">Open files</a></p><p><a href=\"/ui/vault\">Open notes</a></p>"
+        "<p><a href=\"/ui/library\">Open files</a></p><p><a href=\"/ui/vault\">Open notes</a></p>"
     )
     return (
         "<aside id=\"info-pane\" class=\"info\" aria-label=\"Account details\">"

@@ -83,8 +83,25 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return Page(200, _dashboard(plane, session))
     if method == "GET" and path == "/ui/notices":
         return _notices(plane, session)
+    if method == "GET" and path == "/ui/library":
+        from ssios.library_page import library_page
+
+        return Page(200, library_page(plane, session, query))
+    if method == "POST" and path == "/ui/library":
+        from ssios.library_page import library_post
+
+        _csrf(session, body)
+        return library_post(plane, session, body, peer_ip)
+    if method == "GET" and path == "/ui/library/raw":
+        from ssios.library_page import library_raw
+
+        return library_raw(plane, session, query)
+    if method == "GET" and path == "/ui/library/thumb":
+        from ssios.library_page import library_thumb
+
+        return library_thumb(plane, session, query)
     if method == "GET" and path == "/ui/tasks":
-        return Page(200, _tasks(plane, session, query.get("status", "open")))
+        return Page(200, _tasks(plane, session, query.get("status", "all")))
     if method == "POST" and path == "/ui/tasks":
         _csrf(session, body)
         return _tasks_post(plane, session, body, peer_ip)
@@ -279,16 +296,47 @@ def _bound_port(plane) -> int:
     return int(port)
 
 
-def browser_error_page(detail: str, status: int) -> Page:
-    """A normal page for a browser. API clients do not use this."""
-    safe = html.escape(detail or "The page could not be shown.")
+def ui_language(plane, session: dict | None) -> str:
+    if not session:
+        return "en"
+    try:
+        lang = plane.skills.account_prefs(session["account"]["id"]).get("language")
+    except Exception:
+        return "en"
+    return lang if lang in {"en", "zh"} else "en"
+
+
+def browser_error_page(detail: str, status: int, *, code: str = "", lang: str = "en") -> Page:
+    """A normal page for a browser. The link matches the failure, not every destination."""
+    from ssios.locale_messages import say
+
+    choice = lang if lang in {"en", "zh"} else "en"
+    safe = html.escape(detail or say(choice, "page_failed"))
+    if status == 401 or code in {"unauthorized", "login_required"}:
+        href, label = "/ui/login", say(choice, "sign_in")
+    elif code.startswith("library_"):
+        href, label = "/ui/library", say(choice, "library_link")
+    elif code.startswith("clip_") or code == "path_rejected":
+        href, label = "/ui/vault", say(choice, "notes_link")
+    elif code.startswith("connector") or code.startswith("oauth") or code == "secure_store_unavailable":
+        href, label = "/ui/connections", say(choice, "connections_link")
+    else:
+        href, label = "/ui/chat", say(choice, "chat_link")
+    title = say(choice, "page_failed_title")
+    code_html = ""
+    if code:
+        code_html = (
+            f'<details class="error-code"><summary>{html.escape(say(choice, "error_details"))}</summary>'
+            f"<p>{html.escape(code)}</p></details>"
+        )
     body = (
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Something went wrong</title>"
+        f"<!doctype html><html lang=\"{choice}\"><meta charset=\"utf-8\"><title>{html.escape(title)}</title>"
         + _style_link()
-        + "<body><main><h1>Something went wrong</h1><p>"
+        + f"<body><main><h1>{html.escape(title)}</h1><p>"
         + safe
-        + "</p><p><a href=\"/ui/login\">Sign in</a> <a href=\"/ui/chat\">Chat</a> "
-        "<a href=\"/ui/connections\">Connections</a></p></main></body></html>"
+        + "</p>"
+        + code_html
+        + f'<p><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></p></main></body></html>'
     )
     return Page(status, body)
 
@@ -400,8 +448,58 @@ def _notices(plane, session: dict) -> Page:
     return Page(200, payload, content_type="application/json; charset=utf-8")
 
 
-def _tasks(plane, session: dict, status_filter: str = "open") -> str:
-    from ssios.goals import GoalStore, goal_mode
+def task_check_control(session: dict, task: dict) -> str:
+    """A square checkbox. A saved task posts an approval. Anything else is read-only."""
+    title = " ".join(str(task.get("title") or "").split())
+    if not title:
+        return ""
+    status = "done" if str(task.get("status") or "") == "done" else "open"
+    due = str(task.get("due") or "")
+    label = title + (f" (due {due})" if due else "")
+    pressed = "true" if status == "done" else "false"
+    word = "Done" if status == "done" else "Open"
+    writable = bool(task.get("writable")) and bool(task.get("id"))
+    if not writable:
+        hint = str(task.get("hint") or "This box is read-only.")
+        return (
+            "<div class=\"row\"><span class=\"check\" aria-disabled=\"true\" aria-pressed=\""
+            + pressed
+            + "\" title=\""
+            + html.escape(hint, quote=True)
+            + "\"><span class=\"sr\">"
+            + word
+            + "</span></span><span class=\"label\">"
+            + html.escape(label)
+            + "</span></div>"
+        )
+    csrf = html.escape(str(session.get("csrf") or ""), quote=True)
+    goal_id = html.escape(str(task.get("id") or ""), quote=True)
+    hint = "Mark open. Nothing is saved until you approve." if status == "done" else "Mark done. Nothing is saved until you approve."
+    return (
+        f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
+        f"<button class=\"check\" type=\"submit\" name=\"op\" value=\"toggle\" aria-pressed=\"{pressed}\" title=\"{html.escape(hint, quote=True)}\">"
+        f"<span class=\"sr\">{word}</span></button><span class=\"label\">{html.escape(label)}</span></form>"
+    )
+
+
+def task_checklist_html(session: dict, tasks: list[dict]) -> str:
+    rows = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        control = task_check_control(session, task)
+        if not control:
+            continue
+        status = "done" if str(task.get("status") or "") == "done" else "open"
+        rows.append(f"<li class=\"task {status}\">{control}</li>")
+    if not rows:
+        return ""
+    return "<ul class=\"checklist\">" + "".join(rows) + "</ul>"
+
+
+def _tasks(plane, session: dict, status_filter: str = "open", notice: str = "") -> str:
+    from ssios.goals import GoalStore, goal_mode, task_view
     from ssios.reminders import ReminderStore, sweep_accounts
     from ssios.scope import AccountScope
 
@@ -422,7 +520,6 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
     )
     rows = []
     for goal in shown:
-        title = html.escape(str(goal.get("title") or ""))
         goal_id = html.escape(str(goal.get("id") or ""))
         source = goal.get("source") if isinstance(goal.get("source"), dict) else {}
         conversation = html.escape(str(source.get("conversation_id") or ""))
@@ -432,11 +529,12 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
         buttons = (
             f"<form class=\"goal-actions\" method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
             f"<input type=\"hidden\" name=\"id\" value=\"{goal_id}\">"
-            "<button name=\"op\" value=\"complete\" type=\"submit\">Complete</button>"
             "<button name=\"op\" value=\"drop\" type=\"submit\">Drop</button>"
             "<button name=\"op\" value=\"undo\" type=\"submit\">Undo</button></form>"
         )
-        rows.append(f"<li><strong>{title}</strong> {html.escape(str(goal.get('status') or ''))} {link} {reason} {buttons}</li>")
+        box = task_check_control(session, task_view(goal))
+        state = "done" if goal.get("status") == "done" else "open"
+        rows.append(f"<li class=\"task {state}\">{box} {link} {reason} {buttons}</li>")
     mode = html.escape(goal_mode(scope.home))
     mode_form = (
         f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
@@ -451,20 +549,31 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
         "<label>Description <input name=\"description\" maxlength=\"240\"></label>"
         "<button name=\"op\" value=\"add\" type=\"submit\">Add goal</button></form>"
     )
-    guest = []
+    guest_rows = []
+    guest_tasks = []
     if account.get("legacy_owner"):
-        for task in plane.tasks.values():
-            guest.append(
-                f"<li><a href=\"/ui/tasks/{html.escape(task['id'])}\">{html.escape(task['id'])}</a> {html.escape(str(task.get('status')))}</li>"
-            )
-    for task in scope.tasks().values():
+        guest_tasks.extend(task for task in plane.tasks.values() if isinstance(task, dict))
+    guest_tasks.extend(task for task in scope.tasks().values() if isinstance(task, dict))
+    for task in guest_tasks:
+        status = str(task.get("status") or "")
+        guest_rows.append(
+            {
+                "id": "",
+                "title": str(task.get("id") or ""),
+                "status": "done" if status in {"done", "succeeded", "completed"} else "open",
+                "writable": False,
+                "hint": "Guest task status is not changed from this list.",
+            }
+        )
+    guest = []
+    for task in guest_tasks:
         guest.append(
-            f"<li><a href=\"/ui/tasks/{html.escape(str(task['id']))}\">{html.escape(str(task['id']))}</a> {html.escape(str(task.get('status')))}</li>"
+            f"<li><a href=\"/ui/tasks/{html.escape(str(task.get('id') or ''))}\">{html.escape(str(task.get('id') or ''))}</a> {html.escape(str(task.get('status') or ''))}</li>"
         )
     reminder_store = ReminderStore(scope.home)
     notices = []
-    for notice in reminder_store.unseen():
-        notices.append(f"<li>Reminder: {html.escape(str(notice.get('text') or ''))} was due {html.escape(str(notice.get('due') or ''))}.</li>")
+    for item in reminder_store.unseen():
+        notices.append(f"<li>Reminder: {html.escape(str(item.get('text') or ''))} was due {html.escape(str(item.get('due') or ''))}.</li>")
     dismiss = (
         f"<form method=\"post\" action=\"/ui/tasks\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<button name=\"op\" value=\"dismiss\" type=\"submit\">Dismiss</button></form>"
@@ -480,12 +589,15 @@ def _tasks(plane, session: dict, status_filter: str = "open") -> str:
             "<button name=\"op\" value=\"snooze\" type=\"submit\">Snooze</button>"
             "<button name=\"op\" value=\"cancel\" type=\"submit\">Cancel</button></form></li>"
         )
+    guest_list = task_checklist_html(session, guest_rows)
+    guest_links = "<ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
     body = (
-        f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
-        + "<ul>" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
+        notice
+        + f"<p>{filters}</p><p>Updates: {mode}</p>" + mode_form + add
+        + "<ul class=\"checklist\">" + ("".join(rows) or "<li>No goals.</li>") + "</ul>"
         + "<h2>Reminders</h2>" + (f"<ul>{''.join(notices)}</ul>" + dismiss if notices else "")
         + "<ul>" + ("".join(reminder_rows) or "<li>No open reminders.</li>") + "</ul>"
-        + "<h2>Guest tasks</h2><ul>" + ("".join(guest) or "<li>None.</li>") + "</ul>"
+        + "<h2>Guest tasks</h2>" + guest_list + guest_links
     )
     return _page(session, "Tasks", body)
 
@@ -523,9 +635,40 @@ def _tasks_post(plane, session, body: dict, peer_ip: str) -> Page:
         ReminderStore(scope.home).cancel_matching(str(body.get("id") or ""))
     elif op == "dismiss":
         ReminderStore(scope.home).mark_seen()
+    elif op == "toggle":
+        return _stage_goal_toggle(plane, session, scope, str(body.get("id") or ""))
     else:
         raise SsiosError("goal_invalid", "goal action rejected", 400)
     return Page(200, _tasks(plane, session, "open"))
+
+
+def _stage_goal_toggle(plane, session, scope, goal_id: str) -> Page:
+    import json
+
+    from ssios.goals import GoalStore
+
+    goal = GoalStore(scope.home).get(goal_id)
+    if goal is None or goal.get("status") == "dropped":
+        raise SsiosError("goal_invalid", "goal not found", 404)
+    status = "open" if goal.get("status") == "done" else "done"
+    payload = json.dumps({"id": goal["id"], "status": status}, ensure_ascii=False).encode("utf-8")
+    approval = scope.create_approval(
+        action="goal.update",
+        project_id=scope.project_id(),
+        task_id="chat",
+        payload=payload,
+        meta={"expected_revision": "goal", "goal_id": goal["id"], "status": status, "title": str(goal.get("title") or "")[:80]},
+    )
+    record = scope.approvals().get(str(approval.get("id") or ""))
+    preview = html.escape(scope.preview(record))
+    notice = (
+        "<article class=\"card approval\"><h2>goal.update</h2><pre>"
+        + preview
+        + "</pre><p>Nothing is written until you approve it.</p>"
+        + _decision_form(session, record)
+        + "</article>"
+    )
+    return Page(200, _tasks(plane, session, "open", notice))
 
 
 def _goal_title(scope, goal_id: str) -> str:
@@ -742,6 +885,8 @@ def _approval_outcome(scope, record: dict, result: dict | None) -> str:
         return "Saved the clip."
     if action == "chat.accept":
         return "Saved the guest result for this account."
+    if action == "goal.update":
+        return "Updated the task."
     if isinstance(result, dict) and result.get("status"):
         return "Status: " + str(result.get("status"))
     return "The decision was recorded."
@@ -1038,9 +1183,17 @@ def _history(plane, project_id: str, path: str) -> str:
 
 
 def _vault_page(plane, session: dict, notice: str) -> str:
+    from ssios.errors import SsiosError
+    from ssios.locale_messages import say
     from ssios.vault import list_notes
 
-    notes = list_notes(plane.settings, session["account"]["id"])
+    try:
+        notes = list_notes(plane.settings, session["account"]["id"])
+    except SsiosError as exc:
+        if exc.code != "path_rejected":
+            raise
+        notes = []
+        notice = _clip_notice("clip_denied", say(ui_language(plane, session), "clip_denied"))
     items = []
     for item in notes:
         path = html.escape(item["path"], quote=True)
@@ -1049,9 +1202,11 @@ def _vault_page(plane, session: dict, notice: str) -> str:
         items.append(f'<li><a href="/ui/vault/note?path={path}">{title}</a> <span>{source}</span></li>')
     csrf = html.escape(str(session.get("csrf") or ""))
     paste = (
-        f"<form method=\"post\" action=\"/ui/vault\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        f"<form method=\"post\" action=\"/ui/vault\" enctype=\"multipart/form-data\">"
+        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
         "<label>Source URL <input name=\"url\" placeholder=\"https://example.com/story\"></label>"
         "<label>Pasted article <textarea name=\"content\" rows=\"6\"></textarea></label>"
+        "<label>Or a text file <input type=\"file\" name=\"file\"></label>"
         "<button type=\"submit\">Clip pasted article</button></form>"
     )
     body = notice + paste + "<p>These notes are on this computer. Open the vault folder in Obsidian.</p><ul>" + ("".join(items) or "<li>No notes yet.</li>") + "</ul>"
@@ -1081,13 +1236,38 @@ def _vault_note(plane, session: dict, rel: str) -> str:
     return _page(session, "Note", f"<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
 
 
+def _clip_notice(code: str, detail: str) -> str:
+    safe_code = html.escape(code, quote=True)
+    return f'<p class="notice" data-code="{safe_code}">{html.escape(detail)}</p>'
+
+
+def _pasted_text(body: dict) -> str:
+    content = str(body.get("content") or "")
+    if content.strip():
+        return content
+    uploads = body.get("uploads") if isinstance(body.get("uploads"), list) else []
+    if not uploads or not isinstance(uploads[0], dict):
+        return content
+    raw = uploads[0].get("bytes")
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return content
+    try:
+        return bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 def _vault_paste(plane, session: dict, body: dict, peer_ip: str) -> Page:
     from ssios.clipper import clip_from_browser
+    from ssios.errors import SsiosError
     from ssios.scope import AccountScope
 
     url = str(body.get("url") or "")
-    content = str(body.get("content") or "")
-    result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    content = _pasted_text(body)
+    try:
+        result = clip_from_browser(plane, session["account"]["id"], {"url": url, "html": content, "title": "Pasted article"}, peer_ip)
+    except SsiosError as exc:
+        return Page(exc.status, _vault_page(plane, session, _clip_notice(exc.code, exc.detail)))
     if result.get("status") == "saved":
         return Page(200, _vault_page(plane, session, f"<p>Saved the clip to {html.escape(str(result.get('path') or ''))}.</p>"))
     scope = AccountScope(plane, session["account"])
@@ -1190,7 +1370,9 @@ def _clipper_post(plane, session: dict, body: dict) -> Page:
     if op == "undo-clip":
         undo_last_clip(plane, account_id)
         return Page(200, _clipper_page(plane, session, "<p>The last auto clip was removed.</p>"))
-    raise SsiosError("skill_denied", "clip action rejected", 400)
+    from ssios.locale_messages import say
+
+    raise SsiosError("clip_denied", say(ui_language(plane, session), "clip_denied"), 400)
 
 
 def _settings(plane, session: dict) -> str:
@@ -1322,9 +1504,30 @@ label { display: grid; gap: 4px; }
 form { display: grid; gap: 12px; }
 .goal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .goal-actions button { width: auto; }
+.checklist, .msg ul.checklist { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 8px; }
+.checklist li.task { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.checklist form, .checklist .row { display: flex; align-items: flex-start; gap: 10px; margin: 0; }
+.checklist .check {
+  width: 18px; height: 18px; min-width: 18px; padding: 0; border-radius: 3px;
+  border: 1.5px solid var(--ink); background: var(--panel); display: inline-grid; place-items: center;
+}
+.checklist .check[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.checklist .check[aria-pressed="true"]::after {
+  content: ""; width: 8px; height: 4px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg) translateY(-1px);
+}
+.checklist .task.done .label { color: var(--muted); text-decoration: line-through; }
+.checklist .check[aria-disabled="true"] { cursor: default; }
+.md li.task { list-style: none; margin-left: 0; }
+.md li.task input[type="checkbox"] {
+  appearance: none; width: 16px; height: 16px; margin: 0 8px 0 0; vertical-align: -3px;
+  border: 1.5px solid var(--ink); border-radius: 3px; background: var(--panel);
+}
+.md li.task.done { color: var(--muted); text-decoration: line-through; }
+.md li.task.done input[type="checkbox"] { background: var(--ink); }
 .badge { display: inline-block; min-width: 1.2em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: 12px; text-align: center; }
 pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
-.app { height: 100%; display: flex; min-height: 0; }
+.app { height: 100%; display: flex; min-height: 0; min-width: 0; max-width: 100%; }
 .rail { width: 64px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 6px; border-right: 1px solid var(--line); background: var(--bg); }
 .rail a, .rail button { width: 44px; min-height: 36px; display: grid; place-items: center; border-radius: 12px; text-decoration: none; color: var(--ink); font-size: 12px; padding: 4px; }
 .rail a:hover, .rail a:focus-visible, .rail button:hover, .rail button:focus-visible { background: var(--panel); }
@@ -1398,6 +1601,9 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .page { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: none; margin: 0; padding: 0; }
 .sheet { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+.sheet.wide { max-width: 1100px; }
+.page-bleed { max-width: 100%; min-width: 0; height: 100%; overflow: auto; padding: 12px 16px 28px; }
+.page-bleed > h1 { margin: 0 0 12px; font-size: 1.35rem; }
 .menu-btn { display: none; margin: 8px 16px 0; width: max-content; }
 .thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow: auto; min-height: 0; }
@@ -1437,10 +1643,10 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .status.denied, .status.expired, .status.missing { background: var(--danger-bg); color: var(--danger); }
 .diff s { color: var(--muted); }
 .diff .add { background: var(--ok-bg); border-radius: 8px; padding: 2px 6px; }
-.steps { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; color: var(--muted); font-size: 13px; align-items: flex-start; }
-.steps li[data-step="checks"] { display: flex; flex-direction: column; align-items: flex-start; }
-.step-details { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
-.step-details summary { cursor: pointer; }
+.steps { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: nowrap; gap: 12px; color: var(--muted); font-size: 13px; align-items: center; white-space: nowrap; }
+.steps li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.step-details { display: inline-flex; margin: 0; color: var(--muted); font-size: 12px; }
+.step-details summary { cursor: pointer; display: inline; }
 .step-details:not([open]) > :not(summary) { display: none; }
 .steps .done::before { content: "\\2713  "; color: var(--ok); }
 .steps .spin::before { content: "\\25CC  "; }
@@ -1469,6 +1675,76 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .file-filters a { text-decoration: none; }
 .file-search { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.library { position: relative; display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 16px; align-items: start; min-width: 0; max-width: 100%; }
+.library.has-selection { grid-template-columns: minmax(0, 220px) minmax(0, 1fr) minmax(180px, 280px); }
+.drop-overlay { position: fixed; inset: 16px; display: none; align-items: center; justify-content: center; border: 3px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--ink); font-size: 1.5rem; font-weight: 600; z-index: 30; pointer-events: none; }
+.drop-overlay.show { display: flex; }
+.lib-folder.drop-hot { outline: 2px solid var(--accent); border-radius: 8px; }
+.drop-log { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; }
+.drop-log li { font-size: 13px; }
+.drop-log li.ask { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.drop-log li.ask label { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+.drop-log .bad { color: var(--danger); }
+.drop-log button, .conflict-choice button { width: auto; }
+.conflict-choice { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lib-side, .lib-main, .lib-inspector, .lib-toolbar, .lib-grid { display: grid; gap: 10px; align-content: start; min-width: 0; max-width: 100%; }
+.lib-main, .lib-toolbar { display: block; }
+.lib-inspector h2, .lib-rename, .lib-rename-text, .lib-card .name { overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
+.lib-inspector input, .lib-inspector select, .lib-inspector button, .lib-inspector form { max-width: 100%; min-width: 0; }
+.lib-rename { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.lib-rename-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.lib-rename-edit { width: auto; flex: none; white-space: nowrap; padding: 4px 8px; }
+.lib-rename-input { width: 100%; max-width: 100%; min-width: 12rem; }
+.lib-rename:has(.lib-rename-input) { flex-direction: column; align-items: stretch; }
+.lib-rename-error { color: var(--danger); font-size: 13px; }
+.lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 10px; text-decoration: none; color: var(--ink); }
+.lib-switch.active { background: var(--hover); font-weight: 600; }
+.lib-badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+.lib-nav, .lib-tree { display: grid; gap: 2px; }
+.lib-nav a, .lib-tree a { display: flex; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 8px; text-decoration: none; color: var(--ink); }
+.lib-nav a.active, .lib-tree a.active { background: var(--hover); }
+.lib-count { color: var(--muted); font-size: 12px; }
+.lib-section { border-top: 1px solid var(--line); padding-top: 8px; }
+.lib-section summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-weight: 600; }
+.lib-add { width: 28px; height: 28px; border-radius: 8px; padding: 0; }
+.lib-settings summary { cursor: pointer; color: var(--muted); }
+.lib-toolbar { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin-bottom: 12px; min-width: 0; }
+.lib-toolbar form { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin: 0; min-width: 0; }
+.lib-toolbar input[name="q"] { width: 8rem; min-width: 0; flex: 1; }
+.lib-toolbar label { display: flex; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+.lib-toolbar form:first-child { flex: 1 1 auto; min-width: 0; }
+.lib-import { margin-left: auto; flex: 0 0 auto; }
+.lib-import input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
+.lib-import label.button { border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; cursor: pointer; background: var(--panel); }
+.drop-zone { display: grid; place-items: center; gap: 8px; min-height: 220px; margin-bottom: 12px; border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(148px, 100%), 1fr)); gap: 12px; min-height: 120px; }
+.lib-card { position: relative; display: grid; gap: 6px; align-content: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-decoration: none; color: var(--ink); min-width: 0; }
+.lib-card.selected { outline: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.lib-check { position: absolute; top: 8px; right: 8px; z-index: 2; width: 22px; height: 22px; margin: 0; opacity: 0; }
+.lib-card:hover .lib-check, .library.selecting .lib-check, .lib-card.selected .lib-check { opacity: 1; }
+.lib-marquee { position: fixed; z-index: 4; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
+.lib-batch { position: sticky; bottom: 8px; z-index: 3; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; max-width: 100%; margin-top: 12px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.lib-batch[hidden], #lib-multi[hidden], #lib-single[hidden] { display: none; }
+.lib-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 16px; background: var(--bg); color: var(--ink); max-width: min(420px, 100%); }
+.lib-dialog::backdrop { background: rgba(0, 0, 0, .35); }
+.lib-card .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; line-height: 1.3; }
+.lib-avatar, .lib-mini { width: 22px; height: 22px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 11px; display: inline-grid; place-items: center; }
+.lib-avatar { position: absolute; top: 12px; left: 12px; }
+.lib-card img, .lib-thumb { width: 100%; height: 112px; object-fit: contain; background: var(--hover); border-radius: 8px; }
+.lib-preview { width: auto; max-width: 100%; height: auto; max-height: 220px; object-fit: contain; background: var(--hover); border-radius: 12px; }
+.type-tile { display: grid; place-items: center; height: 112px; background: var(--hover); border-radius: 8px; font-weight: 600; }
+.type-tile.modest { width: 120px; height: 150px; }
+.lib-stars { display: flex; gap: 4px; }
+.lib-stars button { width: 32px; padding: 4px 0; }
+.lib-stars .on { color: var(--warn); }
+.lib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lib-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+.lib-actions { display: grid; gap: 8px; margin-top: 8px; }
+@media (max-width: 1100px) {
+  .library, .library.has-selection { grid-template-columns: minmax(0, 180px) minmax(0, 1fr); }
+  .lib-inspector { grid-column: 1 / -1; }
+}
+@media (max-width: 800px) { .library, .library.has-selection { grid-template-columns: minmax(0, 1fr); } }
 .file-list { display: grid; gap: 12px; }
 .file-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .file-card input { width: 100%; }
@@ -1596,6 +1872,10 @@ def _static_asset(method: str, path: str) -> Page | None:
         return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
     if path == NOTICES_PATH:
         return Page(200, NOTICES_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    from ssios.library_page import LIBRARY_JS, library_script_path
+
+    if path == library_script_path():
+        return Page(200, LIBRARY_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     if path.startswith("/ui/assets/chat-") and path.endswith(".js"):
         from ssios.ui_household import CHAT_JS, CHAT_PATH
 
@@ -1665,6 +1945,8 @@ def icon(name: str) -> str:
         "check": '<circle cx="12" cy="12" r="8"/><path d="M8 12l2.5 2.5L16 9"/>',
         "mic": '<rect x="9" y="4" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
         "paperclip": '<path d="M8 12l6-6a3 3 0 0 1 4 4l-7 7a4 4 0 0 1-6-6l7-7"/>',
+        "person": '<circle cx="12" cy="8" r="3"/><path d="M6 19c1.2-3 3.2-4.5 6-4.5S16.8 16 18 19"/>',
+        "people": '<circle cx="9" cy="8" r="2.5"/><circle cx="16" cy="9" r="2"/><path d="M4.5 18c.8-2.2 2.2-3.4 4.5-3.4s3.7 1.2 4.5 3.4"/><path d="M13 14.7c.8-.4 1.7-.6 2.7-.6 1.7 0 3 .9 3.8 2.6"/>',
     }
     body = paths.get(name, paths["chat"])
     return (
@@ -1683,7 +1965,7 @@ def _rail(session: dict) -> str:
         f'<a href="/ui/chat" title="Chat" aria-label="Chat">{icon("chat")}</a>'
         f'<a href="#thread-search" title="Search" aria-label="Search">{icon("search")}</a>'
         f'<a href="/ui/vault" title="Notes" aria-label="Notes">{icon("notes")}</a>'
-        f'<a href="/ui/files" title="Files" aria-label="Files">{icon("files")}</a>'
+        f'<a href="/ui/library" title="Files" aria-label="Files">{icon("files")}</a>'
         f'<a href="/ui/memory?project_id=local-summary" title="Memory" aria-label="Memory">{icon("memory")}</a>'
         f'<a href="/ui/tasks" title="Tasks" aria-label="Tasks">{icon("tasks")}</a>'
         f'<a href="/ui/connections" title="Connections" aria-label="Connections">{icon("link")}</a>'
@@ -1736,8 +2018,12 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
     )
 
 
-def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "") -> str:
-    main = body if chat else f"<div class=\"page\"><div class=\"sheet\"><h1>{html.escape(title)}</h1>{body}</div></div>"
+def _page(session: dict, title: str, body: str, *, chat: bool = False, conversations: str = "", wide: bool = False, bleed: bool = False) -> str:
+    sheet = "sheet wide" if wide else "sheet"
+    if bleed:
+        main = f'<div class="page page-bleed"><h1>{html.escape(title)}</h1>{body}</div>'
+    else:
+        main = body if chat else f"<div class=\"page\"><div class=\"{sheet}\"><h1>{html.escape(title)}</h1>{body}</div></div>"
     return (
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>" + html.escape(title) + "</title>" + _style_link()

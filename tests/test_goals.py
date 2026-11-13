@@ -11,15 +11,44 @@ from ssios.goals import GoalStore, _validate_model, apply_turn, explicit_goal, p
 from ssios.scope import AccountScope
 
 
+class GoalCaptureTest(unittest.TestCase):
+    def test_one_shot_requests_are_not_goals_and_an_objective_is(self) -> None:
+        negatives = (
+            "总结一下。",
+            "总结一下我的最近20封邮件",
+            "帮我总结一下最近的邮件",
+            "please summarize my last 20 emails",
+            "What is a microVM?",
+            "hello",
+        )
+        for message in negatives:
+            self.assertIsNone(explicit_goal(message), message)
+            self.assertEqual(plan_changes(message, [], evidence=False, model_items=[{"op": "create", "title": message.strip("。.")}]), [], message)
+        positives = {
+            "记一下，周五前给Chase打电话": "周五前给Chase打电话",
+            "加个任务：买咖啡": "买咖啡",
+            "remind me to call the harbor desk": "call the harbor desk",
+            "我要在周五前交报告": "周五前交报告",
+            "I need to file the harbor report by Friday": "file the harbor report",
+        }
+        for message, title in positives.items():
+            found = explicit_goal(message)
+            self.assertIsNotNone(found, message)
+            self.assertEqual(found["title"], title)
+            planned = plan_changes(message, [], evidence=False)
+            self.assertEqual(planned[0]["op"], "create", message)
+            self.assertEqual(planned[0]["title"], title)
+
+
 class GoalPlanTest(unittest.TestCase):
     def test_chitchat_is_not_a_goal_and_duplicates_are_skipped(self) -> None:
         self.assertIsNone(explicit_goal("hello"))
         self.assertIsNone(explicit_goal("What is a microVM?"))
-        first = plan_changes("please call the harbor desk", [], evidence=False)
+        first = plan_changes("remind me to call the harbor desk", [], evidence=False)
         self.assertEqual(first[0]["op"], "create")
         self.assertEqual(first[0]["title"], "call the harbor desk")
         open_goal = {"id": "goal-aaaa", "title": "call the harbor desk", "status": "open"}
-        again = plan_changes("please call the harbor desk", [open_goal], evidence=False)
+        again = plan_changes("remind me to call the harbor desk", [open_goal], evidence=False)
         self.assertTrue(all(item["op"] != "create" for item in again))
         self.assertFalse(similar("transfer funds", "read the public notes"))
 
@@ -57,14 +86,14 @@ class GoalStoreTest(unittest.TestCase):
         scope = AccountScope(case.plane, account)
         account_id = account["id"]
         now = datetime(2026, 11, 10, 9, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
-        scope.chat().create("please call the harbor desk")
+        scope.chat().create("remind me to call the harbor desk")
         record = scope.chat().list_conversations()[0]
-        user = scope.chat().append(record["id"], {"role": "user", "text": "please call the harbor desk"})
+        user = scope.chat().append(record["id"], {"role": "user", "text": "remind me to call the harbor desk"})
         chips = apply_turn(
             scope,
             record["id"],
             user["id"],
-            "please call the harbor desk",
+            "remind me to call the harbor desk",
             evidence=False,
             evidence_reason="",
             now=now,
@@ -76,7 +105,7 @@ class GoalStoreTest(unittest.TestCase):
             scope,
             record["id"],
             user["id"],
-            "please call the harbor desk",
+            "remind me to call the harbor desk",
             evidence=False,
             evidence_reason="",
             now=now,
@@ -140,7 +169,7 @@ class GoalStoreTest(unittest.TestCase):
             scope,
             record["id"],
             user["id"],
-            "please file the studio plan",
+            "add a goal: file the studio plan",
             evidence=False,
             evidence_reason="",
             now=now,
@@ -149,6 +178,26 @@ class GoalStoreTest(unittest.TestCase):
         checklist = (vault / "Tasks.md").read_text(encoding="utf-8")
         self.assertIn("- [ ] file the studio plan", checklist)
         self.assertNotIn("transfer funds", checklist)
+        from ssios.util import write_json
+
+        write_json(
+            scope.home / "tasks.json",
+            {"tasks": {"task-0011223344556677": {"id": "task-0011223344556677", "status": "failed", "error_code": "codex_not_prepared"}}},
+        )
+        kept = GoalStore(scope.home).get(goal_id)
+        skipped = apply_turn(
+            scope,
+            record["id"],
+            user["id"],
+            "总结一下我的最近20封邮件",
+            evidence=True,
+            evidence_reason="tool result",
+            now=now,
+            peer_ip="127.0.0.1",
+        )
+        self.assertEqual(skipped, [])
+        self.assertEqual(GoalStore(scope.home).get(goal_id)["status"], kept["status"])
+        self.assertEqual(scope.tasks()["task-0011223344556677"]["status"], "failed")
 
 
 class GoalChatLoopTest(unittest.TestCase):
@@ -167,7 +216,7 @@ class GoalChatLoopTest(unittest.TestCase):
         self.addCleanup(case.tmp.cleanup)
         account = case.plane.accounts.add_member("ada", "other-horse-stable")
         scope = AccountScope(case.plane, account)
-        created = list(iter_turn(case.plane, account, "please call the harbor desk", "auto", "127.0.0.1"))
+        created = list(iter_turn(case.plane, account, "add a goal: call the harbor desk", "auto", "127.0.0.1"))
         goal = next(event["data"] for event in created if event.get("event") == "goal" and event["data"].get("kind") == "added")
         now = datetime(2026, 11, 12, 9, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
         ReminderStore(scope.home).add(

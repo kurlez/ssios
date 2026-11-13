@@ -293,7 +293,16 @@ def iter_turn(
     except Exception as exc:
         yield remember_failure(scope, record["id"], "chat_failed", f"The turn stopped because of {exc.__class__.__name__}.", 500)
         return
-    if decision.route not in {"tasks", "reminders", "memory"}:
+    from ssios.calendar_intent import account_zone
+    from ssios.goals import explicit_goal
+    from ssios.reminders import reminder_schedule
+
+    scheduled = False
+    if decision.route == "reminders":
+        now, _zone_name = host_clock(plane, scope.account)
+        zone, _name = account_zone(plane.settings, scope.account)
+        scheduled = reminder_schedule(message, now, zone) is not None
+    if not scheduled and decision.route != "tasks" and (decision.route not in {"reminders", "memory"} or explicit_goal(message)):
         yield from _track_goals(plane, scope, record["id"], message, peer_ip)
     yield {"event": "done", "data": {"ok": True}}
 
@@ -602,6 +611,30 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     if calls and any(item.get("status") == "pending" for item in session.results):
         yield from _codex_approvals(scope, conversation_id, session.results)
         return
+    missed = _guest_skipped_connector(message, raw_text, session.results)
+    if missed and not calls:
+        checks = outcome.get("checks") if isinstance(outcome.get("checks"), dict) else {}
+        note = "host " + missed + " read"
+        checks = {**checks, "fallback": note}
+        _audit_isolation(plane, scope, conversation_id, peer_ip, checks)
+        plane.security_audit.write(
+            actor=scope.account_id,
+            ip=peer_ip or "127.0.0.1",
+            action="guest.fallback",
+            target=missed,
+            result="host",
+            extra={"phase": "isolation"},
+        )
+        yield {"event": "status", "data": {"phase": "isolation", "checks": checks, "backend": "host"}}
+        decision = RouteDecision(
+            route="connector",
+            reason="The guest did not call the connector, so this computer read it.",
+            reason_code="guest_fallback",
+            source="rule",
+            services=(missed,),
+        )
+        yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, decision, place)
+        return
     answer = _without_check_lines(present_answer("" if calls else raw_text, session.results))
     checks = outcome.get("checks") if isinstance(outcome.get("checks"), dict) else {}
     if checks:
@@ -627,6 +660,28 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
 
 
 _CHECK_LINE = re.compile(r"^(Network|Outbound|Marker|Sandbox denied|Outside write):.*$")
+
+
+def _guest_skipped_connector(message: str, raw_text: str, results: list[dict]) -> str:
+    """A mail, calendar, or drive turn with no connector call. Empty when the guest used the tool."""
+    from ssios.chat_router import _services
+
+    services = _services(message)
+    needed = next((name for name in ("gmail", "calendar", "drive") if name in services), "")
+    if not needed:
+        return ""
+    prefix = {"gmail": "gmail", "calendar": "calendar", "drive": "drive"}[needed]
+    for item in results:
+        if str(item.get("tool") or "").startswith(prefix):
+            return ""
+    folded = str(raw_text or "").casefold()
+    missing = any(
+        phrase in folded
+        for phrase in ("not supported", "isn't supported", "is not supported", "don't have access", "do not have access", "no access", "not available")
+    )
+    if results and not missing:
+        return ""
+    return needed
 
 
 def _without_check_lines(text: str) -> str:
@@ -966,23 +1021,28 @@ def _wants_clip(message: str) -> bool:
 
 def _task_command(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str) -> Iterator[dict]:
     from ssios.calendar_intent import account_zone
-    from ssios.goals import GoalStore, _audit, manual_goal, task_command
+    from ssios.goals import GoalStore, _audit, listed_goals, manual_goal, task_command, task_view
     from ssios.reminders import ReminderStore, reminder_schedule, reminder_text
 
     command = task_command(message) or {"op": "list"}
     now, zone_name = host_clock(plane, scope.account)
     store = GoalStore(scope.home)
     if command["op"] == "list":
-        lines = ["Open tasks:"]
-        found = store.open_goals()
+        found = listed_goals(store.all())
         if not found:
-            lines.append("No open tasks.")
+            text = "No open tasks."
+            scope.chat().append(conversation_id, {"role": "assistant", "text": text, "task_ids": []})
+            yield {"event": "outcome", "data": {"text": text, "tasks": []}}
+            return
+        lines = ["Tasks:"]
         for goal in found:
+            mark = "x" if goal.get("status") == "done" else " "
             due = f" due {goal['due']}" if goal.get("due") else ""
-            lines.append(f"- {goal.get('title')}{due}")
+            lines.append(f"- [{mark}] {goal.get('title')}{due}")
         text = "\n".join(lines)
-        scope.chat().append(conversation_id, {"role": "assistant", "text": text})
-        yield {"event": "outcome", "data": {"text": text}}
+        views = [task_view(goal) for goal in found]
+        scope.chat().append(conversation_id, {"role": "assistant", "text": text, "task_ids": [goal["id"] for goal in found]})
+        yield {"event": "outcome", "data": {"text": text, "tasks": views}}
         return
     if command["op"] == "add":
         goal = manual_goal(
@@ -2069,7 +2129,7 @@ def english_connector_error(exc: SsiosError) -> str:
 
 
 def public_error(exc: SsiosError) -> str:
-    """A sentence a browser can show. It includes the stable code and no secret."""
+    """A sentence a chat transcript can show. It includes the stable code and no secret."""
     text = english_connector_error(exc)
     code = f"Error code: {exc.code}"
     if code not in text:

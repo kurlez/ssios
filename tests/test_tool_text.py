@@ -43,7 +43,7 @@ class ToolTextTest(unittest.TestCase):
             16384,
             256,
         )
-        self.assertEqual(chat["tools"][0]["function"]["name"], "gmail.search")
+        self.assertEqual(chat["tools"][0]["function"]["name"], "gmail_search")
         self.assertIn("num_ctx", chat["options"])
 
 
