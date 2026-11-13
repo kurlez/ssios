@@ -79,10 +79,14 @@ class VaultSyncTest(PlaneTest):
             with self.assertRaises(SsiosError) as caught:
                 sync_vault(self.plane.settings, self.account, bad)
             self.assertEqual(caught.exception.code, "sync_folder", bad)
-        link = self.theirs.parent / "link"
-        link.symlink_to(self.theirs)
+        inside = self.theirs.parent / "into-state"
+        inside.symlink_to(self.state / "accounts")
         with self.assertRaises(SsiosError):
-            sync_vault(self.plane.settings, self.account, str(link))
+            sync_vault(self.plane.settings, self.account, str(inside))
+        # ~/Google Drive on a Mac is a link. The sync follows it and names the real folder.
+        link = self.theirs.parent / "Google Drive"
+        link.symlink_to(self.theirs)
+        self.assertEqual(sync_vault(self.plane.settings, self.account, str(link), dry_run=True)["obsidian"], str(self.theirs))
         (self.theirs / "Daily" / "linked.md").symlink_to(self.theirs / "Daily" / "day.md")
         self.assertNotIn("Daily/linked.md", self._sync()["to_notes"])
         set_vault(self.plane.settings, self.account, str(self.theirs))

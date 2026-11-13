@@ -67,11 +67,19 @@ class StorageTest(PlaneTest):
             with self.assertRaises(SsiosError) as caught:
                 create_library(self.plane, self.account_id, "Bad", "127.0.0.1", where)
             self.assertEqual(caught.exception.code, "library_location", where)
-        link = self.disk.parent / "link"
-        link.symlink_to(self.disk)
+        # A link is followed to the real folder, and the real folder is what is checked.
+        inside = self.disk.parent / "into-state"
+        inside.symlink_to(self.state / "accounts")
         with self.assertRaises(SsiosError):
-            create_library(self.plane, self.account_id, "Bad", "127.0.0.1", str(link))
+            create_library(self.plane, self.account_id, "Bad", "127.0.0.1", str(inside))
         self.assertEqual(list(self.disk.iterdir()), [])
+        link = self.disk.parent / "My Drive 云盘"
+        link.symlink_to(self.disk)
+        linked = create_library(self.plane, self.account_id, "Linked", "127.0.0.1", str(link))
+        self.assertEqual(Path(linked["root"]).parent, self.disk)
+        import shutil
+
+        shutil.rmtree(linked["root"])
         session = {"account": self.account, "csrf": "c"}
         refused = library_post(self.plane, session, {"op": "create-library", "name": "Mine", "location": str(self.disk)}, "127.0.0.1")
         self.assertIn("You cannot change that.", refused.body)

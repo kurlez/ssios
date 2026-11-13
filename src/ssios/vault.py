@@ -73,23 +73,13 @@ def set_vault(settings, account_id: str, location: str) -> Path:
     if not text:
         write_json(target, {"path": ""})
         return vault_base(settings) / account_id
-    bad = SsiosError("path_rejected", "That folder cannot be the notes vault. Use an existing folder on this computer or a connected disk, outside the SSIOS state directory.", 400)
-    if text.startswith("//") or "://" in text or "\x00" in text:
-        raise bad
-    candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
-        raise bad
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current = current / part
-        if current.is_symlink():
-            raise bad
-    if not current.is_dir():
-        raise bad
-    resolved = current.resolve()
-    state = Path(settings.state_dir).resolve()
-    if resolved == state or state in resolved.parents or resolved in state.parents or any(part in _BLOCKED for part in resolved.parts):
-        raise bad
+    from ssios.util import real_directory
+
+    resolved, why = real_directory(text, Path(settings.state_dir))
+    if resolved is None:
+        raise SsiosError("path_rejected", "That folder cannot be the notes vault. " + why, 400)
+    if any(part in _BLOCKED for part in resolved.parts):
+        raise SsiosError("path_rejected", "That folder cannot be the notes vault. It is a development state directory.", 400)
     write_json(target, {"path": str(resolved)})
     return resolved
 

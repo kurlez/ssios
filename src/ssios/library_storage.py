@@ -18,32 +18,18 @@ from ssios.errors import SsiosError
 from ssios.locale_messages import say
 from ssios.util import read_json, write_json
 
-_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
 def storage_parent(plane, account_id: str, location: str) -> Path:
-    """An existing directory on this computer or a connected disk. Network addresses, links, and the state directory are refused."""
+    """An existing directory on this computer or a connected disk. A link is followed to the real folder. Network addresses and the state directory are refused."""
     from ssios.library import _lang
 
     lang = _lang(plane, account_id)
-    text = str(location or "").strip()
-    bad = SsiosError("library_location", say(lang, "library_location"), 400)
-    if not text or text.startswith("//") or text.startswith("\\\\") or _SCHEME.match(text) or "\x00" in text:
-        raise bad
-    candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
-        raise bad
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current = current / part
-        if current.is_symlink():
-            raise bad
-    if not current.is_dir():
-        raise bad
-    resolved = current.resolve()
-    state = Path(plane.settings.state_dir).resolve()
-    if resolved == state or state in resolved.parents or resolved in state.parents:
-        raise bad
+    from ssios.util import real_directory
+
+    resolved, why = real_directory(location, Path(plane.settings.state_dir))
+    if resolved is None:
+        raise SsiosError("library_location", say(lang, "library_location") + " " + why, 400)
     return resolved
 
 

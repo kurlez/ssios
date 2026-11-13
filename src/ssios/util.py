@@ -193,3 +193,30 @@ def copy_tree_regular(src: Path, dst: Path) -> None:
                 raise SsiosError("seed_symlink", "fixture contains a symlink", 500)
             data = source.read_bytes()
             write_nofollow(dst, str((rel / name).as_posix()) if rel != Path(".") else name, data)
+
+
+def real_directory(location: str, state_dir: Path) -> tuple[Path | None, str]:
+    """The real folder a path names, and an empty reason. Or None and why it cannot be used.
+
+    A link in the path is followed first, then the real folder is checked. On a Mac, ~/Google Drive,
+    /tmp, and /var are links, so refusing every linked path refused ordinary folders. What matters
+    is where the path ends up: an existing directory that is not inside or above the state directory.
+    """
+    text = str(location or "").strip()
+    if not text or "\x00" in text:
+        return None, "The path is empty."
+    if text.startswith("//") or text.startswith("\\\\") or "://" in text:
+        return None, "A network address is not a folder on this computer."
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        return None, "The path must start with / or ~."
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, f"There is no folder at {candidate}. Check the spelling, and that its disk or cloud drive is connected."
+    if not resolved.is_dir():
+        return None, f"{resolved} is a file, not a folder."
+    state = Path(state_dir).resolve()
+    if resolved == state or state in resolved.parents or resolved in state.parents:
+        return None, "That folder is inside or above the SSIOS state directory."
+    return resolved, ""

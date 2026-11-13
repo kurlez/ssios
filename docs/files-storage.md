@@ -13,7 +13,7 @@ By default a library is stored under the state directory. A library can instead 
 
 `--location` is a directory that already exists. SSIOS creates one folder inside it, named `Photos (lib-xxxxxxxx).ssioslibrary`, and keeps everything for that library there: originals, the catalog, thumbnails, and the search index. A marker file `ssios-library.json` in that folder names the library.
 
-Refused as a location: a network address (`smb://`, `//host`), a path with a symbolic link in it, a path that does not exist, and anything inside or above the state directory.
+Refused as a location: a network address (`smb://`, `//host`), a path that does not exist, and anything inside or above the state directory. A link in the path is followed, and the real folder is the one checked and stored.
 
 An admin can also type the folder in Library settings on the Files page when creating a library. A member cannot name a folder on the page, because that makes this computer write outside the state directory. The operator sets it up for a member with the command above.
 

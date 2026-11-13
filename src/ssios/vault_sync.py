@@ -77,24 +77,11 @@ def _conflict_name(rel: str, side: str, stamp: str) -> str:
 
 def peer_folder(settings, location: str) -> Path:
     """The Obsidian folder. It must exist, be on this computer or a connected disk, and be outside the state directory."""
-    text = str(location or "").strip()
-    bad = SsiosError("sync_folder", "That folder cannot be synced. Use an existing folder on this computer or a connected disk, outside the SSIOS state directory.", 400)
-    if not text or text.startswith("//") or "://" in text or "\x00" in text:
-        raise bad
-    candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
-        raise bad
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current = current / part
-        if current.is_symlink():
-            raise bad
-    if not current.is_dir():
-        raise bad
-    resolved = current.resolve()
-    state = Path(settings.state_dir).resolve()
-    if resolved == state or state in resolved.parents or resolved in state.parents:
-        raise bad
+    from ssios.util import real_directory
+
+    resolved, why = real_directory(location, Path(settings.state_dir))
+    if resolved is None:
+        raise SsiosError("sync_folder", "That folder cannot be synced. " + why, 400)
     return resolved
 
 

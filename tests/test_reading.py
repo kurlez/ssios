@@ -115,6 +115,22 @@ class VaultTreeTest(PlaneTest):
         for bad in ("relative", "smb://nas/vault", str(self.state), str(mine / "missing")):
             with self.assertRaises(SsiosError):
                 set_vault(settings, account, bad)
+        # The shape that failed on a Mac: a linked parent with spaces and Chinese in the path.
+        cloud = Path(made.name).resolve() / "CloudStorage" / "Other computers" / "我的笔记本电脑" / "llm-wiki"
+        cloud.mkdir(parents=True)
+        (cloud / "index.md").write_text("wiki home\n", encoding="utf-8")
+        drive = Path(made.name).resolve() / "Google Drive"
+        drive.symlink_to(Path(made.name).resolve() / "CloudStorage")
+        through = drive / "Other computers" / "我的笔记本电脑" / "llm-wiki"
+        self.assertEqual(set_vault(settings, account, str(through)), cloud)
+        self.assertEqual([item["path"] for item in list_notes(settings, account)], ["index.md"])
+        with self.assertRaises(SsiosError) as missing:
+            set_vault(settings, account, str(drive / "Other computers" / "nowhere"))
+        self.assertIn("There is no folder at", missing.exception.detail)
+        inside = Path(made.name).resolve() / "into-state"
+        inside.symlink_to(self.state)
+        with self.assertRaises(SsiosError):
+            set_vault(settings, account, str(inside))
         self.assertEqual(set_vault(settings, account, str(mine)), mine)
         self.assertEqual(account_vault(settings, account), mine)
         self.assertEqual(sorted(item["path"] for item in list_notes(settings, account)), ["Daily/2026-11-13.md", "Tasks.md"])
