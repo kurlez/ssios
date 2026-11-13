@@ -22,6 +22,7 @@ Not in it:
 - Anything in the OS keychain: Google tokens and the OAuth client secret. Reconnect Google after a restore.
 - Symbolic links. They are listed under `skipped`.
 - Ollama models.
+- A library that keeps its files in its own folder outside the state directory (see `files-storage.md`). Back up that disk separately.
 
 The archive is not encrypted. It contains password hashes, local tokens, and personal data. Keep it on an encrypted disk (FileVault, LUKS, or an encrypted external volume).
 

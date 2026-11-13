@@ -129,7 +129,7 @@ def analyze_next(plane, account: dict, model=None) -> str:
         if row.get("kind") == "shared" and row.get("role") != "owner":
             continue
         library_id = str(row["id"])
-        if not metadata(plane, account_id, library_id).get("auto_analyze"):
+        if row.get("offline") or not metadata(plane, account_id, library_id).get("auto_analyze"):
             continue
         root = _library_root(plane, account_id, library_id)
         failed = read_json(root / "auto-analyze.json", {})

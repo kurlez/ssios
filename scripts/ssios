@@ -26,6 +26,10 @@ Usage: ./scripts/ssios <command> [args]
   router-bench Score the chat router. --rules-only does not call Ollama.
   library-embed-bench  Compare small local embedding models. Skips when Ollama is down.
   launchd-plist  Print a macOS LaunchAgent that starts the UI at sign-in. It installs nothing.
+  library-list    List an account's libraries and where each one is stored: library-list --username NAME
+  library-create  Make a library, optionally in a folder on another disk: library-create --username NAME --name TITLE --location DIR
+  library-move    Copy a library to another folder, check it, and switch: library-move --username NAME --library ID --location DIR
+  eagle-import    Copy an Eagle library into Files. The Eagle folder is only read: eagle-import --username NAME --source DIR
   backup     Write a checked archive of the state directory: backup --out DIR. Stop SSIOS first.
   backup-verify  Check an archive against its manifest: backup-verify FILE
   restore    Unpack an archive into a new, empty state directory: restore FILE --into DIR

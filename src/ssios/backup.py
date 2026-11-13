@@ -123,7 +123,7 @@ def create_backup(state_dir: Path, out_dir: Path, *, allow_running: bool = False
                 "dirs": dirs,
                 "files": entries,
                 "skipped": sorted(skipped),
-                "not_included": list(SKIP_TOP) + ["OS keychain items (Google tokens and the OAuth client secret)"],
+                "not_included": list(SKIP_TOP) + ["OS keychain items (Google tokens and the OAuth client secret)", "libraries stored in their own folder outside the state directory"],
             }
             body = json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8")
             info = tarfile.TarInfo(MANIFEST)

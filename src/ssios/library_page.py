@@ -595,6 +595,19 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     lang = _language(plane, account_id)
     chosen = library_or_default(plane, account_id, str(query.get("library") or ""))
     library_id = chosen["id"]
+    admin = str(session["account"].get("role") or "") == "admin"
+    if chosen.get("offline"):
+        # The disk is not connected. Show the other libraries and say where this one is. Nothing is created.
+        links = "".join(
+            f'<a class="lib-switch{" active" if row["id"] == library_id else ""}" href="/ui/library?library={html.escape(row["id"], quote=True)}">{_library_badge(row, lang)}<span>{html.escape(row["name"])}</span></a>'
+            for row in list_libraries(plane, account_id)
+        )
+        body = (
+            f'<div class="library"><div class="lib-side">{links}</div><div class="lib-main">'
+            f'<p class="notice">{html.escape(say(lang, "library_offline"))}</p>'
+            f'<p>{html.escape(say(lang, "lib_where"))}: <code>{html.escape(str(chosen.get("location") or ""))}</code></p></div></div>'
+        )
+        return _page(session, "Files", notice + body, bleed=True)
     meta = metadata(plane, account_id, library_id)
     folder = str(query.get("folder") or "")
     tag = str(query.get("tag") or "")
@@ -806,7 +819,17 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
         + '<input type="hidden" name="op" value="create-library">'
         + f'<label>{html.escape(say(lang, "lib_new_library"))} <input name="name" maxlength="40"></label>'
+        + (f'<label>{html.escape(say(lang, "lib_location"))} <input name="location" maxlength="400" placeholder="/Volumes/Disk/Libraries"></label>' if admin else "")
         + f'<button type="submit">{html.escape(say(lang, "lib_create"))}</button></form>'
+        + f'<p>{html.escape(say(lang, "lib_where"))}: <code>{html.escape(str(chosen.get("location") or say(lang, "lib_where_default")))}</code></p>'
+        + (
+            f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}"><input type="hidden" name="op" value="move-library">'
+            f'<label>{html.escape(say(lang, "lib_move"))} <input name="location" maxlength="400" placeholder="/Volumes/Disk/Libraries"></label>'
+            f'<button type="submit">{html.escape(say(lang, "lib_move"))}</button></form>'
+            if chosen.get("role") == "owner" and admin
+            else ""
+        )
         + _watch_form(meta, lang, csrf, library_id)
         + (_auto_analyze_form(meta, lang, csrf, library_id) if chosen.get("kind") != "shared" or chosen.get("role") == "owner" else "")
         + _share_block(chosen, lang, csrf, library_id)
@@ -888,11 +911,24 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     account_id = session["account"]["id"]
     op = str(body.get("op") or "")
     library_id = str(body.get("library") or "")
+    # A folder path makes this computer write somewhere outside the state directory. On the page only an admin
+    # may name one. Any account can have one set up by the operator with ssios library-create or library-move.
+    may_place = str(session["account"].get("role") or "") == "admin"
     if op == "create-library":
-        created = create_library(plane, account_id, str(body.get("name") or ""), peer_ip)
+        where = str(body.get("location") or "").strip()
+        if where and not may_place:
+            raise SsiosError("library_denied", say(_language(plane, account_id), "library_denied"), 403)
+        created = create_library(plane, account_id, str(body.get("name") or ""), peer_ip, where)
         return Page(200, library_page(plane, session, {"library": created["id"]}, "<p>Created.</p>"))
     chosen = library_or_default(plane, account_id, library_id)
     library_id = chosen["id"]
+    if op == "move-library":
+        if not may_place:
+            raise SsiosError("library_denied", say(_language(plane, account_id), "library_denied"), 403)
+        from ssios.library_storage import move_library
+
+        moved = move_library(plane, account_id, library_id, str(body.get("location") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id}, f"<p>Moved {moved['files']} files. The old copy was set aside, not deleted.</p>"))
     if op == "resolve":
         from ssios.library import resolve_conflict
 

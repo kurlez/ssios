@@ -22,6 +22,7 @@ IMAGE_LIMIT = 50_000_000
 DOCUMENT_LIMIT = 100_000_000
 MEDIA_LIMIT = 500_000_000
 _LOCK = threading.Lock()
+MARKER = "ssios-library.json"
 _PARTIAL = {".part", ".crdownload", ".download", ".tmp", ".filepart"}
 _ARCHIVE = {".zip", ".7z", ".rar", ".gz", ".tgz", ".dmg", ".iso", ".tar"}
 _ID = re.compile(r"lib-[0-9a-f]{8}")
@@ -67,6 +68,7 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                 continue
             acl = read_json(_shared_acl_path(plane, library_id), {})
             owner_id = str(acl.get("owner_id") or "")
+            where = str(acl.get("root") or "")
             rows.append(
                 {
                     "id": library_id,
@@ -76,9 +78,12 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                     "owner_id": owner_id,
                     "owner_name": _username(plane, owner_id),
                     "members": _member_rows(plane, acl),
+                    "location": where,
+                    "offline": bool(where) and not _marker_ok(where, library_id),
                 }
             )
             continue
+        where = str(row.get("root") or "")
         rows.append(
             {
                 "id": library_id,
@@ -88,12 +93,15 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                 "owner_id": account_id,
                 "owner_name": "",
                 "members": [],
+                "location": where,
+                "offline": bool(where) and not _marker_ok(where, library_id),
             }
         )
     return rows
 
 
-def create_library(plane, account_id: str, name: str, peer_ip: str) -> dict:
+def create_library(plane, account_id: str, name: str, peer_ip: str, location: str = "") -> dict:
+    """A new library. With location, its files live in a new folder inside that directory, which may be on another disk."""
     ensure_personal(plane, account_id)
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 2:
@@ -105,6 +113,12 @@ def create_library(plane, account_id: str, name: str, peer_ip: str) -> dict:
         while any(isinstance(row, dict) and row.get("id") == library_id for row in index.get("libraries") or []):
             library_id = "lib-" + hashlib.sha256(library_id.encode()).hexdigest()[:8]
         row = {"id": library_id, "name": title, "kind": "personal"}
+        if str(location or "").strip():
+            from ssios.library_storage import new_root
+
+            made = new_root(plane, account_id, library_id, title, location)
+            row["root"] = str(made["root"])
+            row["permissions"] = made["permissions"]
         index.setdefault("libraries", []).append(row)
         write_json(index_path, index)
     _metadata(plane, account_id, library_id, create=True, name=title)
@@ -913,13 +927,41 @@ def _shared_acl_path(plane, library_id: str):
     return plane.settings.state_dir / "shared-libraries" / library_id / "acl.json"
 
 
+def _marker_ok(root: str, library_id: str) -> bool:
+    """True when the folder is there and its marker names this library. False when the disk is not connected."""
+    from pathlib import Path
+
+    try:
+        data = read_json(Path(root) / MARKER, {})
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("id") == library_id
+
+
+def _outside_root(plane, account_id: str, library_id: str, root: str):
+    """A library kept outside the state directory. Nothing is created here: a missing disk is an error, not an empty library."""
+    from pathlib import Path
+
+    if not _marker_ok(root, library_id):
+        raise SsiosError("library_offline", say(_lang(plane, account_id), "library_offline"), 503)
+    return Path(root)
+
+
 def _library_root(plane, account_id: str, library_id: str):
     if not _ID.fullmatch(library_id):
         raise SsiosError("path_rejected", "library id rejected", 400)
     if _shared_acl_path(plane, library_id).is_file():
         if _role_of(plane, account_id, library_id) is None:
             raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
+        where = str(read_json(_shared_acl_path(plane, library_id), {}).get("root") or "")
+        if where:
+            return _outside_root(plane, account_id, library_id, where)
         return _shared_acl_path(plane, library_id).parent
+    # The location is read from this account's own list, so one account cannot name another account's folder.
+    index = read_json(plane.accounts.home(account_id) / "library" / "libraries.json", {})
+    for row in index.get("libraries") or [] if isinstance(index, dict) else []:
+        if isinstance(row, dict) and row.get("id") == library_id and row.get("root") and row.get("kind") != "shared":
+            return _outside_root(plane, account_id, library_id, str(row["root"]))
     root = plane.accounts.home(account_id) / "library" / library_id
     secure_mkdir(root)
     return root

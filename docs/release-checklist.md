@@ -58,6 +58,12 @@ Setup for the steps is in [mac-e2e-test.md](mac-e2e-test.md). Record the commit,
 - [ ] The Files sidebar lists tags with counts, including tags that analysis added. Clicking one filters the grid.
 - [ ] In the chat box, Enter adds a line and Ctrl+Enter or Command+Enter sends, including while a Chinese input method is composing.
 
+- [ ] `library-create --location` on an external APFS disk. Import a file, eject the disk, and Files shows the library as not connected and creates nothing under `/Volumes`. Reconnect and the file is back.
+- [ ] The same on an exFAT disk. Record whether it works and what `permissions` says.
+- [ ] `library-move` a library with real files to the external disk. Open several files, then delete the `.moved-` folder.
+- [ ] `eagle-import` on a copy of a small real Eagle library. Record the report, and compare folders, tags, stars, and notes of ten items with Eagle. Confirm with `find <library> -newer <marker file>` that nothing in the Eagle folder changed.
+- [ ] Interrupt an `eagle-import` with Ctrl+C and run it again. It continues and copies nothing twice.
+
 ## 7. Notes, tasks, and reminders
 
 - [ ] Clip a page with the browser extension, including one image.

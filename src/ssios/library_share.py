@@ -75,15 +75,24 @@ def _publish(plane, owner_id: str, library_id: str) -> None:
     path = _shared_acl_path(plane, library_id)
     if path.is_file():
         return
-    source = plane.accounts.home(owner_id) / "library" / library_id
+    from ssios.library import _library_root
+
+    own = read_json(plane.accounts.home(owner_id) / "library" / "libraries.json", {})
+    outside = next((str(row.get("root") or "") for row in own.get("libraries") or [] if isinstance(row, dict) and row.get("id") == library_id), "")
+    source = _library_root(plane, owner_id, library_id) if outside else plane.accounts.home(owner_id) / "library" / library_id
     if not (source / "metadata.json").is_file():
         raise SsiosError("library_missing", say(_lang(plane, owner_id), "library_missing"), 404)
     meta = read_json(source / "metadata.json", {})
     dest = path.parent
     secure_mkdir(dest.parent)
     with _LOCK:
-        shutil.move(str(source), str(dest))
         acl = {"id": library_id, "name": str(meta.get("name") or "Files"), "owner_id": owner_id, "members": []}
+        if outside:
+            # The files stay on their disk. Only the member list is kept in the state directory.
+            secure_mkdir(dest)
+            acl["root"] = outside
+        else:
+            shutil.move(str(source), str(dest))
         write_json(path, acl)
         index_path = plane.accounts.home(owner_id) / "library" / "libraries.json"
         index = read_json(index_path, {"libraries": []})

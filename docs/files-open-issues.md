@@ -6,7 +6,7 @@ Items skipped while Files kept moving. Each one says what is needed. The conserv
 
 These are specified there and were not part of the smart-folder, watch, analysis, search, and sharing work.
 
-1. Eagle `.library` copy. Needs a synthetic fixture and a confirmed field map. SSIOS does not index a real Eagle directory in place.
+1. Eagle `.library` copy. `eagle-import` exists and is tested with a synthetic library (see `files-storage.md`). The field map is not yet confirmed against a library written by Eagle. Smart-folder rules are kept and not translated. Export to Eagle is not built.
 2. Rendered previews for MOV, EPUB, and DOCX. The grid still shows a type tile.
 3. Sending a clipper image into Files.
 4. Read-only copies of Gmail and Drive attachments.

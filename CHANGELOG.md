@@ -18,6 +18,8 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - The chat box sends on Ctrl+Enter, or Command+Enter. Enter is a new line.
 - A weather timeout is retried once and reports `weather_unreachable` with the service name, not the hint for a blocked web page.
 - A Files result in chat is a list of cards with an Open link. The first version sent Markdown in a line the page shows as plain text.
+- A library can keep its files in a folder you name, including one on an external disk (`library-create --location`, or Library settings for an admin). A disk that is not connected shows the library as not connected and nothing is created in its place. `library-move` copies a library to another folder, checks the copy, switches, and sets the old files aside without deleting them.
+- `eagle-import` copies an Eagle library into Files: folders, tags and tag groups, stars, notes, source links, and times. The Eagle folder is only read. Smart folders are kept and not translated. See [docs/files-storage.md](docs/files-storage.md).
 - A Files card in chat has Open, which shows an image or a PDF over the chat without leaving it, and Show in Files. Other kinds only have Show in Files.
 - A sent message has Copy. Every Copy button shows Copied for a moment, and copying also works on a plain http page on the home network.
 - When Open-Meteo cannot be reached, weather uses MET Norway for the conditions and wttr.in to find the place. A host that just failed is skipped for ten minutes.

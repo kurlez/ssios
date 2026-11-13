@@ -67,6 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
     sub.add_parser("launchd-plist", parents=[common])
+    for name in ("library-list", "library-create", "library-move", "eagle-import"):
+        command = sub.add_parser(name, parents=[common])
+        command.add_argument("--username", required=True, help="the account that owns the library")
+        if name == "library-create":
+            command.add_argument("--name", required=True)
+        if name in ("library-create", "eagle-import"):
+            command.add_argument("--location", default="", help="directory that will hold the library's own folder. Default: the state directory")
+        if name == "library-move":
+            command.add_argument("--library", required=True, help="library id, from library-list")
+            command.add_argument("--location", required=True, help="directory that will hold the library's own folder")
+        if name == "eagle-import":
+            command.add_argument("--source", required=True, help="path of the Eagle .library folder. It is only read")
+            command.add_argument("--library", default="", help="continue into this library id")
     command = sub.add_parser("backup", parents=[common])
     command.add_argument("--out", required=True, help="directory for the archive, outside the state directory")
     command.add_argument("--allow-running", action="store_true", help="back up while the UI is running")
@@ -89,6 +102,43 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--arguments", default="{}")
             command.add_argument("--limits", default="{}")
     return parser
+
+
+def run_library_command(settings, args) -> int:
+    """Library work that can run for a long time, or that names a folder on this computer."""
+    plane = ControlPlane(settings)
+    plane.open()
+    account = next((row for row in plane.accounts.public_list() if row.get("username") == args.username and row.get("status", "active") == "active"), None)
+    if account is None:
+        print(json.dumps({"error": "account_missing", "detail": "No active account has that username."}, ensure_ascii=False), flush=True)
+        return 1
+    account_id = str(account["id"])
+    try:
+        if args.command == "library-list":
+            from ssios.library import list_libraries
+
+            rows = [{key: row.get(key) for key in ("id", "name", "kind", "role", "location", "offline")} for row in list_libraries(plane, account_id)]
+            report: dict = {"libraries": rows}
+        elif args.command == "library-create":
+            from ssios.library import create_library
+
+            report = create_library(plane, account_id, args.name, "127.0.0.1", args.location)
+        elif args.command == "library-move":
+            from ssios.library_storage import move_library
+
+            report = move_library(plane, account_id, args.library, args.location, "127.0.0.1")
+        else:
+            from ssios.library_eagle import import_eagle
+
+            def progress(done: int, total: int, state: dict) -> None:
+                print(f"{done}/{total} read, {state['imported']} copied", file=sys.stderr, flush=True)
+
+            report = import_eagle(plane, account_id, args.source, "127.0.0.1", location=args.location, library_id=args.library, progress=progress)
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    return 0
 
 
 LAUNCHD_LABEL = "local.ssios.ui"
@@ -192,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
+    if args.command in ("library-list", "library-create", "library-move", "eagle-import"):
+        return run_library_command(settings, args)
     if args.command == "audit-verify":
         plane = ControlPlane(settings)
         plane.open()

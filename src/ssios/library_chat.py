@@ -120,6 +120,8 @@ def find_files(plane, account_id: str, message: str, *, limit: int = 8) -> list[
     words = [term for term in terms if not any(term in group for group in _KIND.values())]
     scored = []
     for library in list_libraries(plane, account_id):
+        if library.get("offline"):
+            continue
         library_id = str(library["id"])
         try:
             items = list_items(plane, account_id, library_id)
