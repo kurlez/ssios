@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
+    sub.add_parser("launchd-plist", parents=[common])
     command = sub.add_parser("backup", parents=[common])
     command.add_argument("--out", required=True, help="directory for the archive, outside the state directory")
     command.add_argument("--allow-running", action="store_true", help="back up while the UI is running")
@@ -90,6 +91,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+LAUNCHD_LABEL = "local.ssios.ui"
+
+
+def launchd_plist(state_dir: Path, config: Path) -> str:
+    """A LaunchAgent for the signed-in user. It is printed, not installed.
+
+    The agent is limited to the Aqua session, so it starts after the user signs in
+    at the Mac and the login keychain is unlocked. KeepAlive is off, so
+    ./scripts/ssios stop stays stopped.
+    """
+    import plistlib
+
+    from ssios.paths import repo_root
+
+    body = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [str(repo_root() / "scripts" / "ssios"), "fg"],
+        "EnvironmentVariables": {"SSIOS_STATE": str(Path(state_dir).resolve()), "SSIOS_CONFIG": str(Path(config).resolve())},
+        "WorkingDirectory": str(repo_root()),
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "LimitLoadToSessionType": "Aqua",
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
+    }
+    return plistlib.dumps(body).decode("utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -99,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "memfs-info":
         print(json.dumps({"memfs": describe_memfs(), "probe": probe_local_binary(execute=args.execute_version)}, indent=2, ensure_ascii=False))
+        return 0
+    if args.command == "launchd-plist":
+        sys.stdout.write(launchd_plist(Path(args.state), Path(args.config)))
+        sys.stdout.flush()
         return 0
     if args.command in ("backup", "backup-verify", "restore"):
         from ssios.backup import create_backup, restore_backup, verify_backup

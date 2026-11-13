@@ -81,7 +81,7 @@ Read-only copy of a synthetic Eagle 4.x `.library`: folder tree, multi-folder me
 
 ### M4 — local analysis and memory
 
-Analysis is on demand, not a background job. Text uses `qwen3:14b`. Images use `qwen2.5vl:7b`. The host must be loopback. There is no cloud fallback. The description, tags, and OCR text are stored on the item. A note is saved under `topics/library/<item-id>.md` with the item, the library, who added the file, and the model name. Originals stay out of MemFS. Copying that note into core memory (`human.md`) stages the existing approval and does not write until it is accepted. Vectors, asking about a selection, and movie transcription are not in this branch. Whisper stays off.
+Analysis is on demand, not a background job, unless the library owner turns on automatic analysis (see `docs/background.md`). Text uses `qwen3:14b`. Images use `qwen2.5vl:7b`. The host must be loopback. There is no cloud fallback. The description, tags, and OCR text are stored on the item. A note is saved under `topics/library/<item-id>.md` with the item, the library, who added the file, and the model name. Originals stay out of MemFS. Copying that note into core memory (`human.md`) stages the existing approval and does not write until it is accepted. Vectors, asking about a selection, and movie transcription are not in this branch. Whisper stays off.
 
 ### M5 — household sharing
 

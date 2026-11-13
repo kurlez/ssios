@@ -113,3 +113,18 @@ class BackupTest(unittest.TestCase):
             self.assertEqual(main(["backup-verify", archive]), 0)
             self.assertEqual(main(["restore", archive, "--into", str(self.state)]), 1)
         self.assertIn("restore_rejected", buffer.getvalue())
+
+
+class LaunchdTest(unittest.TestCase):
+    def test_the_plist_is_printed_for_the_gui_session_and_does_not_restart_after_stop(self) -> None:
+        import plistlib
+
+        from ssios.cli import launchd_plist
+
+        body = plistlib.loads(launchd_plist(Path("/tmp/ssios state"), Path("/tmp/ssios state/ollama.toml")).encode("utf-8"))
+        self.assertEqual(body["ProgramArguments"][1], "fg")
+        self.assertTrue(body["ProgramArguments"][0].endswith("scripts/ssios"))
+        self.assertEqual(body["EnvironmentVariables"]["SSIOS_STATE"], "/tmp/ssios state")
+        self.assertEqual(body["LimitLoadToSessionType"], "Aqua")
+        self.assertTrue(body["RunAtLoad"])
+        self.assertFalse(body["KeepAlive"])

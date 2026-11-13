@@ -788,6 +788,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<label>{html.escape(say(lang, "lib_new_library"))} <input name="name" maxlength="40"></label>'
         + f'<button type="submit">{html.escape(say(lang, "lib_create"))}</button></form>'
         + _watch_form(meta, lang, csrf, library_id)
+        + (_auto_analyze_form(meta, lang, csrf, library_id) if chosen.get("kind") != "shared" or chosen.get("role") == "owner" else "")
         + _share_block(chosen, lang, csrf, library_id)
         + "</details></div>"
     )
@@ -922,6 +923,11 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
 
         add_smart_folder(plane, account_id, library_id, str(body.get("name") or ""), str(body.get("query") or ""), peer_ip)
         return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(say(_language(plane, account_id), 'smart_saved'))}</p>"))
+    if op == "auto_analyze":
+        from ssios.background import set_auto_analyze
+
+        set_auto_analyze(plane, account_id, library_id, bool(body.get("enabled")), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id}, f"<p>{html.escape(say(_language(plane, account_id), 'auto_analyze_saved'))}</p>"))
     if op == "watch":
         from ssios.library_watch import scan_watch, set_watch
 
@@ -1215,6 +1221,18 @@ def _smart_block(meta: dict, base: str, lang: str, csrf: str, library_id: str) -
         f'<button type="submit">{html.escape(say(lang, "smart_add"))}</button></form>'
     )
     return "".join(links) + form
+
+
+def _auto_analyze_form(meta: dict, lang: str, csrf: str, library_id: str) -> str:
+    checked = " checked" if meta.get("auto_analyze") else ""
+    return (
+        f'<form method="post" action="/ui/library" class="lib-watch"><input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        f'<input type="hidden" name="op" value="auto_analyze">'
+        f'<p>{html.escape(say(lang, "auto_analyze_hint"))}</p>'
+        f'<label><input type="checkbox" name="enabled" value="1"{checked}> {html.escape(say(lang, "auto_analyze_enable"))}</label>'
+        f'<button type="submit">{html.escape(say(lang, "auto_analyze_saved"))}</button></form>'
+    )
 
 
 def _watch_form(meta: dict, lang: str, csrf: str, library_id: str) -> str:

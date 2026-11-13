@@ -68,7 +68,14 @@ Setup for the steps is in [mac-e2e-test.md](mac-e2e-test.md). Record the commit,
 - [ ] In the restored copy, Google shows Needs reconnect or not connected, and works after reconnecting.
 - [ ] `backup` without `stop` is refused with `backup_running`.
 
-## 9. After the run
+## 9. Background jobs and start at sign-in (new, off by default)
+
+- [ ] Turn on the daily brief with a time two minutes ahead. A `Daily brief` chat and a macOS notification appear once, with today's real calendar events.
+- [ ] Lock the keychain, repeat on the next day, and the brief says the calendar could not be read.
+- [ ] Turn on Analyze new files automatically, drag in ten images, and each gets a description within about five minutes. Chat stays usable meanwhile. Record how long a chat answer takes during the run.
+- [ ] Install the LaunchAgent from `launchd-plist`, sign out and in, and the UI is running. A Google read works without a Keychain prompt. `./scripts/ssios stop` leaves it stopped.
+
+## 10. After the run
 
 - [ ] `./scripts/ssios audit-verify` on the main state directory.
 - [ ] `./scripts/ssios logs` shows no token, cookie, or mail text.

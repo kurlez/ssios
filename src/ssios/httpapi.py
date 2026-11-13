@@ -486,6 +486,12 @@ class ControlServer:
                 sweep_accounts(self.httpd.plane)
             except Exception:
                 pass
+            try:
+                from ssios.background import tick
+
+                tick(self.httpd.plane)
+            except Exception:
+                pass
             time.sleep(30)
 
     def stop(self) -> None:

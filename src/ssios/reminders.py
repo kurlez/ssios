@@ -357,6 +357,16 @@ class ReminderStore:
             self._mirror(items)
         return fired
 
+    def add_notice(self, text: str, when: datetime) -> dict:
+        """A notice that is not tied to a reminder, such as the daily brief."""
+        import secrets
+
+        items, notices = self._read()
+        notice = {"id": "note-" + secrets.token_hex(3), "reminder_id": "", "text": str(text)[:200], "due": when.replace(microsecond=0).isoformat(), "seen": False}
+        notices.append(notice)
+        self._write(items, notices)
+        return notice
+
     def unseen(self) -> list[dict]:
         _items, notices = self._read()
         return [item for item in notices if not item.get("seen")]

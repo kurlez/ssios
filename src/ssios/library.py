@@ -352,9 +352,12 @@ def list_items(plane, account_id: str, library_id: str, *, folder: str = "", tag
 def get_item(plane, account_id: str, library_id: str, item_id: str) -> dict:
     if not _ITEM.fullmatch(item_id):
         raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
-    for item in _items(plane, account_id, library_id):
-        if item.get("id") == item_id:
-            return item
+    # One row is one file. Reading it directly keeps a thumbnail request from parsing the whole catalog.
+    path = _item_path(plane, account_id, library_id, item_id)
+    if path.is_file() and not path.is_symlink():
+        data = read_json(path, {})
+        if isinstance(data, dict) and data.get("id") == item_id:
+            return data
     raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
 
 

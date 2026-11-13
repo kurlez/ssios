@@ -9,6 +9,10 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - After mail, Drive, or a web page is read in a turn, `web.fetch` and `web.clip` open only an address the user typed. This applies to the guest too.
 - `library-embed-bench` also probes `bge-m3` and reports six cross-language lookups with a suggested `semantic_min_score`.
 - `backup`, `backup-verify`, and `restore`. The archive carries a manifest of hashes, is not encrypted, and leaves out `run/`, `cache/`, and keychain items. Restore writes only into a new, empty directory.
+- A daily brief built from stored reminders, tasks, and a calendar read, with no model. Off until the account turns it on in Settings.
+- A library owner can have new files analyzed in the background, one file per timer pass. Off by default.
+- `launchd-plist` prints a LaunchAgent that starts the UI at sign-in. It installs nothing. See [docs/background.md](docs/background.md).
+- Opening one Files item reads its own row instead of the whole catalog (84 ms to under 1 ms with 3000 synthetic items on the CI machine). Listing 3000 items takes about 0.1 s, so the catalog stays as JSON files.
 - [docs/release-checklist.md](docs/release-checklist.md) lists what has to be run on the Mac before a tag.
 
 ## 0.3.0 — 2026-11-13

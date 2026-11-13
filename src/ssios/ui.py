@@ -1419,12 +1419,38 @@ def _settings(plane, session: dict) -> str:
         f"<label>Time zone <input name=\"time_zone\" value=\"{html.escape(str((plane.accounts.users.get(session['account']['id']) or {}).get('time_zone') or ''))}\" placeholder=\"America/Los_Angeles\"></label> "
         "<button type=\"submit\">Save time zone</button></form>"
         "</section>"
+        + _brief_form(plane, session, csrf)
     )
     return _page(session, "Settings", form + f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2))}</pre>")
 
 
+def _brief_form(plane, session: dict, csrf: str) -> str:
+    from ssios.background import brief_settings
+
+    brief = brief_settings(plane.accounts.home(session["account"]["id"]))
+    checked = " checked" if brief["enabled"] else ""
+    return (
+        "<section class=\"card\"><h2>Daily brief</h2>"
+        "<p>Once a day, a new chat lists today's reminders, tasks that are due, and calendar events. "
+        "It is built from stored data and a calendar read. No model writes it. Off by default.</p>"
+        f"<form method=\"post\" action=\"/ui/settings\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
+        "<input type=\"hidden\" name=\"brief\" value=\"1\">"
+        f"<label><input type=\"checkbox\" name=\"brief_enabled\" value=\"1\"{checked}> Post a daily brief</label> "
+        f"<label>At <input name=\"brief_time\" value=\"{html.escape(brief['time'], quote=True)}\" maxlength=\"5\" placeholder=\"08:00\"></label> "
+        "<button type=\"submit\">Save daily brief</button></form></section>"
+    )
+
+
 def _settings_post(plane, session: dict, body: dict) -> Page:
     account_id = session["account"]["id"]
+    if body.get("brief"):
+        from ssios.background import set_brief
+
+        try:
+            set_brief(plane.accounts.home(account_id), enabled=bool(body.get("brief_enabled")), at=str(body.get("brief_time") or ""))
+        except SsiosError as exc:
+            return Page(exc.status, _page(session, "Settings", f"<p>{html.escape(exc.detail)}</p>"))
+        return Page(200, _settings(plane, session))
     location = body.get("location")
     skill = str(body.get("skill") or "")
     op = str(body.get("op") or "")
