@@ -101,6 +101,8 @@ Fallback, in order, when the guest cannot boot or the model cannot finish:
 3. If the sentence is one service and matches today's report planner, run that host path. The user still gets a sourced report or the raw list.
 4. Otherwise stop. The chat message says the guest is unavailable, names the error code, and does not invent mail, events, or files.
 
+An optional step sits before 3: with `[agent.planner] enabled`, the local chat model runs a tool loop on the host with the same tool list. It is not Codex and has no shell or workspace. See [search.md](../search.md).
+
 A weak model is not a reason to switch models in secret. If the citation check fails, the user sees the tool results and a one-line note, which is what a rejected report does today.
 
 ## 4. Anti-hallucination

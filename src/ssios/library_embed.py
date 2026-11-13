@@ -9,7 +9,7 @@ import urllib.request
 
 from ssios.library_analyze import _loopback
 
-CANDIDATES = ("nomic-embed-text", "all-minilm", "mxbai-embed-large")
+CANDIDATES = ("bge-m3", "nomic-embed-text", "all-minilm", "mxbai-embed-large")
 COMMAND = "./scripts/ssios library-embed-bench"
 
 

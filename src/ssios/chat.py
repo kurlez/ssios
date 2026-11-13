@@ -165,6 +165,21 @@ def iter_turn(
         decision, fallback = choose_route(acted, guest_ready=ready, override=override or "auto", llm=plane.llm)
     else:
         decision, fallback = choose_route(message, guest_ready=ready, override=override or "auto", llm=plane.llm)
+    planned = None
+    from ssios.host_planner import planner_ready
+
+    if fallback and decision.route not in {"vm", "connector_vm"} and planner_ready(plane):
+        # The guest cannot start. A turn that needs several tools runs the tool loop on this computer.
+        planned = decision
+        fallback = ""
+        decision = RouteDecision(
+            route="planner",
+            reason="The Codex guest is not available, so the local model picks host tools on this computer. A write still waits for approval.",
+            reason_code="rule_planner",
+            source="rule",
+            services=decision.services,
+            skill=decision.skill,
+        )
     if fallback and fallback not in decision.reason:
         decision = RouteDecision(
             route=decision.route,
@@ -262,6 +277,8 @@ def iter_turn(
             yield from _vm(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "codex":
             yield from _codex(plane, scope, record["id"], message, peer_ip, place=place)
+        elif decision.route == "planner":
+            yield from _planner(plane, scope, record["id"], acted, peer_ip, planned, place)
         elif decision.route == "skill":
             yield from _skill(
                 plane,
@@ -509,7 +526,7 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     from ssios.mcp_host import ToolSession
     from ssios.orchestrator import choose_route, codex_prompt, present_answer
 
-    session = ToolSession(plane, scope.account, peer_ip)
+    session = ToolSession(plane, scope.account, peer_ip, message)
     cancel = threading.Event()
     finished = threading.Event()
     if not hasattr(plane, "_codex_cancel"):
@@ -657,6 +674,41 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     )
     yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
     yield from _codex_approvals(scope, conversation_id, session.results)
+
+
+def _planner(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, planned: RouteDecision | None, place: str) -> Iterator[dict]:
+    """Run the host tool loop. If the model does not plan, use the single route chosen before."""
+    from ssios.account_memory import memory_context
+    from ssios.host_planner import plan_turn
+    from ssios.orchestrator import present_answer
+
+    context = clock_block(plane, scope.account)
+    memory, files = memory_context(scope, message)
+    if memory:
+        context += "\n\nMEMORY-CONTEXT\n" + memory
+    if files:
+        yield {"event": "memory", "data": {"files": files}}
+    state: dict = {}
+    yield from plan_turn(plane, scope, message, peer_ip, state, context=context)
+    if not state.get("handled"):
+        if state.get("results"):
+            yield from _codex_approvals(scope, conversation_id, state["results"])
+        if planned is not None:
+            yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, planned, place)
+        return
+    results = state.get("results") or []
+    answer = present_answer(str(state.get("answer") or ""), results)
+    if answer.strip():
+        scope.chat().append(
+            conversation_id,
+            {
+                "role": "assistant",
+                "text": answer,
+                "route": {"route": "planner", "reason": "The local model answered from the host tools.", "source": "rule"},
+            },
+        )
+        yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
+    yield from _codex_approvals(scope, conversation_id, results)
 
 
 _CHECK_LINE = re.compile(r"^(Network|Outbound|Marker|Sandbox denied|Outside write):.*$")

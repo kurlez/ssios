@@ -599,6 +599,21 @@ class MockLLM:
             return "Synthetic local answer using the approved cloud text. No tools were used."
         return "Synthetic local answer. No tools were used."
 
+    def chat_tools(self, messages: list[dict], tools: list[dict], *, deadline: float) -> dict | None:
+        """Stand-in tool planner. Tests set tool_script to a list of assistant messages. No script means no planner."""
+        del tools
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        script = getattr(self, "tool_script", None)
+        if not script:
+            return None
+        item = script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if callable(item):
+            return item(messages)
+        return item
+
     def describe_image(self, prompt: str, images: list[str], *, model: str, deadline: float) -> str:
         """Stand-in vision reply. Tests can set vision_script. No network."""
         del deadline
@@ -863,6 +878,27 @@ class OllamaLLM:
         message = body.get("message") if isinstance(body.get("message"), dict) else {}
         content = message.get("content") if isinstance(message.get("content"), str) else ""
         return parse_classifier(content)
+
+    def chat_tools(self, messages: list[dict], tools: list[dict], *, deadline: float) -> dict | None:
+        """One /api/chat call with a tool list. Returns the assistant message. The caller runs the tools."""
+        if time.monotonic() >= deadline:
+            raise FlowInterrupt("timeout")
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0, "num_ctx": max(self.num_ctx, 8192), "num_predict": self.max_output_tokens},
+        }
+        if tools:
+            payload["tools"] = tools
+        if self._supports_think_false(deadline):
+            payload["think"] = False
+        timeout = min(self.timeout, max(0.1, deadline - time.monotonic()))
+        body = _post_json(self.base_url + "/api/chat", payload, timeout)
+        message = body.get("message") if isinstance(body.get("message"), dict) else None
+        if message is None:
+            return None
+        return {"content": _strip_think(str(message.get("content") or "")), "tool_calls": message.get("tool_calls") or []}
 
     def judge_route(self, text: str, deadline: float | None = None) -> str:
         """Local JSON judgment. Only a direct route leaves the guest. There is no cloud model."""

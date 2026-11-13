@@ -618,11 +618,16 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             uncategorized=uncategorized,
             untagged=untagged,
         )
+    ranked = False
     if text_query:
         from ssios.library_query import _blob
 
+        from ssios.library_search import by_meaning, meaning_ids
+
         needle = text_query.casefold()
-        items = [item for item in items if needle in _blob(item)]
+        close = [] if trash else meaning_ids(plane, account_id, library_id, text_query)
+        items = by_meaning([item for item in items if needle in _blob(item) or str(item.get("id") or "") in close], close, needle)
+        ranked = bool(close) and "sort" not in query
     selected = None
     item_id = str(query.get("item") or "")
     if item_id:
@@ -656,7 +661,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         items = sorted(items, key=lambda item: str(item.get("name") or "").casefold())
     elif sort == "size":
         items = sorted(items, key=lambda item: int(item.get("size") or 0), reverse=True)
-    else:
+    elif not ranked:
         items = sorted(items, key=lambda item: str(item.get("modified_at") or item.get("imported_at") or ""), reverse=True)
     counts = {
         "all": len(list_items(plane, account_id, library_id)),

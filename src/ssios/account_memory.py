@@ -74,6 +74,19 @@ def memory_context(scope, query: str = "") -> tuple[str, list[str]]:
             used.append(path)
             if len([item for item in used if item.startswith("topics/")]) >= 3:
                 break
+    if str(query or "").strip() and len([item for item in used if item.startswith("topics/")]) < 3:
+        from ssios.semantic import memory_hits
+
+        for path in memory_hits(scope, query, prefix="topics/"):
+            if path in used:
+                continue
+            text = _read(store, project, path)
+            if not text:
+                continue
+            parts.append(f"# {path}\n{_body(text).strip()[:800]}")
+            used.append(path)
+            if len([item for item in used if item.startswith("topics/")]) >= 3:
+                break
     scope._last_memory_files = list(used)
     return "\n\n".join(parts)[:4000], used
 

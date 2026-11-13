@@ -72,6 +72,10 @@ class Settings:
     config_path: Path | None
     router_model: str = "qwen3:1.7b"
     router_timeout_seconds: float = 4.0
+    embed_model: str = ""
+    semantic_top_k: int = 8
+    semantic_min_score: float = 0.5
+    planner_enabled: bool = False
 
 
 def _router_timeout(llm: dict) -> float:
@@ -201,6 +205,18 @@ def load_settings(
     codex_turn_timeout_seconds = float(codex.get("turn_timeout_seconds", 180))
     if not 1 <= codex_step_limit <= 12 or not 5 <= codex_turn_timeout_seconds <= 600:
         raise SsiosError("config_invalid", "codex step limit or turn timeout is out of range", 500)
+    search = _section(data, "search")
+    embed_model = str(search.get("embed_model", "") or "").strip()
+    if embed_model:
+        embed_model = _model_name(embed_model, "embedding model")
+    semantic_top_k = int(search.get("semantic_top_k", 8))
+    semantic_min_score = float(search.get("semantic_min_score", 0.5))
+    if not 1 <= semantic_top_k <= 50 or not 0 < semantic_min_score < 1:
+        raise SsiosError("config_invalid", "search semantic_top_k or semantic_min_score is out of range", 500)
+    planner = _section(_section(data, "agent"), "planner")
+    planner_enabled = planner.get("enabled", False)
+    if not isinstance(planner_enabled, bool):
+        raise SsiosError("config_invalid", "agent.planner enabled must be true or false", 500)
     connectors = _section(data, "connectors")
     raw_enabled = connectors.get("enabled", [])
     if raw_enabled is None:
@@ -305,6 +321,10 @@ def load_settings(
         config_path=config_path,
         router_model=_model_name(str(llm.get("router_model", "qwen3:1.7b")), "router model"),
         router_timeout_seconds=_router_timeout(llm),
+        embed_model=embed_model,
+        semantic_top_k=semantic_top_k,
+        semantic_min_score=semantic_min_score,
+        planner_enabled=planner_enabled,
     )
 
 

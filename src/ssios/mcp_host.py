@@ -39,6 +39,9 @@ WRITE_TOOLS = {
     "web.clip": "",
 }
 TOOL_NAMES = tuple(READ_TOOLS) + tuple(WRITE_TOOLS)
+# Results of these carry text written by someone else. These two tools send a request to an address.
+OUTSIDE_READS = {"gmail.search", "gmail.read", "drive.list", "drive.read", "web.fetch"}
+OUTBOUND_TOOLS = {"web.fetch", "web.clip"}
 
 
 def normalize_tool_name(name: str) -> str:
@@ -114,18 +117,27 @@ _MIRROR_HOSTS = ("archive.is", "archive.org", "webcache.googleusercontent.com", 
 class ToolSession:
     """One turn's tool calls. Result ids stay stable for citations."""
 
-    def __init__(self, plane, account: dict, peer_ip: str = "127.0.0.1") -> None:
+    def __init__(self, plane, account: dict, peer_ip: str = "127.0.0.1", message: str = "") -> None:
         self.plane = plane
         self.account = account
         self.peer_ip = peer_ip or "127.0.0.1"
+        self.message = str(message or "")
         self.results: list[dict] = []
         self._writes: dict[str, dict] = {}
+        self._read_outside = False
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
         limit = int(getattr(getattr(self.plane, "settings", None), "codex_step_limit", 6) or 6)
         if len(self.results) >= limit:
             raise SsiosError("mcp_tool_denied", "The step limit for this turn is reached.", 429)
         args = arguments or {}
+        name = normalize_tool_name(name)
+        if name in OUTBOUND_TOOLS and self._read_outside:
+            # Text from mail, Drive, or a page may ask for another address. Only one the user typed is opened.
+            url = str(args.get("url") or "").strip() if isinstance(args, dict) else ""
+            if not url or url not in self.message:
+                _audit(self.plane, self.account["id"], self.peer_ip, name, "denied", 0, 0)
+                raise SsiosError("mcp_tool_denied", "After mail, Drive, or a web page was read, only an address the user typed can be opened.", 403)
         key = ""
         if name in WRITE_TOOLS:
             key = name + "\n" + json.dumps(args, sort_keys=True, ensure_ascii=False)
@@ -133,6 +145,8 @@ class ToolSession:
                 return self._writes[key]
         result = call_tool(self.plane, self.account, name, args, self.peer_ip, len(self.results) + 1)
         self.results.append(result)
+        if name in OUTSIDE_READS:
+            self._read_outside = True
         if key:
             self._writes[key] = result
         return result
@@ -302,6 +316,11 @@ def _memory_search(scope, arguments: dict) -> tuple[str, int]:
     for hit in hits or []:
         if isinstance(hit, dict):
             lines.append(str(hit.get("path") or ""))
+    from ssios.semantic import memory_hits
+
+    for path in memory_hits(scope, query):
+        if path not in lines:
+            lines.append(path)
     return "\n".join(lines), len(lines)
 
 
