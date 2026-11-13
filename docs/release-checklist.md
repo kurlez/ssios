@@ -67,6 +67,7 @@ Setup for the steps is in [mac-e2e-test.md](mac-e2e-test.md). Record the commit,
 ## 7. Notes, tasks, and reminders
 
 - [ ] `vault-set` to a copy of a real Obsidian vault. The Notes page shows its folders and tags, links between notes open, embedded images show, and `.obsidian` is not listed. After a clip and a task change, only `Clippings/` and `SSIOS/Tasks.md` are new in the vault.
+- [ ] `vault-sync --dry-run`, then a real sync, against a copy of a real vault. Edit one note in Obsidian and one in SSIOS, sync, and both edits arrive. Edit the same note on both sides and both versions are kept. Delete a note in Obsidian and the Notes copy is in `.trash`. `.obsidian` is unchanged.
 - [ ] Analyze a file without opening it, ask chat about its content, and the answer does not use it. Open the file, ask again, and Technical details lists its note.
 - [ ] Run `memory-prune-unread` once after the upgrade and record the counts.
 - [ ] Remind me to read this on a note: the reminder fires, and Mark as read completes it.

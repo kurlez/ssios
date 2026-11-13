@@ -67,9 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
     sub.add_parser("launchd-plist", parents=[common])
-    for name in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "memory-prune-unread"):
+    for name in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread"):
         command = sub.add_parser(name, parents=[common])
         command.add_argument("--username", required=True, help="the account that owns the library")
+        if name == "vault-sync":
+            command.add_argument("--with", dest="peer", required=True, help="the Obsidian vault folder to keep the same as Notes")
+            command.add_argument("--dry-run", action="store_true", help="print what would change and change nothing")
         if name == "vault-set":
             command.add_argument("--path", required=True, help="an existing folder, such as an Obsidian vault. Empty goes back to the default")
         if name == "library-create":
@@ -121,6 +124,12 @@ def run_library_command(settings, args) -> int:
 
             where = set_vault(settings, account_id, args.path)
             report: dict = {"vault": str(where), "notes": len(list_notes(settings, account_id))}
+        elif args.command == "vault-sync":
+            from ssios.vault_sync import sync_vault
+
+            report = sync_vault(settings, account_id, args.peer, dry_run=args.dry_run)
+            if not args.dry_run:
+                plane.security_audit.write(actor=account_id, ip="127.0.0.1", action="vault.sync", target="obsidian", result="ok", extra={"item_count": str(sum(report["counts"].values()))})
         elif args.command == "memory-prune-unread":
             from ssios.reading import prune_unread
 
@@ -253,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
-    if args.command in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "memory-prune-unread"):
+    if args.command in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread"):
         return run_library_command(settings, args)
     if args.command == "audit-verify":
         plane = ControlPlane(settings)

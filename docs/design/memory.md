@@ -55,3 +55,4 @@ Notes is the account's Obsidian vault and uses its structure as it is.
 - `[[Note]]`, `[[Note|label]]`, `[[Note#heading]]`, and `![[image.png]]` resolve the way Obsidian's shortest path does: beside the current note, then from the vault root, then the one file with that name.
 - A clip is saved to `Clippings/`, the folder Obsidian's own clipper uses, with its images in `Clippings/assets/`.
 - `ssios vault-set --username NAME --path DIR` points an account's Notes at an existing vault. SSIOS then reads that folder and writes only `Clippings/` and `SSIOS/Tasks.md` in it. It does not write `.obsidian`, and it does not overwrite a `Tasks.md` of the account's own. If the folder is missing, Notes reports that and writes nowhere else.
+- `ssios vault-sync` keeps Notes and a separate Obsidian folder the same in both directions. See `docs/notes-vault.md`.
