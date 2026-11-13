@@ -140,6 +140,16 @@ git -C "$HOME/Library/Application Support/ssios/accounts/acct-0123456789abcdef/m
 
 Replace the account id. A new account has a seed commit. Approved memory writes add later commits. `./scripts/ssios audit-verify` checks the audit hash chain. The Memory page in the UI lists the same files for the signed-in account.
 
+## Backup
+
+Stop SSIOS, write one checked archive outside the state directory, and start again. The archive is not encrypted and does not hold Google tokens. Restore unpacks only into a new, empty directory. Details are in [docs/backup.md](docs/backup.md).
+
+```bash
+./scripts/ssios stop
+./scripts/ssios backup --out "$HOME/ssios-backups"
+./scripts/ssios start
+```
+
 ## Tests
 
 ```bash
@@ -153,6 +163,8 @@ The suite uses a fake Ollama client and a fake guest. It does not call Google an
 - [Chat, accounts, and the home-network UI](docs/chat-ui.md)
 - [Goals and tasks](docs/tasks.md)
 - [Search by meaning and the host tool loop](docs/search.md)
+- [Backup and restore](docs/backup.md)
+- [Release checklist for the Mac](docs/release-checklist.md)
 - [Mac end-to-end test](docs/mac-e2e-test.md)
 - [Gmail, Drive, and Calendar](docs/google-connector.md)
 - [vfkit guest](docs/macos-vz.md)

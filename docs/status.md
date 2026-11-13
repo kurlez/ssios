@@ -51,6 +51,7 @@ These code paths exist, but this environment has not run them as an end-to-end s
 - Snapshot restore. Identity and key reset have to come first. A snapshot that contains a vault, memory, or tokens is rejected now
 - A measured boot chain and a TPM-sealed vault
 - An optional confidential-computing / TEE profile
+- Scheduled, rotated, or encrypted backups. `backup` and `restore` exist as manual commands and make a plain archive
 - Encryption at rest. The code only sets permission bits. It does not use LUKS or FileVault
 - A semantic index from QMD or MemFS Search. A local embedding index for Files and Memory exists and is off by default. It was tested with a stand-in embedder, not a real model. See `search.md`
 - A graphical interface and messaging and procurement connectors

@@ -13,7 +13,7 @@ semantic_top_k = 8
 semantic_min_score = 0.5
 ```
 
-Pull the model by hand (`ollama pull bge-m3`). No model is pinned. `./scripts/ssios library-embed-bench` reports which candidates are installed, their dimensions, and the time for one call. It does not score retrieval quality yet. `semantic_min_score` depends on the model, so check a few real searches on the Mac before relying on the default.
+Pull the model by hand (`ollama pull bge-m3`). No model is pinned. `./scripts/ssios library-embed-bench` reports which candidates are installed, their dimensions, and the time for one call. For each installed model it also runs six synthetic lookups where the query and the document are in different languages, and prints `top1`, the lowest score of a right answer, the highest score of a wrong one, and a `suggested_min_score` between them. `semantic_min_score` depends on the model, so set it from that report and check a few real searches on the Mac.
 
 Where it is used:
 

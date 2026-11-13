@@ -78,6 +78,22 @@ class IndexTest(unittest.TestCase):
             OllamaEmbedder("http://127.0.0.1:9", "bge-m3", timeout=1)(["text"])
 
 
+class BenchQualityTest(unittest.TestCase):
+    def test_quality_suggests_a_threshold_only_when_right_beats_wrong(self) -> None:
+        from ssios.library_embed import QUALITY_DOCS, QUALITY_QUERIES, retrieval_quality
+
+        def exact(texts):
+            source = QUALITY_DOCS if texts[0] in QUALITY_DOCS else QUALITY_QUERIES
+            return [[1.0 if source.index(text) == axis else 0.2 for axis in range(len(source))] for text in texts]
+
+        good = retrieval_quality(exact)
+        self.assertEqual(good["top1"], "6/6")
+        self.assertGreater(good["lowest_right"], good["suggested_min_score"])
+        self.assertLess(good["highest_wrong"], good["suggested_min_score"])
+        flat = retrieval_quality(lambda texts: [[1.0, 1.0] for _text in texts])
+        self.assertNotIn("suggested_min_score", flat)
+
+
 class FilesAndMemoryTest(PlaneTest):
     def setUp(self) -> None:
         super().setUp()

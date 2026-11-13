@@ -25,6 +25,9 @@ Usage: ./scripts/ssios <command> [args]
   model-bench  Score one local Ollama model on synthetic tool choices. Nothing is saved.
   router-bench Score the chat router. --rules-only does not call Ollama.
   library-embed-bench  Compare small local embedding models. Skips when Ollama is down.
+  backup     Write a checked archive of the state directory: backup --out DIR. Stop SSIOS first.
+  backup-verify  Check an archive against its manifest: backup-verify FILE
+  restore    Unpack an archive into a new, empty state directory: restore FILE --into DIR
 
 Any other SSIOS command is passed through with --state and --config filled in.
 Example: ./scripts/ssios oauth-install-client --account kent

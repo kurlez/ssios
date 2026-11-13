@@ -7,7 +7,9 @@ Not run against a real Ollama model. Both features are off in the sample config.
 - Search by meaning for Files and Memory when `[search] embed_model` is set. Keyword matches stay first. The index stores vectors and hashes, not text, and only loopback Ollama is called.
 - A host tool loop for a multi-tool turn when the Codex guest cannot start (`[agent.planner] enabled`). Same host tools, same audit, and a write is still an approval card.
 - After mail, Drive, or a web page is read in a turn, `web.fetch` and `web.clip` open only an address the user typed. This applies to the guest too.
-- `library-embed-bench` also probes `bge-m3`.
+- `library-embed-bench` also probes `bge-m3` and reports six cross-language lookups with a suggested `semantic_min_score`.
+- `backup`, `backup-verify`, and `restore`. The archive carries a manifest of hashes, is not encrypted, and leaves out `run/`, `cache/`, and keychain items. Restore writes only into a new, empty directory.
+- [docs/release-checklist.md](docs/release-checklist.md) lists what has to be run on the Mac before a tag.
 
 ## 0.3.0 — 2026-11-13
 

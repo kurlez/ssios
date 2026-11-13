@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
+    command = sub.add_parser("backup", parents=[common])
+    command.add_argument("--out", required=True, help="directory for the archive, outside the state directory")
+    command.add_argument("--allow-running", action="store_true", help="back up while the UI is running")
+    command = sub.add_parser("backup-verify", parents=[common])
+    command.add_argument("archive")
+    command = sub.add_parser("restore", parents=[common])
+    command.add_argument("archive")
+    command.add_argument("--into", required=True, help="new state directory. It must not exist, or be empty")
     for name in ("oauth-install-client", "oauth-connect", "oauth-status", "oauth-disconnect", "oauth-revoke-account", "connector-fetch"):
         command = sub.add_parser(name, parents=[common])
         command.add_argument("--account", required=True)
@@ -91,6 +99,21 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "memfs-info":
         print(json.dumps({"memfs": describe_memfs(), "probe": probe_local_binary(execute=args.execute_version)}, indent=2, ensure_ascii=False))
+        return 0
+    if args.command in ("backup", "backup-verify", "restore"):
+        from ssios.backup import create_backup, restore_backup, verify_backup
+
+        try:
+            if args.command == "backup":
+                report = create_backup(Path(args.state), Path(args.out), allow_running=args.allow_running)
+            elif args.command == "backup-verify":
+                report = verify_backup(Path(args.archive))
+            else:
+                report = restore_backup(Path(args.archive), Path(args.into))
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0
     if args.command == "memfs-upstream-smoke":
         return run_upstream_smoke(Path(args.state), args.config, args.letta_bin)
