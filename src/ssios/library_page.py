@@ -338,10 +338,245 @@ LIBRARY_JS = r"""
       if (target.closest(".lib-rename-text") || target.closest(".lib-rename-edit")) beginRename();
     });
   }
+  bindSelection();
   var settings = document.getElementById("lib-settings");
   var openSettings = document.getElementById("lib-settings-open");
   if (settings && openSettings && settings.showModal) {
     openSettings.addEventListener("click", function () { settings.showModal(); });
+  }
+  function bindSelection() {
+    var grid = document.getElementById("library-grid");
+    var bar = document.getElementById("lib-batch");
+    if (!grid || !bar) return;
+    var selected = [];
+    var anchor = -1;
+    var role = app.getAttribute("data-role") || "owner";
+    var canTag = role === "add" || role === "organize" || role === "owner";
+    var canMove = role === "organize" || role === "owner";
+    var canTrash = canTag;
+    var canPurge = role === "owner";
+    bar.querySelectorAll("[data-need]").forEach(function (button) {
+      var need = button.getAttribute("data-need");
+      var allowed = need === "view" || (need === "tag" && canTag) || (need === "move" && canMove) || (need === "trash" && canTrash) || (need === "purge" && canPurge);
+      if (!allowed) button.hidden = true;
+    });
+    function cards() { return Array.prototype.slice.call(grid.querySelectorAll(".lib-card")); }
+    function paint() {
+      var set = {};
+      selected.forEach(function (id) { set[id] = true; });
+      cards().forEach(function (card) {
+        var on = !!set[card.getAttribute("data-item")];
+        card.classList.toggle("selected", on);
+        var box = card.querySelector(".lib-check");
+        if (box) box.checked = on;
+      });
+      app.classList.toggle("selecting", selected.length > 0);
+      if (selected.length >= 2) app.classList.add("has-selection");
+      else if (!document.getElementById("lib-single")) app.classList.remove("has-selection");
+      var multi = document.getElementById("lib-multi");
+      var single = document.getElementById("lib-single");
+      if (selected.length >= 2) {
+        bar.hidden = false;
+        var count = bar.querySelector("[data-count]");
+        if (count) count.textContent = (app.getAttribute("data-selected") || "").replace("{count}", String(selected.length));
+        fillMulti(multi);
+        if (multi) multi.hidden = false;
+        if (single) single.hidden = true;
+      } else {
+        bar.hidden = true;
+        if (multi) multi.hidden = true;
+        if (single) single.hidden = false;
+      }
+    }
+    function fillMulti(multi) {
+      if (!multi) return;
+      var total = 0;
+      var common = null;
+      selected.forEach(function (id) {
+        var card = grid.querySelector('.lib-card[data-item="' + id + '"]');
+        if (!card) return;
+        total += parseInt(card.getAttribute("data-size") || "0", 10) || 0;
+        var tags = (card.getAttribute("data-tags") || "").split("|").filter(Boolean);
+        common = common === null ? tags : common.filter(function (tag) { return tags.indexOf(tag) >= 0; });
+      });
+      multi.querySelector("[data-count]").textContent = (app.getAttribute("data-selected") || "").replace("{count}", String(selected.length));
+      multi.querySelector("[data-size]").textContent = (multi.getAttribute("data-total") || "").replace("{size}", humanSize(total));
+      var box = multi.querySelector("[data-tags]");
+      box.textContent = "";
+      (common || []).forEach(function (tag) {
+        var chip = document.createElement("span");
+        chip.className = "lib-chip";
+        chip.textContent = tag;
+        box.appendChild(chip);
+      });
+      if (!common || !common.length) box.textContent = multi.getAttribute("data-none") || "";
+    }
+    function humanSize(size) {
+      if (size < 1024) return size + " B";
+      if (size < 1048576) return Math.round(size / 1024) + " KB";
+      return (size / 1048576).toFixed(1) + " MB";
+    }
+    function choose(id, index, event) {
+      var list = cards();
+      if (event.shiftKey && anchor >= 0) {
+        var start = Math.min(anchor, index);
+        var end = Math.max(anchor, index);
+        selected = list.slice(start, end + 1).map(function (card) { return card.getAttribute("data-item"); });
+      } else if (event.metaKey || event.ctrlKey) {
+        var at = selected.indexOf(id);
+        if (at >= 0) selected.splice(at, 1);
+        else selected.push(id);
+        anchor = index;
+      } else {
+        selected = [id];
+        anchor = index;
+      }
+      paint();
+    }
+    grid.addEventListener("click", function (event) {
+      var card = event.target.closest && event.target.closest(".lib-card");
+      if (!card) return;
+      var box = event.target.closest(".lib-check");
+      var modified = event.metaKey || event.ctrlKey || event.shiftKey || box;
+      if (!modified && selected.length < 2) return;
+      event.preventDefault();
+      var list = cards();
+      choose(card.getAttribute("data-item"), list.indexOf(card), box ? {metaKey: true, ctrlKey: true, shiftKey: false} : event);
+    });
+    grid.addEventListener("mousedown", function (event) {
+      if (event.button !== 0 || (event.target.closest && event.target.closest(".lib-card"))) return;
+      var band = document.createElement("div");
+      band.className = "lib-marquee";
+      document.body.appendChild(band);
+      var x = event.clientX;
+      var y = event.clientY;
+      function move(ev) {
+        var left = Math.min(x, ev.clientX);
+        var top = Math.min(y, ev.clientY);
+        band.style.left = left + "px";
+        band.style.top = top + "px";
+        band.style.width = Math.abs(ev.clientX - x) + "px";
+        band.style.height = Math.abs(ev.clientY - y) + "px";
+      }
+      function up(ev) {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        var rect = band.getBoundingClientRect();
+        band.remove();
+        if (rect.width < 4 && rect.height < 4) return;
+        selected = [];
+        cards().forEach(function (card, index) {
+          var box = card.getBoundingClientRect();
+          var hit = !(box.right < rect.left || box.left > rect.right || box.bottom < rect.top || box.top > rect.bottom);
+          if (hit) selected.push(card.getAttribute("data-item"));
+          if (hit) anchor = index;
+        });
+        paint();
+      }
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+    document.addEventListener("keydown", function (event) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a" && app.contains(document.activeElement)) {
+        event.preventDefault();
+        selected = cards().map(function (card) { return card.getAttribute("data-item"); });
+        anchor = 0;
+        paint();
+      }
+      if (event.key === "Escape") { selected = []; anchor = -1; paint(); }
+    });
+    cards().forEach(function (card) {
+      card.addEventListener("dragstart", function (event) {
+        var id = card.getAttribute("data-item");
+        if (selected.indexOf(id) < 0) { selected = [id]; paint(); }
+        event.dataTransfer.setData("text/plain", selected.join(","));
+        event.dataTransfer.effectAllowed = "copy";
+      });
+    });
+    document.addEventListener("drop", function (event) {
+      var payload = event.dataTransfer && event.dataTransfer.getData("text/plain");
+      if (!payload || payload.indexOf("item-") !== 0 || !hot) return;
+      event.preventDefault();
+      event.stopPropagation();
+      postBatch("folder", payload, hot.getAttribute("data-folder") || "");
+    }, true);
+    function postBatch(action, ids, extra) {
+      var data = new URLSearchParams();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("op", "batch");
+      data.set("ajax", "1");
+      data.set("action", action);
+      data.set("ids", typeof ids === "string" ? ids : selected.join(","));
+      if (extra) data.set("folder", extra);
+      return fetch("/ui/library", {method: "POST", body: data, headers: {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}})
+        .then(function (response) { return response.json(); });
+    }
+    bar.addEventListener("click", function (event) {
+      var button = event.target.closest && event.target.closest("[data-batch]");
+      if (!button) return;
+      var action = button.getAttribute("data-batch");
+      if (action === "clear") { selected = []; anchor = -1; paint(); return; }
+      if (action === "tag") { document.getElementById("lib-tag-dialog").showModal(); return; }
+      if (action === "folder") { document.getElementById("lib-folder-dialog").showModal(); return; }
+      if (action === "purge") { document.getElementById("lib-purge-dialog").showModal(); return; }
+      if (action === "download") { downloadZip(); return; }
+      postBatch(action, selected.join(","), app.getAttribute("data-folder") || "").then(function () { location.reload(); });
+    });
+    wireDialog("lib-tag-dialog", function (form) { return form.querySelector("[name=tag]").value; }, "tag");
+    wireDialog("lib-folder-dialog", function (form) { return form.querySelector("[name=folder]").value; }, "folder");
+    var purge = document.getElementById("lib-purge-dialog");
+    if (purge) purge.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var data = new URLSearchParams();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("op", "batch");
+      data.set("ajax", "1");
+      data.set("action", "purge");
+      data.set("ids", selected.join(","));
+      data.set("confirm", purge.querySelector("[name=confirm]").value);
+      fetch("/ui/library", {method: "POST", body: data, headers: {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}}).then(function () { location.reload(); });
+      purge.close();
+    });
+    function wireDialog(id, value, kind) {
+      var dialog = document.getElementById(id);
+      if (!dialog) return;
+      dialog.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var submitter = event.submitter;
+        var action = submitter && submitter.getAttribute("data-batch") || kind;
+        var data = new URLSearchParams();
+        data.set("csrf", csrf);
+        data.set("library", libraryId);
+        data.set("op", "batch");
+        data.set("ajax", "1");
+        data.set("action", action);
+        data.set("ids", selected.join(","));
+        if (kind === "tag") data.set("tag", value(dialog));
+        if (kind === "folder") data.set("folder", value(dialog));
+        fetch("/ui/library", {method: "POST", body: data, headers: {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}})
+          .then(function () { location.reload(); });
+      });
+      dialog.querySelectorAll("[data-close]").forEach(function (button) {
+        button.addEventListener("click", function () { dialog.close(); });
+      });
+    }
+    function downloadZip() {
+      var data = new URLSearchParams();
+      data.set("csrf", csrf);
+      data.set("library", libraryId);
+      data.set("op", "download");
+      data.set("ids", selected.join(","));
+      fetch("/ui/library", {method: "POST", body: data, headers: {"Content-Type": "application/x-www-form-urlencoded"}})
+        .then(function (response) { return response.blob(); })
+        .then(function (blob) {
+          var link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = "files.zip";
+          link.click();
+        });
+    }
   }
 })();
 """
@@ -434,13 +669,15 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         ident = html.escape(str(item.get("id") or ""), quote=True)
         label = html.escape(str(item.get("name") or ""))
         ext = html.escape(str(item.get("ext") or "").upper())
+        tag_attr = html.escape("|".join(str(tag) for tag in item.get("tags") or []), quote=True)
+        check = f'<input class="lib-check" type="checkbox" aria-label="{html.escape(say(lang, "lib_check"), quote=True)}">'
         avatar = _adder_avatar(plane, item) if chosen.get("kind") == "shared" else ""
         if item.get("group") == "image" and item.get("ext") in {"png", "jpg", "gif", "webp", "bmp"}:
             thumb = f'<img class="lib-thumb" src="/ui/library/raw?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="" data-tile="{ext}">'
         else:
             thumb = f'<img class="lib-thumb" src="/ui/library/thumb?library={html.escape(library_id, quote=True)}&amp;item={ident}" alt="" data-tile="{ext}">'
         cards.append(
-            f'<a class="lib-card" data-item="{ident}" href="{base}&amp;item={ident}">{avatar}{thumb}<span class="name">{label}</span><span class="type-badge">{ext}</span></a>'
+            f'<a class="lib-card" data-item="{ident}" data-size="{int(item.get("size") or 0)}" data-tags="{tag_attr}" href="{base}&amp;item={ident}">{check}{avatar}{thumb}<span class="name">{label}</span><span class="type-badge">{ext}</span></a>'
         )
     inspector = ""
     if selected:
@@ -574,6 +811,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + '<div id="library-grid" class="lib-grid">'
         + ("".join(cards) or f"<p>{html.escape(say(lang, 'lib_empty_view'))}</p>")
         + "</div>"
+        + _batch_bar(lang, str(chosen.get("role") or "owner"), trash, bool(folder))
     )
     selected_class = " has-selection" if selected else ""
     body = (
@@ -585,13 +823,19 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'data-replace="{html.escape(say(lang, "conflict_replace"), quote=True)}" '
         + f'data-apply="{html.escape(say(lang, "conflict_apply"), quote=True)}" '
         + f'data-rename="{html.escape(say(lang, "lib_rename"), quote=True)}" '
+        + f'data-role="{html.escape(str(chosen.get("role") or "owner"), quote=True)}" '
+        + f'data-trash="{"1" if trash else "0"}" '
+        + f'data-folder="{html.escape(folder, quote=True)}" '
+        + f'data-selected="{html.escape(say(lang, "lib_selected", count="{count}"), quote=True)}" '
         + f'data-summary="{html.escape(say(lang, "drop_summary", saved="{saved}", versions="{versions}", skipped="{skipped}"), quote=True)}">'
         + left
         + '<div class="lib-main">'
         + '<ol id="drop-log" class="drop-log"></ol><p id="drop-summary"></p>'
         + grid
         + "</div>"
-        + (f'<aside class="lib-inspector">{inspector}</aside>' if selected else "")
+        + (f'<aside class="lib-inspector" id="lib-single">{inspector}</aside>' if selected else "")
+        + _multi_panel(lang)
+        + _batch_dialogs(lang, known)
         + f'<div id="drop-overlay" class="drop-overlay">{html.escape(say(lang, "drop_overlay"))}</div></div>'
     )
     body += f'<script src="{library_script_path()}"></script>'
@@ -628,6 +872,30 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
 
         decided = resolve_conflict(plane, account_id, library_id, str(body.get("conflict") or ""), str(body.get("decision") or ""), peer_ip)
         return Page(200, library_page(plane, session, {"library": library_id, "item": decided.get("id") or ""}, f"<p>{html.escape(decided.get('reason') or '')}</p>"))
+    if op == "batch":
+        import json
+
+        from ssios.library_batch import batch_apply
+
+        result = batch_apply(
+            plane,
+            account_id,
+            library_id,
+            str(body.get("ids") or ""),
+            str(body.get("action") or ""),
+            peer_ip,
+            tag=str(body.get("tag") or ""),
+            folder_id=str(body.get("folder") or ""),
+            confirm=str(body.get("confirm") or ""),
+        )
+        if str(body.get("ajax") or "") == "1":
+            return Page(200, json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+        return Page(200, library_page(plane, session, {"library": library_id}, ""))
+    if op == "download":
+        from ssios.library_batch import zip_items
+
+        payload = zip_items(plane, account_id, library_id, str(body.get("ids") or ""), peer_ip)
+        return Page(200, payload, content_type="application/zip", extra_headers={"Content-Disposition": 'attachment; filename="files.zip"'})
     if op == "rename":
         import json
 
@@ -749,6 +1017,63 @@ def _hidden(csrf: str, library_id: str, item: str = "") -> str:
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
         + item_html
+    )
+
+
+def _batch_bar(lang: str, role: str, trash: bool, in_folder: bool) -> str:
+    buttons = [
+        ("tag", "lib_batch_tag", "tag"),
+        ("untag", "lib_batch_untag", "tag"),
+        ("folder", "lib_batch_move", "move"),
+    ]
+    if in_folder:
+        buttons.append(("unfolder", "lib_batch_remove_folder", "move"))
+    if trash:
+        buttons.append(("restore", "lib_batch_restore", "trash"))
+        if role == "owner":
+            buttons.append(("purge", "lib_batch_purge", "purge"))
+    else:
+        buttons.append(("trash", "lib_batch_trash", "trash"))
+    buttons.extend([
+        ("download", "lib_batch_download", "view"),
+        ("analyze", "lib_batch_analyze", "tag"),
+        ("clear", "lib_batch_clear", "view"),
+    ])
+    parts = "".join(
+        f'<button type="button" data-batch="{action}" data-need="{need}">{html.escape(say(lang, key))}</button>'
+        for action, key, need in buttons
+    )
+    return f'<div id="lib-batch" class="lib-batch" hidden><span data-count></span>{parts}</div>'
+
+
+def _multi_panel(lang: str) -> str:
+    return (
+        f'<aside id="lib-multi" class="lib-inspector" hidden data-total="{html.escape(say(lang, "lib_batch_total", size="{size}"), quote=True)}" '
+        f'data-none="{html.escape(say(lang, "lib_batch_none"), quote=True)}">'
+        f"<h2 data-count></h2><p data-size></p><p>{html.escape(say(lang, 'lib_batch_common'))}</p><div data-tags class=\"lib-chips\"></div></aside>"
+    )
+
+
+def _batch_dialogs(lang: str, folders: list[dict]) -> str:
+    options = "".join(
+        f'<option value="{html.escape(str(row.get("id") or ""), quote=True)}">{html.escape(str(row.get("name") or ""))}</option>'
+        for row in folders
+        if isinstance(row, dict)
+    )
+    return (
+        f'<dialog id="lib-tag-dialog" class="lib-dialog"><form method="dialog">'
+        f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40"></label>'
+        f'<button type="submit" data-batch="tag">{html.escape(say(lang, "lib_batch_tag"))}</button>'
+        f'<button type="submit" data-batch="untag">{html.escape(say(lang, "lib_batch_untag"))}</button>'
+        f'<button type="button" data-close>{html.escape(say(lang, "lib_batch_clear"))}</button></form></dialog>'
+        f'<dialog id="lib-folder-dialog" class="lib-dialog"><form method="dialog">'
+        f'<label>{html.escape(say(lang, "lib_folder"))} <select name="folder">{options}</select></label>'
+        f'<button type="submit" data-batch="folder">{html.escape(say(lang, "lib_batch_move"))}</button>'
+        f'<button type="button" data-close>{html.escape(say(lang, "lib_batch_clear"))}</button></form></dialog>'
+        f'<dialog id="lib-purge-dialog" class="lib-dialog"><form method="dialog">'
+        f'<label>{html.escape(say(lang, "lib_batch_confirm"))} <input name="confirm"></label>'
+        f'<button type="submit">{html.escape(say(lang, "lib_batch_purge"))}</button>'
+        f'<button type="button" data-close>{html.escape(say(lang, "lib_batch_clear"))}</button></form></dialog>'
     )
 
 

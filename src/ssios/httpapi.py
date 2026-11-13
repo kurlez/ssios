@@ -87,6 +87,8 @@ def _multipart_memory(content_type: str, raw: bytes) -> dict:
             "conflict",
             "relative",
             "ajax",
+            "ids",
+            "action",
         }:
             continue
         try:

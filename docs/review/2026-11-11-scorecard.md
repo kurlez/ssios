@@ -64,7 +64,7 @@ Branch `cursor/ssios-files-2e2e`. Scores are out of 100 for each requirement gro
 
 Mean of the 33 rows above: **90 / 100** (2973 / 33).
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 324 ran, 317 passed, 7 skipped.
+`PYTHONPATH=src:tests python3 -m unittest discover -s tests` — 326 ran, 319 passed, 7 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `tasks-checklist-1280.png`, `files-m1-1280.png`, `files-drop-1280.png`, `files-conflict-1280.png`, `files-share-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 

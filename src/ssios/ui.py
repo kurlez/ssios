@@ -1694,7 +1694,8 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-rename { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
 .lib-rename-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .lib-rename-edit { width: auto; flex: none; white-space: nowrap; padding: 4px 8px; }
-.lib-rename-input { width: 100%; max-width: 100%; }
+.lib-rename-input { width: 100%; max-width: 100%; min-width: 12rem; }
+.lib-rename:has(.lib-rename-input) { flex-direction: column; align-items: stretch; }
 .lib-rename-error { color: var(--danger); font-size: 13px; }
 .lib-switch { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 10px; text-decoration: none; color: var(--ink); }
 .lib-switch.active { background: var(--hover); font-weight: 600; }
@@ -1707,15 +1708,25 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-section summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-weight: 600; }
 .lib-add { width: 28px; height: 28px; border-radius: 8px; padding: 0; }
 .lib-settings summary { cursor: pointer; color: var(--muted); }
-.lib-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-.lib-toolbar form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
-.lib-toolbar label { display: flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
-.lib-import { margin-left: auto; }
+.lib-toolbar { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin-bottom: 12px; min-width: 0; }
+.lib-toolbar form { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin: 0; min-width: 0; }
+.lib-toolbar input[name="q"] { width: 8rem; min-width: 0; flex: 1; }
+.lib-toolbar label { display: flex; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+.lib-toolbar form:first-child { flex: 1 1 auto; min-width: 0; }
+.lib-import { margin-left: auto; flex: 0 0 auto; }
 .lib-import input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
 .lib-import label.button { border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; cursor: pointer; background: var(--panel); }
 .drop-zone { display: grid; place-items: center; gap: 8px; min-height: 220px; margin-bottom: 12px; border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }
 .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(148px, 100%), 1fr)); gap: 12px; min-height: 120px; }
 .lib-card { position: relative; display: grid; gap: 6px; align-content: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-decoration: none; color: var(--ink); min-width: 0; }
+.lib-card.selected { outline: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.lib-check { position: absolute; top: 8px; right: 8px; z-index: 2; width: 22px; height: 22px; margin: 0; opacity: 0; }
+.lib-card:hover .lib-check, .library.selecting .lib-check, .lib-card.selected .lib-check { opacity: 1; }
+.lib-marquee { position: fixed; z-index: 4; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
+.lib-batch { position: sticky; bottom: 8px; z-index: 3; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; max-width: 100%; margin-top: 12px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.lib-batch[hidden], #lib-multi[hidden], #lib-single[hidden] { display: none; }
+.lib-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 16px; background: var(--bg); color: var(--ink); max-width: min(420px, 100%); }
+.lib-dialog::backdrop { background: rgba(0, 0, 0, .35); }
 .lib-card .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; line-height: 1.3; }
 .lib-avatar, .lib-mini { width: 22px; height: 22px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 11px; display: inline-grid; place-items: center; }
 .lib-avatar { position: absolute; top: 12px; left: 12px; }
