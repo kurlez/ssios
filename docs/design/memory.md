@@ -52,6 +52,7 @@ Notes is the account's Obsidian vault and uses its structure as it is.
 
 - The Notes page has two panes: the list on the left and one note on the right, with its path above it. The list is by time or by folder, with a filter box and the tags. Images and PDFs are listed and open in the right pane.
 - Every `.md` file in every folder is a note. `.obsidian`, `.trash`, any other hidden folder, and symbolic links are left out.
+- Markdown is rendered in the forms Obsidian writes: headings, bold, italic, strikethrough, `==highlight==`, nested lists, task lists, tables, quotes, `> [!note]` callouts, fenced code, and bare addresses. Not rendered yet: math, footnotes, Mermaid diagrams, embedded notes (`![[Note]]` shows a link), and image sizes (`![[a.png|300]]`). HTML in a note is shown as text and never run.
 - Properties are the YAML block at the top. Tags come from `tags:` and from `#tag` in the text.
 - `[[Note]]`, `[[Note|label]]`, `[[Note#heading]]`, and `![[image.png]]` resolve the way Obsidian's shortest path does: beside the current note, then from the vault root, then the one file with that name.
 - A clip is saved to `Clippings/`, the folder Obsidian's own clipper uses, with its images in `Clippings/assets/`.

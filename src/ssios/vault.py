@@ -469,89 +469,15 @@ def _split_frontmatter(markdown: str) -> tuple[dict, str]:
 
 
 def _md_html(body: str, link_for) -> str:
-    import html as html_lib
+    from ssios.markdown_render import render
 
-    chunks = []
-    lines = body.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if line.startswith("```"):
-            code = []
-            index += 1
-            while index < len(lines) and not lines[index].startswith("```"):
-                code.append(lines[index])
-                index += 1
-            chunks.append("<pre><code>" + html_lib.escape("\n".join(code)) + "</code></pre>")
-            index += 1
-            continue
-        if line.startswith("#"):
-            level = len(line) - len(line.lstrip("#"))
-            level = min(max(level, 1), 4)
-            chunks.append(f"<h{level}>" + _inline(line[level:].strip(), link_for) + f"</h{level}>")
-        elif line.startswith("| ") and index + 1 < len(lines) and lines[index + 1].startswith("|"):
-            rows = []
-            while index < len(lines) and lines[index].startswith("|"):
-                cells = [cell.strip() for cell in lines[index].strip("|").split("|")]
-                rows.append(cells)
-                index += 1
-            table = ["<table>"]
-            for row_index, cells in enumerate(rows):
-                if row_index == 1 and all(set(cell) <= set("-: ") for cell in cells):
-                    continue
-                tag = "th" if row_index == 0 else "td"
-                table.append("<tr>" + "".join(f"<{tag}>{html_lib.escape(cell)}</{tag}>" for cell in cells) + "</tr>")
-            table.append("</table>")
-            chunks.append("".join(table))
-            continue
-        elif line.startswith("- ") or line.startswith("1. "):
-            items = []
-            ordered = line.startswith("1. ")
-            while index < len(lines) and (lines[index].startswith("- ") or lines[index].startswith("1. ")):
-                items.append(_inline(lines[index].split(" ", 1)[1], link_for))
-                index += 1
-            tag = "ol" if ordered else "ul"
-            chunks.append(f"<{tag}>" + "".join(f"<li>{item}</li>" for item in items) + f"</{tag}>")
-            continue
-        elif line.strip():
-            chunks.append("<p>" + _inline(line, link_for) + "</p>")
-        index += 1
-    return "\n".join(chunks)
+    return render(body, link_for)
 
 
 def _inline(text: str, link_for) -> str:
-    import html as html_lib
+    from ssios.markdown_render import inline
 
-    text = re.sub(r"!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", lambda match: f"![]({match.group(1).strip()})", text)
-    text = re.sub(
-        r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]",
-        lambda match: f"[{(match.group(2) or match.group(1)).strip()}]({match.group(1).strip()})",
-        text,
-    )
-    parts = []
-    cursor = 0
-    pattern = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`")
-    for match in pattern.finditer(text):
-        parts.append(html_lib.escape(text[cursor:match.start()]))
-        if match.group(1) is not None or match.group(0).startswith("!["):
-            alt = html_lib.escape(match.group(1) or "")
-            href = link_for(match.group(2))
-            if href:
-                parts.append(f'<img alt="{alt}" src="{html_lib.escape(href, quote=True)}">')
-            else:
-                parts.append(alt)
-        elif match.group(3) is not None:
-            label = html_lib.escape(match.group(3))
-            href = link_for(match.group(4))
-            if href.startswith("https://") or href.startswith("http://") or href.startswith("/ui/vault/"):
-                parts.append(f'<a href="{html_lib.escape(href, quote=True)}" rel="noopener noreferrer">{label}</a>')
-            else:
-                parts.append(label)
-        else:
-            parts.append("<code>" + html_lib.escape(match.group(5) or "") + "</code>")
-        cursor = match.end()
-    parts.append(html_lib.escape(text[cursor:]))
-    return "".join(parts)
+    return inline(text, link_for)
 
 
 def image_kind(data: bytes) -> str:

@@ -1196,6 +1196,12 @@ def _vault_note(plane, session: dict, rel: str, notice: str = "", tag: str = "",
     return _vault_view(plane, session, rel=rel, tag=tag, view=view, notice=notice)
 
 
+def _note_body(text: str) -> str:
+    from ssios.vault import _split_frontmatter
+
+    return _split_frontmatter(text)[1]
+
+
 _VAULT_GROUPS = ("Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older")
 
 
@@ -1322,21 +1328,24 @@ def _vault_view(plane, session: dict, *, rel: str = "", tag: str = "", view: str
             path = html.escape(chosen, quote=True)
             tools = (
                 f'<form class="vault-tools" method="post" action="/ui/vault/note"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="path" value="{path}">'
-                f'<span class="badge" title="A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.">{depth_label(depth)}</span> '
-                + ('<button name="op" value="read" type="submit">Mark as read</button> ' if depth != "read" else "")
-                + '<label>Remind me to read this <select name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
-                '<option value="weekend">this weekend</option><option value="week">in a week</option></select></label> '
-                '<button name="op" value="remind" type="submit">Set reminder</button></form>'
+                f'<span class="badge depth-{html.escape(depth, quote=True)}" title="A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.">{depth_label(depth)}</span>'
+                + ('<button name="op" value="read" type="submit">Mark as read</button>' if depth != "read" else "")
+                + '<span class="vault-remind"><label for="vault-when">Remind me to read</label>'
+                '<select id="vault-when" name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
+                '<option value="weekend">this weekend</option><option value="week">in a week</option></select>'
+                '<button name="op" value="remind" type="submit">Set</button></span></form>'
             )
+            first = next((line for line in _note_body(text).splitlines() if line.strip()), "")
+            title = "" if first.lstrip().startswith("#") else f'<h1 class="vault-title">{html.escape(str(meta.get("title") or chosen.rsplit("/", 1)[-1][:-3]))}</h1>'
             main = (
-                f'<p class="vault-crumbs">{crumbs}</p>{tools}'
+                f'<div class="vault-doc"><header class="vault-bar"><p class="vault-crumbs">{crumbs}</p>{tools}</header>'
                 + (f'<details class="vault-props"><summary>Properties</summary><dl>{props}</dl></details>' if props else "")
-                + f'<article class="vault-note">{rendered}</article>'
+                + f'{title}<article class="vault-note">{rendered}</article></div>'
             )
         else:
             src = html.escape("/ui/vault/asset?path=" + quote(chosen, safe=""), quote=True)
             shown_file = f'<iframe class="vault-pdf" src="{src}" title="{html.escape(chosen, quote=True)}"></iframe>' if chosen.casefold().endswith(".pdf") else f'<img class="vault-image" src="{src}" alt="">'
-            main = f'<p class="vault-crumbs">{crumbs}</p>{shown_file}'
+            main = f'<header class="vault-bar"><p class="vault-crumbs">{crumbs}</p></header>{shown_file}'
     body = f'<div class="vault">{side}<section class="vault-main">{notice}{main}</section></div><script src="{VAULT_PATH}"></script>'
     return _page(session, "Notes", body, bleed=True)
 
@@ -1732,18 +1741,56 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .vault-row { display: block; padding: 4px 8px 4px 18px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vault-row[hidden], .vault-group[hidden] { display: none; }
 .vault-list a.vault-row { color: var(--ink); }
-.vault-note ul { list-style: disc; padding-left: 1.4em; }
-.vault-note ol { list-style: decimal; padding-left: 1.4em; }
-.vault-note p { margin: 0 0 .8em; }
-.vault-note h1, .vault-note h2, .vault-note h3 { margin: 1.2em 0 .5em; }
 .vault-row:hover { background: var(--hover); }
 .vault-row.active { background: var(--user); }
-.vault-main { min-width: 0; overflow: auto; padding: 14px 28px 40px; }
-.vault-crumbs { color: var(--muted); font-size: .85rem; margin: 0 0 8px; }
-.vault-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 8px; }
-.vault-note { max-width: 760px; margin: 0 auto; line-height: 1.7; }
-.vault-note img, .vault-image { max-width: 100%; }
-.vault-pdf { width: 100%; height: calc(100% - 40px); border: 0; }
+.vault-main { min-width: 0; overflow: auto; padding: 0 32px 48px; }
+.vault-doc { max-width: 780px; margin: 0 auto; }
+.vault-bar { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 12px 0 10px; margin-bottom: 14px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.vault-crumbs { color: var(--muted); font-size: .82rem; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 240px; }
+.vault-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: .82rem; }
+.vault-tools button, .vault-tools select { font: inherit; font-size: .82rem; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; }
+.vault-tools .vault-remind { display: inline-flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid var(--line); }
+.vault-tools label { display: inline; margin: 0; color: var(--muted); white-space: nowrap; }
+.vault-tools .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: .75rem; font-weight: 600; background: var(--warn-bg); color: var(--warn); }
+.vault-tools .badge.depth-read { background: var(--ok-bg); color: var(--ok); }
+.vault-props { margin: 0 0 14px; font-size: .85rem; color: var(--muted); }
+.vault-props dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0 0; }
+.vault-props dt { font-weight: 600; } .vault-props dd { margin: 0; overflow-wrap: anywhere; }
+.vault-title { font-size: 1.6rem; line-height: 1.3; margin: 0 0 .6em; }
+.vault-note { line-height: 1.75; font-size: 1rem; overflow-wrap: anywhere; }
+.vault-note > :first-child { margin-top: 0; }
+.vault-note p { margin: 0 0 .9em; }
+.vault-note h1 { font-size: 1.6rem; line-height: 1.3; margin: 1.4em 0 .6em; }
+.vault-note h2 { font-size: 1.35rem; line-height: 1.35; margin: 1.5em 0 .55em; padding-bottom: .25em; border-bottom: 1px solid var(--line); }
+.vault-note h3 { font-size: 1.15rem; margin: 1.3em 0 .5em; }
+.vault-note h4, .vault-note h5, .vault-note h6 { font-size: 1rem; margin: 1.2em 0 .4em; }
+.vault-note ul, .vault-note ol { margin: 0 0 .9em; padding-left: 1.6em; }
+.vault-note ul { list-style: disc; } .vault-note ul ul { list-style: circle; } .vault-note ul ul ul { list-style: square; }
+.vault-note ol { list-style: decimal; }
+.vault-note li { margin: .2em 0; }
+.vault-note li > ul, .vault-note li > ol { margin: .2em 0 .2em; }
+.vault-note li > p { margin: 0 0 .4em; }
+.vault-note li.task { list-style: none; margin-left: -1.3em; }
+.vault-note li.task input { margin: 0 .4em 0 0; vertical-align: middle; }
+.vault-note hr { border: 0; border-top: 1px solid var(--line); margin: 1.6em 0; }
+.vault-note a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.vault-note a:hover { text-decoration: underline; }
+.vault-note code { background: var(--code); border-radius: 4px; padding: .1em .35em; font-size: .9em; }
+.vault-note pre { background: var(--code); border-radius: 8px; padding: 12px 14px; overflow: auto; margin: 0 0 1em; line-height: 1.5; }
+.vault-note pre code { background: none; padding: 0; font-size: .88rem; }
+.vault-note blockquote { margin: 0 0 1em; padding: .1em 0 .1em 1em; border-left: 3px solid var(--line); color: var(--muted); }
+.vault-note blockquote > :last-child, .vault-note .callout > :last-child { margin-bottom: 0; }
+.vault-note .callout { margin: 0 0 1em; padding: 10px 14px; border-radius: 8px; border-left: 3px solid var(--accent); background: var(--hover); }
+.vault-note .callout-title { font-weight: 600; margin-bottom: .3em; }
+.vault-note .callout-warning, .vault-note .callout-caution, .vault-note .callout-danger { border-left-color: var(--danger); }
+.vault-note .table-wrap { overflow-x: auto; margin: 0 0 1em; }
+.vault-note table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+.vault-note th, .vault-note td { border: 1px solid var(--line); padding: 6px 10px; vertical-align: top; }
+.vault-note th { background: var(--hover); font-weight: 600; text-align: left; }
+.vault-note mark { background: var(--warn-bg); color: inherit; padding: 0 .15em; border-radius: 3px; }
+.vault-note .tag { color: var(--accent); background: var(--hover); border-radius: 999px; padding: 0 .5em; font-size: .88em; }
+.vault-note img, .vault-image { max-width: 100%; height: auto; border-radius: 6px; }
+.vault-pdf { width: 100%; height: calc(100vh - 170px); border: 0; }
 @media (max-width: 800px) { .vault { grid-template-columns: 1fr; height: auto; } .vault-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 45vh; } }
 .file-viewer .viewer-frame { background: var(--panel); border-radius: 12px; width: min(1000px, 94vw); height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
 .file-viewer .viewer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
