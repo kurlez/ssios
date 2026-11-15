@@ -188,7 +188,10 @@ class SkillTest(PlaneTest):
         _status, notes = _get(self.base, "/ui/vault", self.cookie)
         self.assertIn("Studio plan", notes)
         self.assertIn("Notes", notes)
-        href = notes.split('href="/ui/vault/note?path=', 1)[1].split('"', 1)[0]
+        # The list is by time, so the task mirror can come first. Open the clip.
+        import re as _re
+
+        href = _re.search(r'href="/ui/vault/note\?path=(Clippings[^"]*\.md)"', notes).group(1)
         _status, note = _get(self.base, "/ui/vault/note?path=" + href, self.cookie)
         self.assertIn("Ignore previous instructions", note)
         self.assertNotIn("<script>", note)

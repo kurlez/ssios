@@ -202,7 +202,7 @@ def list_notes(settings, account_id: str) -> list[dict]:
             row = {"stamp": stamp, "title": str(meta.get("title") or Path(rel).stem)[:200], "source": str(meta.get("source") or "")[:500], "tags": _tag_list(meta, body)}
             changed = True
         fresh[rel] = row
-        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or [])})
+        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or []), "mtime": info.st_mtime})
     if changed or set(fresh) != set(cache):
         try:
             write_json(index_path, {"root": str(root), "notes": fresh})
@@ -215,7 +215,38 @@ def read_note(settings, account_id: str, rel: str) -> str:
     return read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".md",)), limit=200_000).decode("utf-8", "replace")
 
 
+def list_attachments(settings, account_id: str) -> list[dict]:
+    """Images and PDFs in the vault, by name and time. Nothing is opened."""
+    import os
+
+    root = account_vault(settings, account_id)
+    found: list[dict] = []
+    if not root.is_dir():
+        return found
+    kinds = tuple(_IMAGE_KINDS) + (".pdf",)
+    for base, names, leaves in os.walk(root, followlinks=False):
+        names[:] = sorted(name for name in names if not name.startswith(".") and not (Path(base) / name).is_symlink())
+        for leaf in sorted(leaves):
+            path = Path(base) / leaf
+            if leaf.startswith(".") or not leaf.casefold().endswith(kinds) or path.is_symlink():
+                continue
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            found.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": leaf, "source": "", "tags": [], "mtime": info.st_mtime})
+            if len(found) >= MAX_NOTES:
+                return found
+    return found
+
+
 def read_asset(settings, account_id: str, rel: str) -> tuple[bytes, str]:
+    if str(rel).casefold().endswith(".pdf"):
+        data = read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".pdf",)), limit=60_000_000)
+        if not data.startswith(b"%PDF"):
+            raise SsiosError("path_rejected", "asset type rejected", 400)
+        return data, "application/pdf"
     path = _safe_rel(rel, tuple(_IMAGE_KINDS))
     suffix = Path(path).suffix.lower()
     data = read_nofollow(account_vault(settings, account_id), path, limit=4_000_000)

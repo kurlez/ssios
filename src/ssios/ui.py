@@ -141,12 +141,12 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         _csrf(session, body)
         return _vault_note_post(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/vault":
-        return Page(200, _vault_page(plane, session, "", str(query.get("tag") or "")))
+        return Page(200, _vault_page(plane, session, "", str(query.get("tag") or ""), str(query.get("view") or "")))
     if method == "POST" and path == "/ui/vault":
         _csrf(session, body)
         return _vault_paste(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/vault/note":
-        return Page(200, _vault_note(plane, session, str(query.get("path") or "")))
+        return Page(200, _vault_note(plane, session, str(query.get("path") or ""), "", str(query.get("tag") or ""), str(query.get("view") or "")))
     if method == "GET" and path == "/ui/vault/asset":
         return _vault_asset(plane, session, str(query.get("path") or ""))
     if method == "POST" and path == "/ui/logout":
@@ -1188,100 +1188,157 @@ def _history(plane, project_id: str, path: str) -> str:
     return f"<h2>History</h2><pre>{html.escape(text)}</pre>"
 
 
-def _vault_page(plane, session: dict, notice: str, tag: str = "") -> str:
+def _vault_page(plane, session: dict, notice: str, tag: str = "", view: str = "") -> str:
+    return _vault_view(plane, session, tag=tag, view=view, notice=notice)
+
+
+def _vault_note(plane, session: dict, rel: str, notice: str = "", tag: str = "", view: str = "") -> str:
+    return _vault_view(plane, session, rel=rel, tag=tag, view=view, notice=notice)
+
+
+_VAULT_GROUPS = ("Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older")
+
+
+def _vault_group(now, stamp: float) -> str:
+    from datetime import datetime
+
+    days = (now.date() - datetime.fromtimestamp(stamp, now.tzinfo).date()).days
+    if days <= 0:
+        return "Today"
+    if days == 1:
+        return "Yesterday"
+    if days <= 7:
+        return "Previous 7 days"
+    if days <= 30:
+        return "Previous 30 days"
+    return "Older"
+
+
+def _vault_view(plane, session: dict, *, rel: str = "", tag: str = "", view: str = "", notice: str = "") -> str:
+    """Notes as Obsidian shows a vault: the list on the left, by time or by folder, and one note on the right."""
+    from urllib.parse import quote
+
+    from ssios.calendar_intent import host_clock
     from ssios.errors import SsiosError
     from ssios.locale_messages import say
-    from ssios.vault import list_notes
+    from ssios.reading import depth_label, ledger
+    from ssios.vault import account_vault, list_attachments, list_notes, read_note, render_markdown, resolve_link
 
+    account_id = session["account"]["id"]
     try:
-        notes = list_notes(plane.settings, session["account"]["id"])
+        notes = list_notes(plane.settings, account_id)
+        extras = list_attachments(plane.settings, account_id)
+        from ssios.vault import own_vault
+
+        # The default vault's folder is named after the account id, which means nothing on the page.
+        vault_name = account_vault(plane.settings, account_id).name if own_vault(plane.settings, account_id) is not None else "Notes"
     except SsiosError as exc:
         if exc.code != "path_rejected":
             raise
-        notes = []
-        notice = _clip_notice("clip_denied", say(ui_language(plane, session), "clip_denied"))
-    from urllib.parse import quote
-
-    from ssios.reading import depth_label, ledger
-
-    seen = ledger(plane.accounts.home(session["account"]["id"]))
+        notes, extras, vault_name = [], [], "Vault"
+        notice = _clip_notice("clip_denied", exc.detail if "vault folder" in exc.detail else say(ui_language(plane, session), "clip_denied"))
     wanted_tag = str(tag or "")
-    folders: dict[str, list[str]] = {}
+    view = "folders" if view == "folders" else "recent"
     counts: dict[str, int] = {}
     for item in notes:
         for name in item.get("tags") or []:
             counts[name] = counts.get(name, 0) + 1
-        if wanted_tag and wanted_tag not in (item.get("tags") or []):
-            continue
-        href = "/ui/vault/note?path=" + quote(item["path"], safe="")
-        depth = depth_label(seen.get("note:" + item["path"], {}).get("depth") or "skimmed")
-        source = html.escape(item.get("source") or "")
-        row = f'<li><a href="{html.escape(href, quote=True)}">{html.escape(item["title"])}</a> <span class="badge">{depth}</span> <span>{source}</span></li>'
-        folders.setdefault(item.get("folder") or "", []).append(row)
-    tree = []
-    for folder in sorted(folders, key=lambda name: (name != "", name.casefold())):
-        label = html.escape(folder or "Vault root")
-        tree.append(f'<details class="vault-folder" open><summary>{label} <span class="count">{len(folders[folder])}</span></summary><ul>' + "".join(folders[folder]) + "</ul></details>")
+    shown = [item for item in notes if not wanted_tag or wanted_tag in (item.get("tags") or [])]
+    if not wanted_tag:
+        shown = shown + extras
+    shown.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
+    chosen = str(rel or "")
+    if not chosen:
+        chosen = next((item["path"] for item in shown if item["path"].casefold().endswith(".md") and item["path"] not in {"Tasks.md", "SSIOS/Tasks.md"}), "")
+    keep = (f"&view={view}" if view == "folders" else "") + (f"&tag={quote(wanted_tag, safe='')}" if wanted_tag else "")
+
+    def row(item: dict) -> str:
+        href = "/ui/vault/note?path=" + quote(item["path"], safe="") + keep
+        mark = " active" if item["path"] == chosen else ""
+        label = item["title"] if item["path"].casefold().endswith(".md") else item["path"].rsplit("/", 1)[-1]
+        return (
+            f'<a class="vault-row{mark}" href="{html.escape(href, quote=True)}" title="{html.escape(item["path"], quote=True)}" '
+            f'data-name="{html.escape((label + " " + item["path"]).casefold(), quote=True)}">{html.escape(label)}</a>'
+        )
+
+    groups: dict[str, list[str]] = {}
+    if view == "folders":
+        for item in sorted(shown, key=lambda one: one["path"].casefold()):
+            groups.setdefault(item.get("folder") or "", []).append(row(item))
+        order = sorted(groups, key=lambda name: (name != "", name.casefold()))
+        labels = {name: name or vault_name for name in order}
+    else:
+        now, _zone = host_clock(plane, _account(session))
+        for item in shown:
+            groups.setdefault(_vault_group(now, float(item.get("mtime") or 0)), []).append(row(item))
+        order = [name for name in _VAULT_GROUPS if name in groups]
+        labels = {name: name for name in order}
+    listing = "".join(
+        f'<details class="vault-group" open><summary>{html.escape(labels[name])} <span class="count">{len(groups[name])}</span></summary>{"".join(groups[name])}</details>'
+        for name in order
+    ) or '<p class="muted">No notes yet.</p>'
     tags = "".join(
-        f'<a{" class=\"active\"" if name == wanted_tag else ""} href="/ui/vault?tag={html.escape(quote(name, safe=""), quote=True)}">#{html.escape(name)} <span class="count">{count}</span></a> '
-        for name, count in sorted(counts.items(), key=lambda row: (-row[1], row[0].casefold()))[:60]
+        f'<a{" class=\"active\"" if name == wanted_tag else ""} href="/ui/vault?tag={html.escape(quote(name, safe=""), quote=True)}{"&amp;view=folders" if view == "folders" else ""}">#{html.escape(name)} <span class="count">{count}</span></a> '
+        for name, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0].casefold()))[:80]
     )
     csrf = html.escape(str(session.get("csrf") or ""))
-    paste = (
-        f"<form method=\"post\" action=\"/ui/vault\" enctype=\"multipart/form-data\">"
-        f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">"
-        "<label>Source URL <input name=\"url\" placeholder=\"https://example.com/story\"></label>"
-        "<label>Pasted article <textarea name=\"content\" rows=\"6\"></textarea></label>"
-        "<label>Or a text file <input type=\"file\" name=\"file\"></label>"
-        "<button type=\"submit\">Clip pasted article</button></form>"
+    base = "/ui/vault" + ("?tag=" + quote(wanted_tag, safe="") if wanted_tag else "")
+    joiner = "&amp;" if wanted_tag else "?"
+    side = (
+        '<aside class="vault-side">'
+        f'<div class="vault-head"><strong title="Vault">{html.escape(vault_name)}</strong>'
+        f'<span class="vault-views"><a{" class=\"active\"" if view == "recent" else ""} href="{html.escape(base, quote=True)}">Recent</a>'
+        f'<a{" class=\"active\"" if view == "folders" else ""} href="{html.escape(base, quote=True)}{joiner}view=folders">Folders</a></span></div>'
+        '<input id="vault-filter" type="search" placeholder="Filter notes" aria-label="Filter notes">'
+        + (f'<details class="vault-tags"><summary>Tags{": #" + html.escape(wanted_tag) if wanted_tag else ""}</summary><p>{tags}' + (' <a href="/ui/vault">All notes</a>' if wanted_tag else "") + "</p></details>" if tags else "")
+        + '<details class="vault-clip"><summary>Clip a page</summary>'
+        f'<form method="post" action="/ui/vault" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}">'
+        '<label>Source URL <input name="url" placeholder="https://example.com/story"></label>'
+        '<label>Pasted article <textarea name="content" rows="4"></textarea></label>'
+        '<label>Or a text file <input type="file" name="file"></label>'
+        '<button type="submit">Clip pasted article</button></form></details>'
+        f'<div class="vault-list">{listing}</div></aside>'
     )
-    body = (
-        notice
-        + paste
-        + "<p>These notes are on this computer. The folders are the folders of the vault, as Obsidian shows them. Open the vault folder in Obsidian.</p>"
-        + (f'<p class="vault-tags">{tags}' + (' <a href="/ui/vault">All notes</a>' if wanted_tag else "") + "</p>" if tags else "")
-        + ("".join(tree) or "<ul><li>No notes yet.</li></ul>")
-    )
-    return _page(session, "Notes", body)
+    main = '<p class="muted">Choose a note on the left. These notes are on this computer. Open the vault folder in Obsidian.</p>'
+    if chosen:
+        crumbs = " / ".join(html.escape(part) for part in [vault_name] + chosen.split("/"))
+        if chosen.casefold().endswith(".md"):
+            text = read_note(plane.settings, account_id, chosen)
 
+            def link_for(url: str) -> str:
+                if url.startswith(("javascript:", "data:")):
+                    return ""
+                if url.startswith(("https://", "http://")):
+                    return url
+                found = resolve_link(plane.settings, account_id, chosen, url)
+                if not found:
+                    return ""
+                kind = "note" if found.casefold().endswith(".md") else "asset"
+                return f"/ui/vault/{kind}?path=" + quote(found, safe="")
 
-def _vault_note(plane, session: dict, rel: str, notice: str = "") -> str:
-    from urllib.parse import quote
-
-    from ssios.reading import depth_label, ledger
-    from ssios.vault import read_note, render_markdown, resolve_link
-
-    account_id = session["account"]["id"]
-    text = read_note(plane.settings, account_id, rel)
-
-    def link_for(url: str) -> str:
-        if url.startswith(("javascript:", "data:")):
-            return ""
-        if url.startswith(("https://", "http://")):
-            return url
-        found = resolve_link(plane.settings, account_id, rel, url)
-        if not found:
-            return ""
-        kind = "note" if found.casefold().endswith(".md") else "asset"
-        return f"/ui/vault/{kind}?path=" + quote(found, safe="")
-
-    meta, rendered = render_markdown(text, link_for=link_for)
-    props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
-    entry = ledger(plane.accounts.home(account_id)).get("note:" + rel, {})
-    depth = entry.get("depth") or "skimmed"
-    csrf = html.escape(str(session.get("csrf") or ""))
-    path = html.escape(rel, quote=True)
-    crumbs = " / ".join(html.escape(part) for part in rel.split("/"))
-    tools = (
-        f'<section class="card reading"><p>{crumbs} <span class="badge">{depth_label(depth)}</span></p>'
-        "<p>A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.</p>"
-        f'<form method="post" action="/ui/vault/note"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="path" value="{path}">'
-        + ('<button name="op" value="read" type="submit">Mark as read</button> ' if depth != "read" else "")
-        + '<label>Remind me to read this <select name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
-        '<option value="weekend">this weekend</option><option value="week">in a week</option></select></label> '
-        '<button name="op" value="remind" type="submit">Set reminder</button></form></section>'
-    )
-    return _page(session, "Note", f"{notice}{tools}<dl>{props}</dl>{rendered}<p><a href=\"/ui/vault\">All notes</a></p>")
+            meta, rendered = render_markdown(text, link_for=link_for)
+            props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
+            depth = ledger(plane.accounts.home(account_id)).get("note:" + chosen, {}).get("depth") or "skimmed"
+            path = html.escape(chosen, quote=True)
+            tools = (
+                f'<form class="vault-tools" method="post" action="/ui/vault/note"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="path" value="{path}">'
+                f'<span class="badge" title="A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.">{depth_label(depth)}</span> '
+                + ('<button name="op" value="read" type="submit">Mark as read</button> ' if depth != "read" else "")
+                + '<label>Remind me to read this <select name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
+                '<option value="weekend">this weekend</option><option value="week">in a week</option></select></label> '
+                '<button name="op" value="remind" type="submit">Set reminder</button></form>'
+            )
+            main = (
+                f'<p class="vault-crumbs">{crumbs}</p>{tools}'
+                + (f'<details class="vault-props"><summary>Properties</summary><dl>{props}</dl></details>' if props else "")
+                + f'<article class="vault-note">{rendered}</article>'
+            )
+        else:
+            src = html.escape("/ui/vault/asset?path=" + quote(chosen, safe=""), quote=True)
+            shown_file = f'<iframe class="vault-pdf" src="{src}" title="{html.escape(chosen, quote=True)}"></iframe>' if chosen.casefold().endswith(".pdf") else f'<img class="vault-image" src="{src}" alt="">'
+            main = f'<p class="vault-crumbs">{crumbs}</p>{shown_file}'
+    body = f'<div class="vault">{side}<section class="vault-main">{notice}{main}</section></div><script src="{VAULT_PATH}"></script>'
+    return _page(session, "Notes", body, bleed=True)
 
 
 def _vault_note_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
@@ -1298,7 +1355,7 @@ def _vault_note_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     else:
         mark_note(plane, scope, rel, "read", "marked", peer_ip)
         notice = "<p>Marked as read.</p>"
-    return Page(200, _vault_note(plane, session, rel, notice))
+    return Page(200, _vault_note(plane, session, rel, notice, str(body.get("tag") or ""), str(body.get("view") or "")))
 
 
 def _clip_notice(code: str, detail: str) -> str:
@@ -1659,6 +1716,35 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 30; }
 .lightbox[hidden] { display: none; }
 .lightbox img { max-width: 90vw; max-height: 90vh; }
+.vault { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: calc(100vh - 96px); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+.vault-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); padding: 10px; gap: 8px; }
+.vault-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.vault-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vault-views { display: flex; gap: 4px; flex: none; }
+.vault-views a { padding: 2px 8px; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: .85rem; }
+.vault-views a.active { background: var(--hover); color: var(--ink); }
+#vault-filter { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
+.vault-tags a { display: inline-block; margin: 2px 4px 2px 0; font-size: .85rem; text-decoration: none; }
+.vault-tags a.active { font-weight: 600; }
+.vault-clip form { display: grid; gap: 6px; margin-top: 6px; }
+.vault-list { flex: 1; min-height: 0; overflow: auto; }
+.vault-group > summary { color: var(--muted); font-size: .8rem; font-weight: 600; padding: 8px 4px 4px; cursor: pointer; }
+.vault-row { display: block; padding: 4px 8px 4px 18px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vault-row[hidden], .vault-group[hidden] { display: none; }
+.vault-list a.vault-row { color: var(--ink); }
+.vault-note ul { list-style: disc; padding-left: 1.4em; }
+.vault-note ol { list-style: decimal; padding-left: 1.4em; }
+.vault-note p { margin: 0 0 .8em; }
+.vault-note h1, .vault-note h2, .vault-note h3 { margin: 1.2em 0 .5em; }
+.vault-row:hover { background: var(--hover); }
+.vault-row.active { background: var(--user); }
+.vault-main { min-width: 0; overflow: auto; padding: 14px 28px 40px; }
+.vault-crumbs { color: var(--muted); font-size: .85rem; margin: 0 0 8px; }
+.vault-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 8px; }
+.vault-note { max-width: 760px; margin: 0 auto; line-height: 1.7; }
+.vault-note img, .vault-image { max-width: 100%; }
+.vault-pdf { width: 100%; height: calc(100% - 40px); border: 0; }
+@media (max-width: 800px) { .vault { grid-template-columns: 1fr; height: auto; } .vault-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 45vh; } }
 .file-viewer .viewer-frame { background: var(--panel); border-radius: 12px; width: min(1000px, 94vw); height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
 .file-viewer .viewer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .file-viewer .viewer-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1942,6 +2028,28 @@ NOTICES_JS = r"""
 })();
 """
 NOTICES_PATH = "/ui/assets/notices-" + _asset_hash(NOTICES_JS) + ".js"
+VAULT_JS = r"""
+(function () {
+  var box = document.getElementById("vault-filter");
+  if (!box) return;
+  function apply() {
+    var needle = box.value.trim().toLowerCase();
+    document.querySelectorAll(".vault-group").forEach(function (group) {
+      var any = false;
+      group.querySelectorAll(".vault-row").forEach(function (row) {
+        var show = !needle || (row.getAttribute("data-name") || "").indexOf(needle) >= 0;
+        row.hidden = !show;
+        if (show) any = true;
+      });
+      group.hidden = !any;
+    });
+  }
+  box.addEventListener("input", apply);
+  var active = document.querySelector(".vault-row.active");
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: "center" });
+})();
+"""
+VAULT_PATH = "/ui/assets/vault-" + _asset_hash(VAULT_JS) + ".js"
 CONN_JS = """
 "use strict";
 document.querySelectorAll("[data-copy]").forEach(function (button) {
@@ -1971,6 +2079,8 @@ def _static_asset(method: str, path: str) -> Page | None:
         return Page(200, APP_CSS, content_type="text/css; charset=utf-8", cache_control=_ASSET_CACHE)
     if path == NOTICES_PATH:
         return Page(200, NOTICES_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
+    if path == VAULT_PATH:
+        return Page(200, VAULT_JS, content_type="text/javascript; charset=utf-8", cache_control=_ASSET_CACHE)
     from ssios.library_page import LIBRARY_JS, library_script_path
 
     if path == library_script_path():
