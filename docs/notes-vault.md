@@ -14,6 +14,8 @@ This is the simpler choice when Obsidian and SSIOS run on the same Mac.
 
 The path may pass through a link, such as `~/Google Drive`. SSIOS follows it and stores the real folder, which for Google Drive is under `~/Library/CloudStorage/`. A vault in Google Drive or iCloud Drive should be set to stay on this Mac (Available offline, or Keep Downloaded). A file that only exists in the cloud is downloaded when it is read, which is slow, and it cannot be read at all without a connection.
 
+SSIOS keeps this cheap. `vault-set` only counts file names. The Notes list opens a note the first time it sees it and again only when its size or time changes; the title, source, and tags are kept in `accounts/<id>/vault-index.json`, not the text. So the first visit to Notes reads the start of every note once, and later visits read none. Chat looks in notes whose name, title, or tags match the question first, and gives up on the rest after about a second and a half, so a note that matches only in its body may be missed while the vault is still cloud-only.
+
 ## Keep two folders the same
 
 Use this when the Obsidian vault should stay a separate folder, for example one in iCloud Drive that other devices also use.

@@ -103,15 +103,33 @@ def _vault_notes(scope, query: str, limit: int = 2) -> list[tuple[str, str, str]
     terms = [term for term in search_terms(query) if len(term) >= 3 or re.search(r"[\u4e00-\u9fff]", term)]
     if not terms:
         return []
+    import time
+
+    from ssios.vault import list_notes
+
     settings = scope.plane.settings
     scored = []
     try:
-        paths = note_paths(settings, scope.account_id)[:800]
+        listed = list_notes(settings, scope.account_id)
     except SsiosError:
         return []
-    for rel in paths:
-        if rel == "Tasks.md":
+    del note_paths
+
+    def named(item: dict) -> int:
+        head = (item["path"] + " " + item["title"] + " " + " ".join(item.get("tags") or [])).casefold()
+        return sum(1 for term in terms if term in head)
+
+    # Notes whose name, title, or tags match are opened first. The rest are opened while time remains,
+    # so a vault on a cloud drive, where opening a note can mean downloading it, does not hold up the answer.
+    deadline = time.monotonic() + 1.5
+    for item in sorted(listed, key=named, reverse=True)[:800]:
+        rel = item["path"]
+        if rel in {"Tasks.md", "SSIOS/Tasks.md"}:
             continue
+        if time.monotonic() > deadline and len(scored) >= limit:
+            break
+        if time.monotonic() > deadline + 3:
+            break
         try:
             text = read_note(settings, scope.account_id, rel)
         except SsiosError:

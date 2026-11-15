@@ -120,10 +120,11 @@ def run_library_command(settings, args) -> int:
     account_id = str(account["id"])
     try:
         if args.command == "vault-set":
-            from ssios.vault import list_notes, set_vault
+            from ssios.vault import note_paths, set_vault
 
             where = set_vault(settings, account_id, args.path)
-            report: dict = {"vault": str(where), "notes": len(list_notes(settings, account_id))}
+            # Names only. Opening every note would download each one from a cloud drive.
+            report: dict = {"vault": str(where), "notes": len(note_paths(settings, account_id))}
         elif args.command == "vault-sync":
             from ssios.vault_sync import sync_vault
 

@@ -145,3 +145,44 @@ class VaultTreeTest(PlaneTest):
         self.assertFalse(mine.exists())
         set_vault(settings, account, "")
         self.assertEqual(account_vault(settings, account), self.root)
+
+
+class VaultIndexTest(PlaneTest):
+    def test_listing_opens_a_note_only_when_it_is_new_or_changed(self) -> None:
+        import os
+
+        import ssios.vault as vault
+
+        account = self.plane.accounts.add_member("ada", "other-horse-stable")["id"]
+        root = account_vault(self.plane.settings, account)
+        (root / "A").mkdir(parents=True)
+        (root / "A" / "one.md").write_text('---\ntitle: "One"\ntags: [alpha]\n---\nbody #beta\n', encoding="utf-8")
+        (root / "two.md").write_text("plain\n", encoding="utf-8")
+        opened: list[str] = []
+        real_open = os.open
+
+        def counting(path, flags, *args, **kwargs):
+            if str(path).endswith(".md"):
+                opened.append(Path(path).name)
+            return real_open(path, flags, *args, **kwargs)
+
+        vault_os = __import__("os")
+        vault_os.open = counting
+        self.addCleanup(setattr, vault_os, "open", real_open)
+        first = {item["path"]: item for item in list_notes(self.plane.settings, account)}
+        self.assertEqual(first["A/one.md"]["title"], "One")
+        self.assertEqual(first["A/one.md"]["tags"], ["alpha", "beta"])
+        self.assertEqual(sorted(opened), ["one.md", "two.md"])
+        opened.clear()
+        self.assertEqual({item["path"] for item in list_notes(self.plane.settings, account)}, set(first))
+        self.assertEqual(opened, [])
+        (root / "two.md").write_text('---\ntitle: "Two again"\n---\nlonger now\n', encoding="utf-8")
+        (root / "three.md").write_text("new\n", encoding="utf-8")
+        (root / "A" / "one.md").unlink()
+        second = {item["path"]: item for item in list_notes(self.plane.settings, account)}
+        self.assertEqual(sorted(opened), ["three.md", "two.md"])
+        self.assertEqual(set(second), {"two.md", "three.md"})
+        self.assertEqual(second["two.md"]["title"], "Two again")
+        index = (self.state / "accounts" / account / "vault-index.json").read_text(encoding="utf-8")
+        self.assertNotIn("longer now", index)
+        del vault

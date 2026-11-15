@@ -8,7 +8,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from ssios.errors import SsiosError
-from ssios.util import read_nofollow, write_nofollow
+from ssios.util import read_nofollow, walk_nofollow, write_nofollow
 
 _BLOCKED = {".ssios", ".ssios-demo", ".ssios-memfs"}
 _IMAGE_LIMIT = 6
@@ -160,24 +160,54 @@ def _tag_list(meta: dict, body: str) -> list[str]:
     return unique[:30]
 
 
+_HEAD_BYTES = 16_000
+
+
 def list_notes(settings, account_id: str) -> list[dict]:
+    """Title, folder, source, and tags of every note.
+
+    A note is opened only when it is new or its size or time changed. The rest comes from a small
+    index in the state directory, so a vault on a cloud drive is not read again on every page.
+    Only the first 16 KB of a note is read for its properties and tags.
+    """
+    import os
+
+    from ssios.util import read_json, write_json
+
     root = account_vault(settings, account_id)
+    index_path = Path(settings.state_dir) / "accounts" / account_id / "vault-index.json"
+    saved = read_json(index_path, {})
+    cache = saved.get("notes") if isinstance(saved, dict) and saved.get("root") == str(root) and isinstance(saved.get("notes"), dict) else {}
+    fresh: dict[str, dict] = {}
     notes = []
+    changed = False
     for rel in note_paths(settings, account_id):
         try:
-            text = read_nofollow(root, rel, limit=200_000).decode("utf-8", "replace")
-        except SsiosError:
+            info = os.lstat(root / rel)
+        except OSError:
             continue
-        meta, body = _split_frontmatter(text)
-        notes.append(
-            {
-                "path": rel,
-                "folder": rel.rsplit("/", 1)[0] if "/" in rel else "",
-                "title": str(meta.get("title") or Path(rel).stem),
-                "source": str(meta.get("source") or ""),
-                "tags": _tag_list(meta, body),
-            }
-        )
+        stamp = [info.st_mtime_ns, info.st_size]
+        row = cache.get(rel) if isinstance(cache.get(rel), dict) else None
+        if row is None or row.get("stamp") != stamp:
+            try:
+                path = walk_nofollow(root, rel, expect="file")
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    text = os.read(fd, _HEAD_BYTES).decode("utf-8", "replace")
+                finally:
+                    os.close(fd)
+            except (SsiosError, OSError):
+                continue
+            meta, body = _split_frontmatter(text)
+            row = {"stamp": stamp, "title": str(meta.get("title") or Path(rel).stem)[:200], "source": str(meta.get("source") or "")[:500], "tags": _tag_list(meta, body)}
+            changed = True
+        fresh[rel] = row
+        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or [])})
+    if changed or set(fresh) != set(cache):
+        try:
+            write_json(index_path, {"root": str(root), "notes": fresh})
+        except OSError:
+            pass
     return notes
 
 
