@@ -1319,7 +1319,8 @@ def _vault_view(plane, session: dict, *, rel: str = "", tag: str = "", view: str
                 found = resolve_link(plane.settings, account_id, chosen, url)
                 if not found:
                     return ""
-                kind = "note" if found.casefold().endswith(".md") else "asset"
+                # A note or a PDF opens in the right pane. A picture is served as the picture.
+                kind = "note" if found.casefold().endswith((".md", ".pdf")) else "asset"
                 return f"/ui/vault/{kind}?path=" + quote(found, safe="")
 
             meta, rendered = render_markdown(text, link_for=link_for)
@@ -1346,7 +1347,8 @@ def _vault_view(plane, session: dict, *, rel: str = "", tag: str = "", view: str
             src = html.escape("/ui/vault/asset?path=" + quote(chosen, safe=""), quote=True)
             shown_file = f'<iframe class="vault-pdf" src="{src}" title="{html.escape(chosen, quote=True)}"></iframe>' if chosen.casefold().endswith(".pdf") else f'<img class="vault-image" src="{src}" alt="">'
             main = f'<header class="vault-bar"><p class="vault-crumbs">{crumbs}</p></header>{shown_file}'
-    body = f'<div class="vault">{side}<section class="vault-main">{notice}{main}</section></div><script src="{VAULT_PATH}"></script>'
+    math = '<link rel="stylesheet" href="/ui/vendor/katex/katex.min.css"><script src="/ui/vendor/katex/katex.min.js"></script>' if 'class="math' in main else ""
+    body = f'{math}<div class="vault">{side}<section class="vault-main">{notice}{main}</section></div><script src="{VAULT_PATH}"></script>'
     return _page(session, "Notes", body, bleed=True)
 
 
@@ -1789,7 +1791,10 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .vault-note th { background: var(--hover); font-weight: 600; text-align: left; }
 .vault-note mark { background: var(--warn-bg); color: inherit; padding: 0 .15em; border-radius: 3px; }
 .vault-note .tag { color: var(--accent); background: var(--hover); border-radius: 999px; padding: 0 .5em; font-size: .88em; }
-.vault-note img, .vault-image { max-width: 100%; height: auto; border-radius: 6px; }
+.vault-note img, .vault-image { max-width: 100%; height: auto; border-radius: 6px; vertical-align: middle; }
+.vault-note img[height] { height: revert-layer; }
+.vault-note .math-block { display: block; margin: 0 0 1em; overflow-x: auto; text-align: center; }
+.vault-note .remote-image::before { content: "image: "; color: var(--muted); }
 .vault-pdf { width: 100%; height: calc(100vh - 170px); border: 0; }
 @media (max-width: 800px) { .vault { grid-template-columns: 1fr; height: auto; } .vault-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 45vh; } }
 .file-viewer .viewer-frame { background: var(--panel); border-radius: 12px; width: min(1000px, 94vw); height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -2092,6 +2097,14 @@ VAULT_JS = r"""
     });
   }
   box.addEventListener("input", apply);
+  if (window.katex) {
+    document.querySelectorAll(".vault-note .math").forEach(function (el) {
+      var tex = el.textContent || "";
+      try {
+        window.katex.render(tex, el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" });
+      } catch (err) { el.textContent = tex; }
+    });
+  }
   var active = document.querySelector(".vault-row.active");
   if (active && active.scrollIntoView) active.scrollIntoView({ block: "center" });
 })();

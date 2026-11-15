@@ -1,7 +1,8 @@
 """Markdown to safe HTML for notes, in the dialect Obsidian writes.
 
 Blocks: headings, rules, fenced code, quotes and callouts, nested lists, task lists, tables, paragraphs.
-Inline: bold, italic, strikethrough, highlight, code, links, images, wiki links, bare addresses, tags.
+Inline: bold, italic, strikethrough, highlight, code, links, images with a size, wiki links, bare addresses, tags.
+Math: $inline$, \\(inline\\), and $$display$$ are passed through for KaTeX on the page.
 
 Every piece of note text is escaped. HTML inside a note is shown as text, not run. A link is kept
 only when link_for returns an http(s) address or a path on this site's Notes pages.
@@ -19,6 +20,7 @@ _ITEM = re.compile(r"^(\s*)([-*+]|\d{1,9}[.)])(\s+|$)(.*)$")
 _TABLE_BAR = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
 _CALLOUT = re.compile(r"^\[!([A-Za-z-]+)\][+-]?\s*(.*)$")
 _SAFE_PREFIX = ("https://", "http://", "/ui/vault/")
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 _TRAIL = ".,;:!?。，、；：！？”’\"'"
 
 
@@ -48,6 +50,28 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
             lang = fence.group(2)
             attr = f' class="language-{html.escape(lang, quote=True)}"' if lang else ""
             out.append(f"<pre><code{attr}>" + html.escape("\n".join(code)) + "</code></pre>")
+            continue
+        opener = line.strip()
+        if opener.startswith("$$") or opener == "\\[":
+            close = "$$" if opener.startswith("$$") else "\\]"
+            first = opener[2:]
+            tex: list[str] = []
+            if close in first and first.strip() != "":
+                tex = [first[: first.index(close)]]
+                index += 1
+            else:
+                if first.strip():
+                    tex.append(first)
+                index += 1
+                while index < total and close not in lines[index]:
+                    tex.append(lines[index])
+                    index += 1
+                if index < total:
+                    tail = lines[index][: lines[index].index(close)]
+                    if tail.strip():
+                        tex.append(tail)
+                    index += 1
+            out.append('<div class="math math-block" data-display="1">' + html.escape("\n".join(tex).strip()) + "</div>")
             continue
         heading = _HEADING.match(line)
         if heading:
@@ -111,6 +135,8 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
 def _starts_block(lines: list[str], index: int) -> bool:
     line = lines[index]
     if _FENCE.match(line) or _HEADING.match(line) or line.lstrip().startswith(">") or _ITEM.match(line):
+        return True
+    if line.strip().startswith("$$") or line.strip() == "\\[":
         return True
     if _RULE.match(line):
         return True
@@ -233,10 +259,33 @@ def inline(text: str, link_for) -> str:
         return f"\x00{len(held) - 1}\x00"
 
     text = str(text or "").replace("\x00", "")
-    # A backslash keeps the next mark as a plain character.
-    text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~=<>])", lambda found: hold(html.escape(found.group(1))), text)
+    # Protected in this order: an escaped dollar, code, then math, so a backslash inside a formula is left alone.
+    text = text.replace("\\$", hold("$"))
     text = re.sub(r"(`+)(.+?)\1", lambda found: hold("<code>" + html.escape(found.group(2).strip()) + "</code>"), text)
-    text = re.sub(r"!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", lambda found: f"![]({found.group(1).strip().replace(' ', '%20')})", text)
+
+    def math(found) -> str:
+        tex = next(group for group in found.groups() if group is not None)
+        display = found.group(0).startswith("$$")
+        return hold(f'<span class="math" data-display="{1 if display else 0}">' + html.escape(tex.strip()) + "</span>")
+
+    text = re.sub(r"\$\$(.+?)\$\$", math, text)
+    text = re.sub(r"\\\((.+?)\\\)", math, text)
+    # One dollar opens a formula only when text follows it directly and the closing dollar is not followed by a digit,
+    # so "$12.50 and $3" stays as written.
+    text = re.sub(r"(?<![\w$])\$(?=[^\s$])([^$\n]*?[^\s$\\])\$(?![\w$])", math, text)
+    text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~=<>])", lambda found: hold(html.escape(found.group(1))), text)
+
+    def embed(found) -> str:
+        target = found.group(1).strip()
+        option = (found.group(2) or "").strip()
+        address = target.replace(" ", "%20")
+        if target.casefold().split("#", 1)[0].endswith(_IMAGE_SUFFIXES):
+            size = option if re.fullmatch(r"\d{1,4}(x\d{1,4})?", option) else ""
+            return f"![{'|' + size if size else ''}]({address})"
+        # A note or a PDF placed in a note is shown as a link to it.
+        return f"[{option or target}]({address})"
+
+    text = re.sub(r"!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]", embed, text)
     text = re.sub(
         r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]",
         lambda found: f"[{(found.group(2) or found.group(1)).strip()}]({found.group(1).strip().replace(' ', '%20')})",
@@ -245,10 +294,20 @@ def inline(text: str, link_for) -> str:
 
     def linkish(found) -> str:
         if found.group(2) is not None:
-            alt = html.escape(found.group(1) or "")
+            label = found.group(1) or ""
+            size = ""
+            sized = re.fullmatch(r"(?:(.*)\|)?(\d{1,4})(?:x(\d{1,4}))?", label)
+            if sized:
+                label = sized.group(1) or ""
+                size = f' width="{int(sized.group(2))}"' + (f' height="{int(sized.group(3))}"' if sized.group(3) else "")
+            alt = html.escape(label)
             href = link_for(found.group(2).replace("%20", " "))
-            if href and href.startswith(_SAFE_PREFIX):
-                return hold(f'<img alt="{alt}" src="{html.escape(href, quote=True)}" loading="lazy">')
+            if href and href.startswith("/ui/vault/"):
+                return hold(f'<img alt="{alt}" src="{html.escape(href, quote=True)}"{size} loading="lazy">')
+            if href and href.startswith(("https://", "http://")):
+                # The page loads nothing from other sites, so a picture kept on the web is a link, not a broken image.
+                shown = alt or html.escape(href.split("/")[2])
+                return hold(f'<a class="remote-image" href="{html.escape(href, quote=True)}" rel="noopener noreferrer">{shown}</a>')
             return hold(alt)
         if found.group(4) is not None:
             label = _emphasis(html.escape(found.group(3)))

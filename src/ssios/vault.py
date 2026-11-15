@@ -249,7 +249,7 @@ def read_asset(settings, account_id: str, rel: str) -> tuple[bytes, str]:
         return data, "application/pdf"
     path = _safe_rel(rel, tuple(_IMAGE_KINDS))
     suffix = Path(path).suffix.lower()
-    data = read_nofollow(account_vault(settings, account_id), path, limit=4_000_000)
+    data = read_nofollow(account_vault(settings, account_id), path, limit=25_000_000)
     kind = _image_ext(data)
     if kind != suffix.lstrip(".") and not (kind == "jpg" and suffix == ".jpeg"):
         raise SsiosError("path_rejected", "asset type rejected", 400)
@@ -262,12 +262,13 @@ def resolve_link(settings, account_id: str, current: str, target: str) -> str:
     if not text or text.startswith("/") or ".." in text.split("/"):
         return ""
     root = account_vault(settings, account_id)
-    image = text.casefold().endswith(tuple(_IMAGE_KINDS))
+    files = tuple(_IMAGE_KINDS) + (".pdf",)
+    image = text.casefold().endswith(files)
     name = text if image or text.casefold().endswith(".md") else text + ".md"
     folder = current.rsplit("/", 1)[0] if "/" in current else ""
     for candidate in ((folder + "/" + name) if folder else name, name):
         try:
-            safe = _safe_rel(candidate, tuple(_IMAGE_KINDS) if image else (".md",))
+            safe = _safe_rel(candidate, files if image else (".md",))
         except SsiosError:
             continue
         if (root / safe).is_file() and not (root / safe).is_symlink():

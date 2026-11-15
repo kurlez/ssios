@@ -85,3 +85,28 @@ class MarkdownTest(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", out)
         self.assertEqual(render("- " * 400 + "deep\n", _link).count("<ul>") <= 13, True)
         self.assertEqual(inline("\x000\x00 **b**", _link), "0 <strong>b</strong>")
+
+
+class MathAndImageTest(unittest.TestCase):
+    def test_math_is_passed_through_for_katex_and_prices_are_left_alone(self) -> None:
+        out = inline(r"质能 $E=mc^2$ 与 \(a_b\)，价格 $12.50 and $3，\$5，`$x$`，$$\frac{a}{b}$$", _link)
+        self.assertIn('<span class="math" data-display="0">E=mc^2</span>', out)
+        self.assertIn('<span class="math" data-display="0">a_b</span>', out)
+        self.assertIn("价格 $12.50 and $3，$5，<code>$x$</code>", out)
+        self.assertIn('<span class="math" data-display="1">\\frac{a}{b}</span>', out)
+        self.assertEqual(inline(r"$a_1 * b_2 * c$ and $x<y$", _link), '<span class="math" data-display="0">a_1 * b_2 * c</span> and <span class="math" data-display="0">x&lt;y</span>')
+        block = render("前文\n$$\n\\int_0^1 x^2\\,dx = \\frac{1}{3}\n$$\n后文\n\n$$a<b$$\n\n\\[\nx_1\n\\]\n", _link)
+        self.assertIn('<p>前文</p>\n<div class="math math-block" data-display="1">\\int_0^1 x^2\\,dx = \\frac{1}{3}</div>\n<p>后文</p>', block)
+        self.assertIn('<div class="math math-block" data-display="1">a&lt;b</div>', block)
+        self.assertIn('<div class="math math-block" data-display="1">x_1</div>', block)
+        self.assertNotIn("<script", render("$$\n</div><script>alert(1)</script>\n$$\n $<img src=x>$", _link))
+
+    def test_images_take_a_size_and_a_placed_note_is_a_link(self) -> None:
+        out = inline("![[Pasted image 2026.png|300]] ![[a.png|300x200]] ![[Note]] ![cap|120](b.png) ![远程](https://e.com/x.png) ![[a.png|not a size]]", _link)
+        self.assertIn('<img alt="" src="/ui/vault/asset?path=Pasted image 2026.png" width="300" loading="lazy">', out)
+        self.assertIn('<img alt="" src="/ui/vault/asset?path=a.png" width="300" height="200" loading="lazy">', out)
+        self.assertIn('<a href="/ui/vault/note?path=Note" rel="noopener noreferrer">Note</a>', out)
+        self.assertIn('<img alt="cap" src="/ui/vault/asset?path=b.png" width="120" loading="lazy">', out)
+        self.assertIn('<a class="remote-image" href="https://e.com/x.png" rel="noopener noreferrer">远程</a>', out)
+        self.assertNotIn('src="https://', out)
+        self.assertTrue(out.endswith('<img alt="" src="/ui/vault/asset?path=a.png" loading="lazy">'))
