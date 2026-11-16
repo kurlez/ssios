@@ -249,18 +249,60 @@ def daily_note(settings, account_id: str, when: datetime) -> tuple[str, bool]:
     return rel, True
 
 
-def _new_target(original: str, new_rel: str, resolver, source: str, kind: str) -> str:
+def link_settings(settings, account_id: str) -> dict:
+    """How Obsidian is set to write links: shortest, relative, or absolute paths, wiki or Markdown, and whether renames update them."""
+    app = obsidian_setting(settings, account_id, "app")
+    fmt = str(app.get("newLinkFormat") or "shortest")
+    return {
+        "format": fmt if fmt in {"shortest", "relative", "absolute"} else "shortest",
+        "markdown": bool(app.get("useMarkdownLinks")),
+        "update": app.get("alwaysUpdateLinks") is not False,
+    }
+
+
+def link_path(target_rel: str, source: str, resolver, fmt: str, *, markdown: bool) -> str:
+    """The path a new link to target_rel is written with, from source."""
+    note = target_rel.casefold().endswith(".md")
+    folder = source.rsplit("/", 1)[0] if "/" in source else ""
+    if markdown:
+        path = posixpath.relpath(target_rel, folder or ".") if fmt != "absolute" else target_rel
+        return path.replace(" ", "%20")
+    shown = target_rel[:-3] if note else target_rel
+    if fmt == "absolute":
+        return shown
+    if fmt == "relative":
+        return posixpath.relpath(shown, folder or ".")
+    if resolver.unique_name(target_rel):
+        return shown.rsplit("/", 1)[-1]
+    return shown
+
+
+def link_text(target_rel: str, source: str, resolver, link: dict, *, embed: bool = False, label: str = "") -> str:
+    path = link_path(target_rel, source, resolver, link["format"], markdown=link["markdown"])
+    mark = "!" if embed else ""
+    if link["markdown"]:
+        shown = label or target_rel.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        return f"{mark}[{'' if embed else shown}]({path})"
+    return f"{mark}[[{path}{'|' + label if label else ''}]]"
+
+
+def _new_target(original: str, new_rel: str, resolver, source: str, kind: str, fmt: str = "shortest") -> str:
     stem = new_rel[:-3]
     if kind == "md":
         folder = source.rsplit("/", 1)[0] if "/" in source else ""
         relative = posixpath.relpath(new_rel, folder or ".")
         return relative.replace(" ", "%20")
+    if fmt == "absolute" or "/" in original and fmt == "shortest" and not resolver.unique_name(new_rel):
+        return stem
+    if fmt == "relative":
+        folder = source.rsplit("/", 1)[0] if "/" in source else ""
+        return posixpath.relpath(stem, folder or ".")
     if "/" not in original and resolver.unique_name(new_rel):
         return stem.rsplit("/", 1)[-1]
     return stem
 
 
-def rename_note(settings, account_id: str, old: str, new: str) -> dict:
+def rename_note(settings, account_id: str, old: str, new: str, *, update_links: bool = True) -> dict:
     """Rename or move a note and rewrite the links that point to it, as Obsidian does with Automatically update internal links."""
     from ssios.notes_index import WIKI, MDLINK, Resolver, forget, links_in, read_texts
     from ssios.vault import list_attachments, list_notes
@@ -279,8 +321,11 @@ def rename_note(settings, account_id: str, old: str, new: str) -> dict:
     texts, _missed = read_texts(settings, account_id, [row["path"] for row in notes], budget=600)
     after_rows = [dict(row, path=new) if row["path"] == old else row for row in notes]
     after = Resolver(after_rows, attachments)
+    fmt = link_settings(settings, account_id)["format"]
     edits: dict[str, str] = {}
     for source, text in texts.items():
+        if not update_links and source != old:
+            continue
         spans = []
         for link in links_in(text):
             if not link["target"]:
@@ -299,7 +344,7 @@ def rename_note(settings, account_id: str, old: str, new: str) -> dict:
         for link in spans:
             start, end = link["span"]
             piece = text[start:end]
-            target = _new_target(link["target"], link["to"], after, where, link["kind"])
+            target = _new_target(link["target"], link["to"], after, where, link["kind"], fmt)
             fragment = ("#" + link["fragment"]) if link["fragment"] else ""
             if link["kind"] == "wiki":
                 found = WIKI.fullmatch(piece)
@@ -428,3 +473,39 @@ def toggle_bookmark(settings, account_id: str, rel: str) -> bool:
         on = True
     write_json(path, {"paths": paths[:300]})
     return on
+
+
+def link_mention(settings, account_id: str, source: str, target: str) -> bool:
+    """Turn the first plain mention of target's name or alias in source into a link, as Obsidian's Link button does."""
+    from ssios.notes_index import MDLINK, WIKI, Resolver, mask_code
+    from ssios.vault import list_attachments, list_notes, read_note
+
+    source = _note_rel(source)
+    target = _note_rel(target)
+    notes = list_notes(settings, account_id)
+    resolver = Resolver(notes, list_attachments(settings, account_id))
+    text = read_note(settings, account_id, source)
+    stem = target[:-3].rsplit("/", 1)[-1]
+    aliases = next((row.get("aliases") or [] for row in notes if row["path"] == target), [])
+    masked = mask_code(text)
+    masked = WIKI.sub(lambda found: " " * len(found.group(0)), masked)
+    masked = MDLINK.sub(lambda found: " " * len(found.group(0)), masked)
+    from ssios.vault import _split_frontmatter
+
+    head = len(text) - len(_split_frontmatter(text)[1])
+    best = None
+    for name in [stem, *[str(alias) for alias in aliases]]:
+        if not name:
+            continue
+        pattern = re.escape(name) if re.search(r"[\u3400-\u9fff]", name) else r"(?<![\w])" + re.escape(name) + r"(?![\w])"
+        found = re.compile(pattern, re.I).search(masked, head)
+        if found and (best is None or found.start() < best.start()):
+            best = found
+    if best is None:
+        return False
+    seen = text[best.start() : best.end()]
+    path = link_path(target, source, resolver, link_settings(settings, account_id)["format"], markdown=False)
+    label = "" if seen == path.rsplit("/", 1)[-1] else seen
+    replaced = f"[[{path}{'|' + label if label else ''}]]"
+    write_note(settings, account_id, source, text[: best.start()] + replaced + text[best.end() :], content_hash(text))
+    return True

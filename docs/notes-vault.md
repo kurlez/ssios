@@ -1,5 +1,23 @@
 # Notes and an Obsidian vault
 
+## The Notes page
+
+Three panes, as in Obsidian.
+
+- **Left**: Files (the folder tree), Recent, Search, Tags, and Bookmarks. `+ New` makes a note, with a template if Obsidian's Templates folder is set. `Today` opens the daily note. `Graph` shows the vault's links. Drag a note onto a folder to move it.
+- **Middle**: the note. `Edit` (Ctrl+E) opens the source with a live preview beside it. Ctrl+S saves. Typing `[[` suggests notes. A pasted image is saved as an attachment. `⋯` has Remind me to read, Rename or move, and Move to trash.
+- **Right**: Outline, Backlinks with the line that links, Unlinked mentions with a Link button, Outgoing links, and a local graph. Hover over a link to see the start of that note.
+
+Shortcuts: Ctrl+O (or Cmd+O) quick switcher, Ctrl+Shift+F search, Ctrl+E read or edit, Ctrl+S save.
+
+Search takes words, `"a phrase"`, `-exclude`, `tag:name`, `path:folder`, `file:name`, and `OR`. A note opened from the results has the words marked.
+
+What SSIOS reads from `.obsidian`, without ever writing it: where new notes and attachments go, the daily-note folder, format, and template, the template folder, the link format (`newLinkFormat`, `useMarkdownLinks`, `alwaysUpdateLinks`), Excluded files, and bookmarks.
+
+Saving is safe against another editor. A save carries the version it started from. If the file changed on disk in the meantime, for example because Obsidian saved it, nothing is written and both versions are shown. Trash moves a note into the vault's `.trash`, where Obsidian's own trash keeps it.
+
+Renaming a note reads every note to update links, so on a vault that is still downloading from a cloud drive it can take a while.
+
 Notes is an Obsidian vault on this computer. There are two ways to use it with a vault you already have. Both were tested on Linux with temporary folders, not with Obsidian running on a Mac.
 
 ## Use the Obsidian folder itself

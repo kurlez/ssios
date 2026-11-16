@@ -259,6 +259,11 @@ class VaultView:
         self.budget = budget
         self._texts: dict[str, str] | None = None
         self.missed = 0
+        self.excluded = _excluded(settings, account_id)
+
+    def shown(self, rel: str) -> bool:
+        """False for a note in Obsidian's Excluded files. It stays in the file tree and out of search, graph, mentions, and the switcher."""
+        return not any(rule(rel) for rule in self.excluded)
 
     def texts(self) -> dict[str, str]:
         if self._texts is None:
@@ -295,7 +300,7 @@ class VaultView:
             return []
         rows = []
         for source, text in self.texts().items():
-            if source == rel or source in linked:
+            if source == rel or source in linked or not self.shown(source):
                 continue
             masked = WIKI.sub(lambda found: " " * len(found.group(0)), mask_code(text))
             masked = MDLINK.sub(lambda found: " " * len(found.group(0)), masked)
@@ -338,7 +343,7 @@ class VaultView:
                         edges.add(pair)
                         degree[source] = degree.get(source, 0) + 1
                         degree[hit] = degree.get(hit, 0) + 1
-        chosen = sorted((row["path"] for row in self.notes), key=lambda rel: -degree.get(rel, 0))[:limit]
+        chosen = sorted((row["path"] for row in self.notes if self.shown(row["path"])), key=lambda rel: -degree.get(rel, 0))[:limit]
         index = {rel: number for number, rel in enumerate(chosen)}
         return {
             "nodes": [{"path": rel, "title": self.title(rel), "degree": degree.get(rel, 0)} for rel in chosen],
@@ -347,6 +352,19 @@ class VaultView:
         }
 
     def search(self, query: str, limit: int = 60) -> dict:
+        parts = [part for part in re.split(r"\s+OR\s+", str(query or "")) if part.strip()]
+        if len(parts) > 1:
+            # Either side may match, as in Obsidian. A note found by both keeps its better score.
+            merged: dict[str, dict] = {}
+            for part in parts[:6]:
+                for row in self._search_one(part, limit * 2)["results"]:
+                    if row["path"] not in merged or row["score"] > merged[row["path"]]["score"]:
+                        merged[row["path"]] = row
+            rows = sorted(merged.values(), key=lambda row: (-row["score"], row["title"].casefold()))
+            return {"results": rows[:limit], "total": len(rows), "missed": self.missed, "terms": parse_query(" ".join(parts))}
+        return self._search_one(query, limit)
+
+    def _search_one(self, query: str, limit: int) -> dict:
         terms = parse_query(query)
         if not any(terms.values()):
             return {"results": [], "missed": 0, "terms": terms}
@@ -354,6 +372,8 @@ class VaultView:
         rows = []
         for note in self.notes:
             rel = note["path"]
+            if not self.shown(rel):
+                continue
             title = str(note.get("title") or "")
             folded_path = rel.casefold()
             tags = [str(tag).casefold() for tag in note.get("tags") or []]
@@ -377,6 +397,26 @@ class VaultView:
             rows.append({"path": rel, "title": title or rel, "score": score, "snippets": snippets, "hits": sum(body.count(needle) for needle in needles)})
         rows.sort(key=lambda row: (-row["score"], row["title"].casefold()))
         return {"results": rows[:limit], "total": len(rows), "missed": self.missed if texts else 0, "terms": terms}
+
+
+def _excluded(settings, account_id: str) -> list:
+    """Obsidian's Files and links > Excluded files: a folder or file prefix, or a /regular expression/."""
+    from ssios.notes_edit import obsidian_setting
+
+    rules = []
+    for raw in obsidian_setting(settings, account_id, "app").get("userIgnoreFilters") or []:
+        text = str(raw or "").strip()
+        if not text or len(text) > 200:
+            continue
+        if len(text) > 2 and text.startswith("/") and text.endswith("/"):
+            try:
+                pattern = re.compile(text[1:-1])
+            except re.error:
+                continue
+            rules.append(lambda rel, pattern=pattern: bool(pattern.search(rel)))
+        else:
+            rules.append(lambda rel, prefix=text: rel.startswith(prefix))
+    return rules[:50]
 
 
 def parse_query(query: str) -> dict:

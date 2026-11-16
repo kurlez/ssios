@@ -30,3 +30,43 @@ Branch `claude/epic-bardeen-zdd6j2`. Obsidian here means the desktop app with it
 | 8 | Vault compatibility | 7 / 8 | Reads the vault in place, `.obsidian` untouched, `vault-set` and `vault-sync`, index for cloud vaults. Ignores Obsidian's daily-note, template, attachment, and bookmark settings |
 | 9 | Interface | 4 / 7 | Two panes with a sticky note bar. No right-hand pane, no shortcuts, the layout stacks on a phone but the list is long |
 | | **Total** | **36 / 100** | |
+
+## Round 1: three panes, editor, search, backlinks, graph
+
+| # | Area | Score | What changed, and what is still missing |
+| --- | --- | --- | --- |
+| 1 | Rendering | 13 / 15 | Heading anchors, embedded notes, sections, blocks, and PDFs, footnotes, foldable callouts, `%%comments%%`, code highlighting for common languages. Mermaid shown as source only |
+| 2 | Navigation | 8.5 / 10 | Folder tree that remembers what is open, Recent, quick switcher with aliases (Ctrl+O), Bookmarks including Obsidian's, shortcuts. No drag to move, panes cannot be hidden |
+| 3 | Search | 10 / 12 | Full text with marked snippets, phrases, `-word`, `tag:`, `path:`, `file:`, partial results reported on a cloud vault. No OR, hits not marked in the opened note |
+| 4 | Linking | 12.5 / 15 | Resolution by path, name, and alias; heading and block links; backlinks with the linking line; unlinked mentions; outgoing links; an unresolved link opens a page that creates the note. No `[[` autocomplete |
+| 5 | Editing | 14 / 18 | Source editor with live preview beside it, Ctrl+S, save refused when the file changed on disk with both versions shown, new note, daily note, templates, rename with link updates, trash, pasted images. No autocomplete, no inline live preview, Obsidian's link settings ignored |
+| 6 | Structure | 9 / 10 | Nested tags pane with counts, properties with lists and tag chips, clickable outline. Properties are edited as text |
+| 7 | Graph | 3.5 / 5 | Local graph in the right pane and a force-laid graph of the vault with pan, zoom, and click. No colours, filters, or orphan switch |
+| 8 | Vault compatibility | 7.5 / 8 | Obsidian's new-note location, attachment folder, daily notes, templates, and bookmarks are read. A test checks `.obsidian` is never written. Link format settings ignored |
+| 9 | Interface | 5.5 / 7 | Three panes, no overflow at phone width, per-request time limits and an in-process text cache. Panes cannot be hidden |
+| | **Total** | **83.5 / 100** | |
+
+## Round 2: closing the gaps round 1 left
+
+| # | Area | Score | What changed, and what is still missing |
+| --- | --- | --- | --- |
+| 1 | Rendering | 14 / 15 | Mermaid drawn by the vendored Mermaid 10.9.1, with its source one click away. Inline footnotes `^[...]`, block IDs on list items. Highlighting covers about twenty languages in six families, not every language Obsidian's Prism does |
+| 2 | Navigation | 9 / 10 | Drag a note onto a folder to move it, links updated. Hide either side pane. Still no tabs or split view |
+| 3 | Search | 11 / 12 | `OR`, and the words searched are marked and scrolled to in the note opened from a result. No regular expressions or `line:` and `section:` operators |
+| 4 | Linking | 14.5 / 15 | `[[` autocomplete in the editor, written in Obsidian's link format. A Link button turns an unlinked mention into a link. Hover over a link to see the note's start or the linked section. No heading autocomplete after `#` |
+| 5 | Editing | 15.5 / 18 | Autocomplete, pasted images and renames follow `newLinkFormat` and `useMarkdownLinks`, and a rename can leave other notes alone, as `alwaysUpdateLinks` allows. Still no inline live preview, no form for properties, and folders cannot be renamed or removed from the page |
+| 6 | Structure | 9 / 10 | Unchanged |
+| 7 | Graph | 4.5 / 5 | Colour by top folder with a legend, orphan switch, filter, all labels. No custom groups or local-graph depth |
+| 8 | Vault compatibility | 8 / 8 | Link format, Markdown links, and update-links settings are honoured, and Excluded files are left out of search, graph, mentions, and the switcher, as in Obsidian |
+| 9 | Interface | 6 / 7 | Pane toggles kept per browser, autocomplete drops stale answers. Pane widths are fixed |
+| | **Total** | **91 / 100** | |
+
+### How this was checked
+
+- `tests/test_notes_app.py` covers resolution, backlinks, mentions, outline, sections, search, saves and conflicts, line endings, daily notes and templates from Obsidian's settings, rename with link updates, trash, attachments, bookmarks, link formats, excluded files, hover preview, and every new route. Each test ends by checking that `.obsidian` was not changed.
+- A browser (Chromium through Playwright) opened a synthetic 45-note vault and checked: the three panes, an embedded section, an unresolved link, the quick switcher by keyboard, Ctrl+E and Ctrl+S, the live preview with math, search marks in the opened note, pane toggles, `[[` autocomplete inserting `[[Hot wallet]]`, dragging a note into another folder, the Mermaid diagram drawn as SVG under the page's content policy, the hover preview, the graph with filter and legend, and no horizontal scroll at 390 px. No script errors were logged.
+- Not checked: Safari, a real Obsidian vault, a vault on Google Drive, and two people editing the same note at once.
+
+### What would move the score further
+
+Inline live preview (editing in the rendered note), a properties form, folder rename and delete, tabs, `#heading` autocomplete, and regular-expression search.

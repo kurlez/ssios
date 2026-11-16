@@ -68,6 +68,7 @@ Setup for the steps is in [mac-e2e-test.md](mac-e2e-test.md). Record the commit,
 
 - [ ] The Notes page with the real vault: the left list scrolls on its own, Recent and Folders both work, the filter narrows the list, a PDF opens in the right pane in Safari and Chrome, and the first visit and a second visit are timed.
 - [ ] `vault-set` to a copy of a real Obsidian vault. The Notes page shows its folders and tags, links between notes open, embedded images show, and `.obsidian` is not listed. After a clip and a task change, only `Clippings/` and `SSIOS/Tasks.md` are new in the vault.
+- [ ] Notes with the real vault in Safari and Chrome: edit a note in SSIOS while Obsidian has it open, save in Obsidian, then save in SSIOS, and SSIOS shows the conflict with both versions. Rename a note that others link to and check the links in Obsidian. A Mermaid diagram and a formula draw. `.obsidian` is unchanged afterwards.
 - [ ] `vault-sync --dry-run`, then a real sync, against a copy of a real vault. Edit one note in Obsidian and one in SSIOS, sync, and both edits arrive. Edit the same note on both sides and both versions are kept. Delete a note in Obsidian and the Notes copy is in `.trash`. `.obsidian` is unchanged.
 - [ ] Analyze a file without opening it, ask chat about its content, and the answer does not use it. Open the file, ask again, and Technical details lists its note.
 - [ ] Run `memory-prune-unread` once after the upgrade and record the counts.

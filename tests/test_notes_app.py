@@ -297,3 +297,89 @@ class PageTest(VaultCase):
         status, bad, _cookie = _form(self.base, "/ui/vault/note", {"csrf": csrf, "op": "create", "name": "x", "folder": ".obsidian"}, cookie=self.cookie)
         self.assertEqual(status, 400)
         self.assertFalse(any(path.name == "x.md" for path in (self.root / ".obsidian").iterdir()))
+
+
+class RoundTwoTest(VaultCase):
+    def test_search_or_and_obsidian_link_settings(self) -> None:
+        view = self.view()
+        self.assertEqual(sorted(row["path"] for row in view.search("lantern OR mentioned")["results"]), ["Archive/Budget.md", "Projects/Harbor/Budget.md"])
+        settings = self.plane.settings
+        resolver = view.resolver
+        shortest = {"format": "shortest", "markdown": False, "update": True}
+        self.assertEqual(notes_edit.link_text("Projects/Harbor/Plan.md", "Journal.md", resolver, shortest), "[[Plan]]")
+        self.assertEqual(notes_edit.link_text("Projects/Harbor/Budget.md", "Journal.md", resolver, shortest), "[[Projects/Harbor/Budget]]")
+        self.assertEqual(notes_edit.link_text("Projects/Harbor/Plan.md", "Archive/Budget.md", resolver, dict(shortest, format="relative")), "[[../Projects/Harbor/Plan]]")
+        self.assertEqual(notes_edit.link_text("pics/dock.png", "Projects/Harbor/Plan.md", resolver, dict(shortest, markdown=True), embed=True), "![](../../pics/dock.png)")
+        self.assertEqual(notes_edit.link_settings(settings, self.account_id), shortest)
+        self.write(".obsidian/app.json", json.dumps({"newLinkFormat": "absolute", "useMarkdownLinks": True, "alwaysUpdateLinks": False}))
+        self.obsidian_before = self._snapshot(self.root / ".obsidian")
+        self.assertEqual(notes_edit.link_settings(settings, self.account_id), {"format": "absolute", "markdown": True, "update": False})
+
+    def test_link_a_mention_and_rename_without_updating_links(self) -> None:
+        settings = self.plane.settings
+        self.assertTrue(notes_edit.link_mention(settings, self.account_id, "Archive/Budget.md", "Projects/Harbor/Plan.md"))
+        self.assertEqual((self.root / "Archive/Budget.md").read_text(encoding="utf-8"), "Old budget. The [[Plan|Harbor plan]] is mentioned here without a link.\n")
+        self.assertFalse(notes_edit.link_mention(settings, self.account_id, "Archive/Budget.md", "Projects/Harbor/Plan.md"))
+        before = (self.root / "Journal.md").read_text(encoding="utf-8")
+        result = notes_edit.rename_note(settings, self.account_id, "Projects/Harbor/Plan.md", "Projects/Harbor/Plan two.md", update_links=False)
+        self.assertEqual(result["updated"], [])
+        self.assertEqual((self.root / "Journal.md").read_text(encoding="utf-8"), before)
+
+    def test_inline_footnotes_list_block_ids_and_mermaid_markup(self) -> None:
+        from ssios.markdown_render import render
+
+        out = render("- item ^li\n\nText^[inline] and[^a].\n\n[^a]: defined\n\n```mermaid\ngraph TD; A-->B\n```\n", lambda url: "/ui/vault/note?path=" + url)
+        self.assertIn('<li id="block-li">item</li>', out)
+        self.assertIn('<a href="#fn-1" id="fnref-1">1</a>', out)
+        self.assertIn('<li id="fn-1">inline ', out)
+        self.assertIn('<li id="fn-2">defined ', out)
+        self.assertIn('<pre class="mermaid">graph TD; A--&gt;B</pre>', out)
+
+
+class RoundTwoPageTest(PageTest):
+    def test_mermaid_is_served_and_moves_by_drag_answer_in_json(self) -> None:
+        import urllib.request
+
+        request = urllib.request.Request(self.base + "/ui/vendor/mermaid/mermaid.min.js", headers={"Cookie": self.cookie})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertTrue(response.headers.get("Content-Type", "").startswith("text/javascript"))
+            self.assertGreater(len(response.read()), 1_000_000)
+        status, page = _get(self.base, "/ui/vault/note?path=Archive%2FBudget.md", self.cookie)
+        csrf = self.csrf(page)
+        self.assertIn('value="link-mention"', page.split('Unlinked mentions', 1)[0] + _get(self.base, "/ui/vault/note?path=Projects%2FHarbor%2FPlan.md", self.cookie)[1])
+        status, reply = self.post_json("/ui/vault/note", {"csrf": csrf, "op": "rename", "ajax": "1", "path": "Archive/Budget.md", "new_path": "Projects/Old budget", "update_links": "1"})
+        self.assertEqual(json.loads(reply), {"ok": True, "path": "Projects/Old budget.md", "updated": 0})
+        status, edit = _get(self.base, "/ui/vault/note?path=Journal.md&mode=edit", self.cookie)
+        self.assertIn('data-link-format="shortest" data-markdown="0"', edit)
+        self.assertIn("/ui/vendor/mermaid/mermaid.min.js", edit)
+
+
+class ExcludedAndPeekTest(PageTest):
+    def test_excluded_files_leave_search_graph_switcher_and_mentions(self) -> None:
+        self.write(".obsidian/app.json", json.dumps({"userIgnoreFilters": ["Archive/", "/^Jour/"]}))
+        self.obsidian_before = self._snapshot(self.root / ".obsidian")
+        view = self.view()
+        self.assertFalse(view.shown("Archive/Budget.md"))
+        self.assertFalse(view.shown("Journal.md"))
+        self.assertTrue(view.shown("Projects/Harbor/Plan.md"))
+        self.assertEqual([row["path"] for row in view.search("budget")["results"]], ["Projects/Harbor/Budget.md", "Projects/Harbor/Plan.md"])
+        self.assertNotIn("Journal.md", [node["path"] for node in view.graph()["nodes"]])
+        self.assertEqual(view.unlinked("Projects/Harbor/Plan.md", set()), [])
+        status, body = _get(self.base, "/ui/vault/index.json", self.cookie)
+        listed = [row["p"] for row in json.loads(body)]
+        self.assertNotIn("Archive/Budget.md", listed)
+        status, page = _get(self.base, "/ui/vault", self.cookie)
+        self.assertIn('data-path="Archive/Budget.md"', page)
+
+    def test_hover_preview_shows_the_start_or_one_section(self) -> None:
+        status, whole = _get(self.base, "/ui/vault/peek?path=Projects%2FHarbor%2FBudget.md", self.cookie)
+        self.assertEqual(status, 200)
+        self.assertIn('<h1 id="budget">Budget</h1>', whole)
+        status, part = _get(self.base, "/ui/vault/peek?path=Projects%2FHarbor%2FBudget.md&h=costs", self.cookie)
+        self.assertIn("4419", part)
+        self.assertNotIn("Nothing.", part)
+        import urllib.error
+
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            _get(self.base, "/ui/vault/peek?path=..%2Fsecrets.md", self.cookie)
+        self.assertEqual(refused.exception.code, 400)

@@ -136,8 +136,9 @@ def _group(now: datetime, stamp: float) -> str:
 def _row(item: dict, chosen: str, href: str, label: str) -> str:
     mark = " active" if item["path"] == chosen else ""
     kind = "" if item["path"].casefold().endswith(".md") else f' <span class="kind">{html.escape(item["path"].rsplit(".", 1)[-1].upper())}</span>'
+    drag = ' draggable="true"' if item["path"].casefold().endswith(".md") else ""
     return (
-        f'<a class="vault-row{mark}" href="{html.escape(href, quote=True)}" title="{html.escape(item["path"], quote=True)}" '
+        f'<a class="vault-row{mark}"{drag} data-path="{html.escape(item["path"], quote=True)}" href="{html.escape(href, quote=True)}" title="{html.escape(item["path"], quote=True)}" '
         f'data-name="{html.escape((label + " " + item["path"]).casefold(), quote=True)}">{html.escape(label)}{kind}</a>'
     )
 
@@ -230,7 +231,7 @@ def _local_graph(view, rel: str, outgoing: list[dict], backlinks: list[dict]) ->
     return f'<svg class="local-graph" viewBox="-60 0 {size + 120} {size}" role="img" aria-label="Local graph">{"".join(lines)}{"".join(nodes)}</svg>'
 
 
-def _info_pane(view, rel: str, text: str) -> str:
+def _info_pane(view, rel: str, text: str, csrf: str = "") -> str:
     from ssios.notes_index import outline
 
     heads = outline(text)
@@ -247,10 +248,13 @@ def _info_pane(view, rel: str, text: str) -> str:
     ]
     back_html = "".join(cards[:10]) + (f'<details class="more"><summary>{len(cards) - 10} more</summary>{"".join(cards[10:])}</details>' if len(cards) > 10 else "")
     back_html = back_html or '<p class="muted">No backlinks.</p>'
-    mentions = view.unlinked(rel, {row["path"] for row in back})
+    mentions = view.unlinked(rel, {row["path"] for row in back}) if rel.casefold().endswith(".md") else []
+    hidden = f'<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}"><input type="hidden" name="path" value="{html.escape(rel, quote=True)}">'
     mention_html = "".join(
         f'<div class="link-card"><a href="{html.escape(note_href(row["path"]), quote=True)}">{html.escape(row["title"])}</a>'
         + "".join(f'<p class="context">{html.escape(line)}</p>' for line in row["contexts"])
+        + f'<form method="post" action="/ui/vault/note">{hidden}<input type="hidden" name="source" value="{html.escape(row["path"], quote=True)}">'
+        '<button name="op" value="link-mention" type="submit" title="Turn this mention into a link">Link</button></form>'
         + "</div>"
         for row in mentions
     ) or '<p class="muted">None.</p>'
@@ -304,7 +308,7 @@ def _properties(props: dict, renderer: Renderer, rel: str) -> str:
     return f'<details class="vault-props" open><summary>Properties</summary><dl>{"".join(rows)}</dl></details>'
 
 
-def _note_tools(session, rel: str, depth: str, mode: str, starred: bool, keep: dict) -> str:
+def _note_tools(session, rel: str, depth: str, mode: str, starred: bool, keep: dict, update: bool = True) -> str:
     from ssios.reading import depth_label
 
     csrf = html.escape(str(session.get("csrf") or ""), quote=True)
@@ -328,7 +332,8 @@ def _note_tools(session, rel: str, depth: str, mode: str, starred: bool, keep: d
         '<option value="tomorrow" selected>tomorrow morning</option><option value="weekend">this weekend</option><option value="week">in a week</option></select></label>'
         '<button name="op" value="remind" type="submit">Set reminder</button></form>'
         f'<form method="post" action="/ui/vault/note">{hidden}<label>Rename or move to <input name="new_path" value="{path}" maxlength="300"></label>'
-        '<button name="op" value="rename" type="submit">Rename</button><p class="muted small">Links to this note in other notes are updated.</p></form>'
+        f'<label class="inline"><input type="checkbox" name="update_links" value="1"{" checked" if update else ""}> Update links in other notes</label>'
+        '<button name="op" value="rename" type="submit">Rename</button></form>'
         f'<form method="post" action="/ui/vault/note">{hidden}<label class="inline"><input type="checkbox" name="confirm" value="1" required> Move this note to the vault trash</label>'
         '<button name="op" value="trash" type="submit">Move to trash</button></form>'
         "</div></details></div>"
@@ -440,6 +445,7 @@ def _side(plane, session, view, chosen: str, mode_view: str, tag: str, query: st
         ) or '<p class="muted">No bookmarks. Use ☆ on a note.</p>'
     else:
         body = '<input id="vault-filter" type="search" placeholder="Filter files" aria-label="Filter files">' + _tree(items, chosen, keep)
+        body += '<p class="muted small tree-hint">Drag a note onto a folder to move it, or onto this list for the vault root.</p>'
     csrf = html.escape(str(session.get("csrf") or ""), quote=True)
     folder = new_note_folder(plane.settings, session["account"]["id"], chosen)
     options = "".join(f'<option value="{html.escape(rel, quote=True)}">{html.escape(rel)}</option>' for rel in templates(plane.settings, session["account"]["id"]))
@@ -466,7 +472,7 @@ def _side(plane, session, view, chosen: str, mode_view: str, tag: str, query: st
         '<aside class="vault-side">'
         f'<div class="vault-head"><strong title="Vault">{html.escape(vault_name)}</strong><span class="vault-actions">{new}</span></div>'
         f'<nav class="vault-tabs">{tabs}</nav>'
-        f'<div class="vault-list">{body}</div>{clip}</aside>'
+        f'<div class="vault-list"{" data-root" if mode_view == "files" else ""}>{body}</div>{clip}</aside>'
     )
 
 
@@ -514,7 +520,11 @@ def vault_page(plane, session: dict, query: dict, notice: str = "", *, editing: 
         payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
         main = (
             '<header class="vault-bar"><p class="vault-crumbs">Graph of the vault</p>'
-            f'<p class="muted small">{len(data["nodes"])} notes, {len(data["edges"])} links. Drag to move, scroll to zoom, click a note to open it.</p></header>'
+            '<span class="graph-controls"><input id="graph-filter" type="search" placeholder="Filter notes" aria-label="Filter notes">'
+            '<label class="inline"><input id="graph-orphans" type="checkbox" checked> Orphans</label>'
+            '<label class="inline"><input id="graph-labels" type="checkbox"> All labels</label></span>'
+            f'<p class="muted small">{len(data["nodes"])} notes, {len(data["edges"])} links. Colour is the top folder. Drag to move, scroll to zoom, click a note to open it.</p>'
+            '<div id="graph-legend" class="graph-legend"></div></header>'
             f'<canvas id="vault-graph" class="vault-graph" width="1200" height="800"></canvas><script type="application/json" id="graph-data">{payload}</script>'
         )
     elif rel and rel not in known and rel.casefold().endswith(".md"):
@@ -533,22 +543,31 @@ def vault_page(plane, session: dict, query: dict, notice: str = "", *, editing: 
         depth = ledger(plane.accounts.home(account_id)).get("note:" + rel, {}).get("depth") or "skimmed"
         starred = any(mark["path"] == rel for mark in bookmarks(plane.settings, account_id))
         crumbs = " / ".join(html.escape(part) for part in [vault_name] + rel[:-3].split("/"))
-        bar = f'<header class="vault-bar"><p class="vault-crumbs" title="{html.escape(rel, quote=True)}">{crumbs}</p>{_note_tools(session, rel, depth, mode, starred, keep)}</header>'
+        from ssios.notes_edit import link_settings
+
+        links = link_settings(plane.settings, account_id)
+        panes = '<span class="pane-toggles"><button type="button" data-pane="left" title="Show or hide the file list">◧</button><button type="button" data-pane="right" title="Show or hide links and outline">◨</button></span>'
+        bar = f'<header class="vault-bar">{panes}<p class="vault-crumbs" title="{html.escape(rel, quote=True)}">{crumbs}</p>{_note_tools(session, rel, depth, mode, starred, keep, links["update"])}</header>'
         if editing is not None or mode == "edit":
             state = editing or {}
-            main = bar + _editor(session, rel, state.get("text", text), state.get("base", _hash(text)), "", state.get("disk"))
+            main = bar + _editor(session, rel, state.get("text", text), state.get("base", _hash(text)), "", state.get("disk")).replace(
+                'id="note-editor"', f'id="note-editor" data-link-format="{links["format"]}" data-markdown="{1 if links["markdown"] else 0}"', 1
+            )
         else:
             first = next((line for line in body.splitlines() if line.strip()), "")
             title = "" if first.lstrip().startswith("# ") else f'<h1 class="vault-title">{html.escape(rel.rsplit("/", 1)[-1][:-3])}</h1>'
             main = f'{bar}<div class="vault-doc">{title}{_properties(props, renderer, rel)}<article class="vault-note">{renderer.render(rel, body)}</article></div>'
-        info = _info_pane(view, rel, text)
+        info = _info_pane(view, rel, text, str(session.get("csrf") or ""))
     elif rel:
         src = html.escape("/ui/vault/asset?path=" + _q(rel), quote=True)
         shown = f'<iframe class="vault-pdf" src="{src}" title="{html.escape(rel, quote=True)}"></iframe>' if rel.casefold().endswith(".pdf") else f'<img class="vault-image" src="{src}" alt="">'
         main = f'<header class="vault-bar"><p class="vault-crumbs">{html.escape(rel)}</p></header>{shown}'
         info = _info_pane(view, rel, "")
     # The editor's preview can show math the saved note does not have yet.
-    math = '<link rel="stylesheet" href="/ui/vendor/katex/katex.min.css"><script src="/ui/vendor/katex/katex.min.js"></script>' if ('class="math' in main or 'id="note-editor"' in main) else ""
+    editing_now = 'id="note-editor"' in main
+    math = '<link rel="stylesheet" href="/ui/vendor/katex/katex.min.css"><script src="/ui/vendor/katex/katex.min.js"></script>' if ('class="math' in main or editing_now) else ""
+    if 'class="mermaid"' in main or editing_now:
+        math += '<script src="/ui/vendor/mermaid/mermaid.min.js"></script>'
     css = " graph-mode" if mode_view == "graph" else ""
     body = (
         f'{math}<div class="vault{css}" data-csrf="{html.escape(str(session.get("csrf") or ""), quote=True)}" data-path="{html.escape(rel, quote=True)}" data-mode="{mode}">'
@@ -561,13 +580,45 @@ def vault_page(plane, session: dict, query: dict, notice: str = "", *, editing: 
 
 
 def index_json(plane, session: dict):
+    from ssios.notes_index import _excluded
     from ssios.ui import Page
     from ssios.vault import list_attachments, list_notes
 
     account_id = session["account"]["id"]
-    rows = [{"p": note["path"], "t": note.get("title") or "", "a": note.get("aliases") or []} for note in list_notes(plane.settings, account_id)]
+    rules = _excluded(plane.settings, account_id)
+    rows = [{"p": note["path"], "t": note.get("title") or "", "a": note.get("aliases") or []} for note in list_notes(plane.settings, account_id) if not any(rule(note["path"]) for rule in rules)]
     rows += [{"p": item["path"], "t": "", "a": []} for item in list_attachments(plane.settings, account_id)]
     return Page(200, json.dumps(rows, ensure_ascii=False), content_type="application/json; charset=utf-8")
+
+
+def peek(plane, session: dict, query: dict):
+    """A linked note's start, for the hover preview. Same account, same renderer, embeds one level deep."""
+    from ssios.notes_index import VaultView, section
+    from ssios.ui import Page
+    from ssios.vault import properties, read_note
+
+    account_id = session["account"]["id"]
+    rel = str(query.get("path") or "")
+    fragment = str(query.get("h") or "")
+    text = read_note(plane.settings, account_id, rel)
+    _props, body = properties(text)
+    if fragment:
+        body = section(text, fragment) or body
+    lines = body.split("\n")
+    kept, size = [], 0
+    for line in lines:
+        kept.append(line)
+        size += len(line)
+        if size > 2500:
+            kept.append("\n…")
+            break
+    view = VaultView(plane.settings, account_id, budget=0.2)
+    renderer = Renderer(plane, account_id, view)
+    from ssios.markdown_render import render
+
+    markup = render("\n".join(kept), renderer.link_for(rel), renderer.embed_for(rel, 2, (rel,)))
+    head = f'<div class="peek-title">{html.escape(rel[:-3] if rel.casefold().endswith(".md") else rel)}</div>'
+    return Page(200, head + f'<article class="vault-note">{markup}</article>', content_type="text/html; charset=utf-8")
 
 
 def preview(plane, session: dict, body: dict):
@@ -628,7 +679,10 @@ def note_post(plane, session: dict, body: dict, peer_ip: str):
         data = notes_edit.decode_image(str(body.get("data") or ""))
         saved = notes_edit.save_attachment(settings, account_id, rel, data, now)
         _audit(plane, session, peer_ip, "vault.attach")
-        return json_reply({"ok": True, "path": saved, "embed": "![[" + saved.rsplit("/", 1)[-1] + "]]"})
+        from ssios.notes_index import VaultView
+
+        embed = notes_edit.link_text(saved, rel, VaultView(settings, account_id, budget=0).resolver, notes_edit.link_settings(settings, account_id), embed=True)
+        return json_reply({"ok": True, "path": saved, "embed": embed})
     if op in {"create", "create-missing"}:
         if op == "create-missing":
             target = notes_edit.create_note(settings, account_id, rel)
@@ -654,8 +708,11 @@ def note_post(plane, session: dict, body: dict, peer_ip: str):
         parts = [notes_edit.clean_name(part) for part in new[:-3].split("/")] if new else []
         if not parts or any(not part for part in parts):
             raise SsiosError("note_rejected", "Give the note a name.", 400)
-        result = notes_edit.rename_note(settings, account_id, rel, "/".join(parts) + ".md")
+        update = str(body.get("update_links") or "") == "1"
+        result = notes_edit.rename_note(settings, account_id, rel, "/".join(parts) + ".md", update_links=update)
         _audit(plane, session, peer_ip, "vault.rename")
+        if ajax:
+            return json_reply({"ok": True, "path": result["path"], "updated": len(result["updated"])})
         notice = f'<p class="notice">Renamed. Links updated in {len(result["updated"])} notes.' + (f' {len(result["skipped"])} notes changed while renaming and were left as they were.' if result["skipped"] else "") + "</p>"
         return Page(200, vault_page(plane, session, {"path": result["path"]}, notice))
     if op == "trash":
@@ -664,6 +721,11 @@ def note_post(plane, session: dict, body: dict, peer_ip: str):
         where = notes_edit.trash_note(settings, account_id, rel)
         _audit(plane, session, peer_ip, "vault.trash")
         return Page(200, vault_page(plane, session, {}, f'<p class="notice">Moved to {html.escape(where)}. Obsidian shows it under its trash.</p>'))
+    if op == "link-mention":
+        linked = notes_edit.link_mention(settings, account_id, str(body.get("source") or ""), rel)
+        if linked:
+            _audit(plane, session, peer_ip, "vault.write")
+        return Page(200, vault_page(plane, session, {"path": rel}, f'<p class="notice">{"Linked." if linked else "That mention is no longer there."}</p>'))
     if op == "bookmark":
         on = notes_edit.toggle_bookmark(settings, account_id, rel)
         return Page(200, vault_page(plane, session, {"path": rel}, f'<p class="notice">{"Bookmarked." if on else "Bookmark removed."}</p>'))

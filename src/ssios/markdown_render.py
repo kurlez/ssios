@@ -138,7 +138,9 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
             lang = fence.group(2)
             attr = f' class="language-{html.escape(lang, quote=True)}"' if lang else ""
             if lang.casefold() == "mermaid":
-                out.append('<figure class="mermaid-source"><figcaption>Mermaid diagram, shown as its source</figcaption><pre><code>' + html.escape("\n".join(code)) + "</code></pre></figure>")
+                source = html.escape("\n".join(code))
+                # The page draws the diagram with the local Mermaid. The source stays one click away, and is what shows if drawing fails.
+                out.append(f'<figure class="mermaid-block"><pre class="mermaid">{source}</pre><details class="mermaid-source"><summary>Source</summary><pre><code>{source}</code></pre></details></figure>')
             else:
                 out.append(f"<pre><code{attr}>" + highlight("\n".join(code), lang) + "</code></pre>")
             continue
@@ -344,9 +346,14 @@ def _list(lines: list[str], link_for, depth: int) -> str:
                 check = f'<input type="checkbox" disabled{" checked" if done else ""}> '
                 body[0] = task.group(2)
             loose = any(not line.strip() for line in body)
+            item_id = ""
+            marked = _BLOCK_ID.search(body[0]) if body else None
+            if marked:
+                item_id = f' id="block-{html.escape(marked.group(1), quote=True)}"'
+                body[0] = body[0][: marked.start()]
             inner = _blocks(body, link_for, tight=not loose, depth=depth + 1)
             css = ' class="task"' if task else ""
-            parts.append(f"<li{css}>{check}{inner}</li>")
+            parts.append(f"<li{css}{item_id}>{check}{inner}</li>")
         if ordered:
             start = int(re.match(r"\d+", marker).group(0))
             attr = f' start="{start}"' if start != 1 else ""
@@ -387,19 +394,25 @@ def inline(text: str, link_for) -> str:
     # so "$12.50 and $3" stays as written.
     text = re.sub(r"(?<![\w$])\$(?=[^\s$])([^$\n]*?[^\s$\\])\$(?![\w$])", math, text)
     doc = getattr(_STATE, "doc", None)
-    if doc and doc["notes"] and "[^" in text:
-        def reference(found) -> str:
+    if doc is not None and ("[^" in text or "^[" in text):
+        def note(found) -> str:
             key = found.group(1)
-            if key not in doc["notes"]:
-                return found.group(0)
-            first = key not in doc["order"]
+            if key is not None:
+                if key not in doc["notes"]:
+                    return found.group(0)
+                first = key not in doc["order"]
+            else:
+                key = f"inline-{len(doc['notes']) + 1}"
+                doc["notes"][key] = found.group(2)
+                first = True
             if first:
                 doc["order"].append(key)
             number = doc["order"].index(key) + 1
             back = f' id="fnref-{number}"' if first else ""
             return hold(f'<sup class="footnote-ref"><a href="#fn-{number}"{back}>{number}</a></sup>')
 
-        text = re.sub(r"\[\^([^\]\s]+)\]", reference, text)
+        # One pass, so numbers follow the order the notes are read in.
+        text = re.sub(r"\[\^([^\]\s]+)\]|\^\[([^\]\n]+)\]", note, text)
     text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~=<>])", lambda found: hold(html.escape(found.group(1))), text)
 
     def embed(found) -> str:

@@ -145,6 +145,10 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         from ssios.notes_page import preview
 
         return preview(plane, session, body)
+    if method == "GET" and path == "/ui/vault/peek":
+        from ssios.notes_page import peek
+
+        return peek(plane, session, query)
     if method == "GET" and path == "/ui/vault/index.json":
         from ssios.notes_page import index_json
 
@@ -1680,6 +1684,34 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .switcher-row { display: block; padding: 6px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .switcher-row.active, .switcher-row:hover { background: var(--user); }
 .muted.small, .small { font-size: .78rem; }
+.vault.hide-left { grid-template-columns: 0 minmax(0, 1fr) 280px; }
+.vault.hide-right { grid-template-columns: 280px minmax(0, 1fr) 0; }
+.vault.hide-left.hide-right { grid-template-columns: 0 minmax(0, 1fr) 0; }
+.vault.hide-left .vault-side, .vault.hide-right .vault-info { display: none; }
+.pane-toggles { display: inline-flex; gap: 2px; }
+.pane-toggles button { font-size: 14px; line-height: 1; height: 26px; width: 28px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); cursor: pointer; }
+.graph-controls { display: inline-flex; gap: 10px; align-items: center; font-size: .82rem; }
+.graph-controls input[type=search] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font: inherit; }
+.graph-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; width: 100%; font-size: .78rem; color: var(--muted); }
+.graph-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.link-card form { margin-top: 3px; }
+.link-card button { font: inherit; font-size: .75rem; height: 22px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--accent); cursor: pointer; }
+.editor-panes { position: relative; }
+.link-suggest { position: absolute; z-index: 30; width: 300px; max-height: 260px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); padding: 4px; font-size: .86rem; }
+.link-suggest[hidden] { display: none; }
+.link-suggest-row { padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.link-suggest-row.active, .link-suggest-row:hover { background: var(--user); }
+.tree-folder > summary.drop, .vault-list.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.vault-row[draggable=true] { cursor: grab; }
+.vault-note mark.search-mark { background: var(--warn-bg); color: var(--ink); box-shadow: 0 0 0 1px var(--warn); }
+.peek { position: fixed; z-index: 40; width: 420px; max-height: 320px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.18); padding: 10px 14px; font-size: .88rem; }
+.peek[hidden] { display: none; }
+.peek .peek-title { color: var(--muted); font-size: .78rem; margin-bottom: 6px; }
+.peek .vault-note { line-height: 1.55; }
+.vault-note .mermaid-block { margin: 0 0 1em; }
+.vault-note pre.mermaid { background: none; text-align: center; }
+.vault-note pre.mermaid:not([data-processed]) { background: var(--code); text-align: left; }
+.vault-note .mermaid-source > summary { font-size: .78rem; color: var(--muted); cursor: pointer; }
 .page .vault a.button, .page .vault a.button:hover { color: var(--ink); background: var(--panel); border: 1px solid var(--line); padding: 0 10px; border-radius: 8px; }
 .page .vault a.button.primary, .page .vault a.button.primary:hover { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 .note-editor button, .vault-tools button { white-space: nowrap; }
@@ -2037,6 +2069,95 @@ VAULT_JS = r"""
     });
   }
 
+  // Hide or show the side panes. The choice is kept in this browser.
+  var PANES = "ssios.vault.panes";
+  var panes = {};
+  try { panes = JSON.parse(localStorage.getItem(PANES) || "{}") || {}; } catch (err) { panes = {}; }
+  function applyPanes() { app.classList.toggle("hide-left", !!panes.left); app.classList.toggle("hide-right", !!panes.right); }
+  applyPanes();
+  document.querySelectorAll("[data-pane]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var side = button.getAttribute("data-pane");
+      panes[side] = !panes[side]; applyPanes();
+      try { localStorage.setItem(PANES, JSON.stringify(panes)); } catch (err) {}
+    });
+  });
+
+  // Mermaid diagrams, drawn by the local Mermaid. If a diagram cannot be drawn, its source stays visible.
+  function drawDiagrams(host) {
+    if (!window.mermaid || !host) return;
+    var blocks = host.querySelectorAll("pre.mermaid:not([data-processed])");
+    if (!blocks.length) return;
+    try {
+      var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+      window.mermaid.run({ nodes: blocks, suppressErrors: true }).catch(function () {});
+    } catch (err) {}
+  }
+  drawDiagrams(document.querySelector(".vault-main .vault-note"));
+
+  // Words searched for are marked in the note that was opened from the results.
+  var asked = new URLSearchParams(location.search).get("q") || "";
+  var note = document.querySelector(".vault-main .vault-note");
+  if (asked && note) {
+    var words = [];
+    asked.replace(/"([^"]+)"|(\S+)/g, function (all, phrase, word) {
+      var value = (phrase || word || "").toLowerCase();
+      if (!value || value === "or" || value.charAt(0) === "-" || /^(tag|path|file):/.test(value) || value.charAt(0) === "#") return all;
+      words.push(value); return all;
+    });
+    if (words.length) {
+      var pattern = new RegExp(words.map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|"), "gi");
+      var walker = document.createTreeWalker(note, NodeFilter.SHOW_TEXT, { acceptNode: function (n) {
+        return n.parentNode && /^(SCRIPT|STYLE|CODE|PRE)$/.test(n.parentNode.nodeName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; } });
+      var hits = [], node;
+      while ((node = walker.nextNode())) { pattern.lastIndex = 0; if (pattern.test(node.nodeValue)) hits.push(node); }
+      var first = null;
+      hits.forEach(function (text) {
+        var frag = document.createDocumentFragment(), last = 0, value = text.nodeValue;
+        value.replace(pattern, function (match, at) {
+          frag.appendChild(document.createTextNode(value.slice(last, at)));
+          var mark = document.createElement("mark"); mark.className = "search-mark"; mark.textContent = match;
+          frag.appendChild(mark); if (!first) first = mark; last = at + match.length; return match;
+        });
+        frag.appendChild(document.createTextNode(value.slice(last)));
+        text.parentNode.replaceChild(frag, text);
+      });
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: "center" });
+    }
+  }
+
+  // Hover over a link to another note to see its start, as Obsidian's Page preview does.
+  var peek = document.createElement("div");
+  peek.className = "peek"; peek.hidden = true; document.body.appendChild(peek);
+  var peekTimer = null, peekFor = null, peekCache = {};
+  function hidePeek() { clearTimeout(peekTimer); peek.hidden = true; peekFor = null; }
+  document.addEventListener("mouseover", function (e) {
+    var link = e.target.closest ? e.target.closest('.vault-note a[href^="/ui/vault/note?path="], .vault-info a[href^="/ui/vault/note?path="]') : null;
+    if (!link || link.classList.contains("unresolved")) { if (!(e.target.closest && e.target.closest(".peek"))) hidePeek(); return; }
+    if (link === peekFor) return;
+    peekFor = link; clearTimeout(peekTimer);
+    peekTimer = setTimeout(function () {
+      var url = new URL(link.href, location.href), target = url.searchParams.get("path");
+      if (!/\.md$/i.test(target || "")) return;
+      var key = target + "#" + (url.hash || "");
+      var show = function (markup) {
+        if (peekFor !== link) return;
+        peek.innerHTML = markup;
+        if (window.katex) peek.querySelectorAll(".math").forEach(function (el) { try { window.katex.render(el.textContent || "", el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" }); } catch (err) {} });
+        var box = link.getBoundingClientRect();
+        peek.style.left = Math.min(box.left, window.innerWidth - 440) + "px";
+        peek.style.top = (box.bottom + 8 + 320 > window.innerHeight ? Math.max(box.top - 330, 8) : box.bottom + 8) + "px";
+        peek.hidden = false;
+      };
+      if (peekCache[key]) { show(peekCache[key]); return; }
+      var heading = url.hash ? decodeURIComponent(url.hash.slice(1)) : "";
+      fetch("/ui/vault/peek?path=" + encodeURIComponent(target) + (heading && heading.indexOf("block-") !== 0 ? "&h=" + encodeURIComponent(heading) : ""), { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.text() : ""; }).then(function (markup) { if (markup) { peekCache[key] = markup; show(markup); } }).catch(function () {});
+    }, 350);
+  });
+  document.addEventListener("scroll", hidePeek, true);
+
   // Filter the file tree.
   var filter = document.getElementById("vault-filter");
   if (filter) {
@@ -2067,6 +2188,29 @@ VAULT_JS = r"""
   });
   var active = document.querySelector(".vault-row.active, .search-hit.active");
   if (active && active.scrollIntoView) active.scrollIntoView({ block: "center" });
+
+  // Drag a note onto a folder in the tree to move it. Links to it are updated as Obsidian is set to.
+  var dragging = "";
+  document.querySelectorAll(".vault-row[draggable=true]").forEach(function (row) {
+    row.addEventListener("dragstart", function (e) { dragging = row.getAttribute("data-path") || ""; e.dataTransfer.setData("text/plain", dragging); });
+  });
+  document.querySelectorAll(".tree-folder > summary, .vault-list[data-root]").forEach(function (target) {
+    var folder = target.parentNode && target.parentNode.getAttribute ? (target.parentNode.getAttribute("data-folder") || "") : "";
+    if (target.hasAttribute && target.hasAttribute("data-root")) folder = "";
+    target.addEventListener("dragover", function (e) { if (dragging) { e.preventDefault(); target.classList.add("drop"); } });
+    target.addEventListener("dragleave", function () { target.classList.remove("drop"); });
+    target.addEventListener("drop", function (e) {
+      e.preventDefault(); e.stopPropagation(); target.classList.remove("drop");
+      var name = dragging.split("/").pop(), to = folder ? folder + "/" + name : name;
+      if (!dragging || to === dragging) return;
+      fetch("/ui/vault/note", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csrf: csrf, op: "rename", ajax: "1", path: dragging, new_path: to, update_links: "1" }) })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { if (j.ok) location.href = "/ui/vault/note?path=" + encodeURIComponent(j.path); else alert(j.error || "Not moved."); })
+        .catch(function () { alert("Not moved."); });
+      dragging = "";
+    });
+  });
 
   // Quick switcher.
   var box = document.getElementById("switcher");
@@ -2138,6 +2282,7 @@ VAULT_JS = r"""
       .then(function (r) { return r.text(); })
       .then(function (markup) {
         preview.innerHTML = markup;
+        drawDiagrams(preview);
         if (window.katex) preview.querySelectorAll(".math").forEach(function (el) {
           try { window.katex.render(el.textContent || "", el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" }); } catch (err) {}
         });
@@ -2190,6 +2335,81 @@ VAULT_JS = r"""
       };
       reader.readAsDataURL(picture);
     });
+    // Typing [[ suggests notes, written the way Obsidian is set to write links.
+    var pop = document.createElement("div");
+    pop.className = "link-suggest"; pop.hidden = true; pop.setAttribute("role", "listbox");
+    form.querySelector(".editor-panes").appendChild(pop);
+    var picks = [], pick = 0, asking = 0;
+    function names() {
+      if (index) return Promise.resolve(index);
+      return fetch("/ui/vault/index.json", { credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (rows) { index = rows; return rows; });
+    }
+    function linkPath(item) {
+      var fmt = form.getAttribute("data-link-format") || "shortest";
+      var stem = /\.md$/i.test(item.p) ? item.p.slice(0, -3) : item.p;
+      var base = stem.split("/").pop();
+      if (fmt === "absolute") return stem;
+      if (fmt === "relative") {
+        var from = current.split("/").slice(0, -1), to = stem.split("/"), i = 0;
+        while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
+        return new Array(from.length - i + 1).join("../") + to.slice(i).join("/");
+      }
+      var same = (index || []).filter(function (row) { return (/\.md$/i.test(row.p) ? row.p.slice(0, -3) : row.p).split("/").pop().toLowerCase() === base.toLowerCase(); });
+      return same.length > 1 ? stem : base;
+    }
+    function caretCoords() {
+      var mirror = document.createElement("div"), style = getComputedStyle(area);
+      ["fontFamily", "fontSize", "lineHeight", "padding", "border", "whiteSpace", "wordWrap", "width", "tabSize", "letterSpacing"].forEach(function (k) { mirror.style[k] = style[k]; });
+      mirror.style.position = "absolute"; mirror.style.visibility = "hidden"; mirror.style.whiteSpace = "pre-wrap"; mirror.style.wordWrap = "break-word";
+      mirror.textContent = area.value.slice(0, area.selectionStart);
+      var mark = document.createElement("span"); mark.textContent = "|"; mirror.appendChild(mark);
+      document.body.appendChild(mirror);
+      var top = mark.offsetTop - area.scrollTop + parseFloat(style.lineHeight || "20"), left = Math.min(mark.offsetLeft, area.clientWidth - 260);
+      document.body.removeChild(mirror);
+      return { top: area.offsetTop + top + 4, left: area.offsetLeft + Math.max(left, 8) };
+    }
+    function suggest() {
+      var before = area.value.slice(0, area.selectionStart);
+      var open = /\[\[([^\[\]|#\n]*)$/.exec(before);
+      if (!open) { pop.hidden = true; return; }
+      var ticket = ++asking;
+      names().then(function (rows) {
+        // An answer for an earlier keystroke is dropped, so the list matches what is typed now.
+        if (ticket !== asking) return;
+        var needle = open[1].toLowerCase();
+        picks = rows.filter(function (row) { return (row.p + " " + (row.a || []).join(" ")).toLowerCase().indexOf(needle) >= 0; })
+          .sort(function (a, b) { return a.p.split("/").pop().toLowerCase().indexOf(needle) - b.p.split("/").pop().toLowerCase().indexOf(needle) || a.p.length - b.p.length; })
+          .slice(0, 8);
+        pick = 0; pop.textContent = "";
+        picks.forEach(function (row, i) {
+          var item = document.createElement("div"); item.className = "link-suggest-row" + (i === pick ? " active" : "");
+          item.textContent = row.p.split("/").pop().replace(/\.md$/i, ""); var where = document.createElement("span"); where.className = "muted small"; where.textContent = "  " + row.p; item.appendChild(where);
+          item.addEventListener("mousedown", function (e) { e.preventDefault(); choose(i); });
+          pop.appendChild(item);
+        });
+        if (!picks.length) { pop.hidden = true; return; }
+        var at = caretCoords(); pop.style.top = at.top + "px"; pop.style.left = at.left + "px"; pop.hidden = false;
+      }).catch(function () {});
+    }
+    function choose(i) {
+      var row = picks[i]; if (!row) return;
+      var before = area.value.slice(0, area.selectionStart), open = before.lastIndexOf("[[");
+      var after = area.value.slice(area.selectionStart).indexOf("]]") === 0 ? 2 : 0;
+      var text = linkPath(row) + "]]";
+      area.setRangeText(text, open + 2, area.selectionStart + after, "end");
+      pop.hidden = true; area.dispatchEvent(new Event("input"));
+    }
+    area.addEventListener("input", suggest);
+    area.addEventListener("click", function () { pop.hidden = true; });
+    area.addEventListener("keydown", function (e) {
+      if (pop.hidden) return;
+      if (e.key === "ArrowDown") { pick = Math.min(pick + 1, picks.length - 1); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { pick = Math.max(pick - 1, 0); e.preventDefault(); }
+      else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); e.stopImmediatePropagation(); choose(pick); return; }
+      else if (e.key === "Escape") { pop.hidden = true; return; }
+      else return;
+      Array.prototype.forEach.call(pop.children, function (el, i) { el.className = "link-suggest-row" + (i === pick ? " active" : ""); });
+    }, true);
     form.addEventListener("submit", function () { dirty = false; });
     window.addEventListener("beforeunload", function (e) { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
     area.focus();
@@ -2238,16 +2458,29 @@ VAULT_JS = r"""
       edges.forEach(function (e) { var a = nodes[e[0]], b = nodes[e[1]]; var dx = b.x - a.x, dy = b.y - a.y; a.vx += dx * k; a.vy += dy * k; b.vx -= dx * k; b.vy -= dy * k; });
       nodes.forEach(function (n) { n.vx += (W() / 2 - n.x) * 0.002; n.vy += (H() / 2 - n.y) * 0.002; n.vx *= 0.6; n.vy *= 0.6; n.x += n.vx; n.y += n.vy; });
     }
+    var palette = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2", "#b279a2", "#ff9da6", "#9d755d", "#bab0ac", "#eeca3b"];
+    var folders = {};
+    nodes.forEach(function (n) { var top = n.path.indexOf("/") > 0 ? n.path.split("/")[0] : "(root)"; if (!(top in folders)) folders[top] = palette[Object.keys(folders).length % palette.length]; n.color = folders[top]; });
+    var legend = document.getElementById("graph-legend");
+    if (legend) Object.keys(folders).slice(0, 12).forEach(function (name) { var item = document.createElement("span"); var dot = document.createElement("i"); dot.style.background = folders[name]; item.appendChild(dot); item.appendChild(document.createTextNode(name)); legend.appendChild(item); });
+    var showOrphans = document.getElementById("graph-orphans"), allLabels = document.getElementById("graph-labels"), graphFilter = document.getElementById("graph-filter");
+    function visible(n) {
+      if (showOrphans && !showOrphans.checked && !(n.degree > 0)) return false;
+      return true;
+    }
+    function matched(n) { var f = graphFilter ? graphFilter.value.trim().toLowerCase() : ""; return !f || (n.title + " " + n.path).toLowerCase().indexOf(f) >= 0; }
+    [showOrphans, allLabels, graphFilter].forEach(function (control) { if (control) control.addEventListener("input", function () { paint(); }); });
     function paint() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W(), H());
       ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
       ctx.strokeStyle = line; ctx.lineWidth = 1 / view.k;
-      edges.forEach(function (e) { var a = nodes[e[0]], b = nodes[e[1]]; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); });
+      edges.forEach(function (e) { var a = nodes[e[0]], b = nodes[e[1]]; if (!visible(a) || !visible(b)) return; ctx.globalAlpha = matched(a) && matched(b) ? 1 : 0.15; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); });
       nodes.forEach(function (n, i) {
-        var r = 3 + Math.min(Math.sqrt(n.degree || 0) * 1.6, 9);
-        ctx.fillStyle = i === hover ? accent : ink; ctx.globalAlpha = i === hover ? 1 : 0.75;
+        if (!visible(n)) return;
+        var r = 3 + Math.min(Math.sqrt(n.degree || 0) * 1.6, 9), on = matched(n);
+        ctx.fillStyle = i === hover ? accent : n.color; ctx.globalAlpha = on ? (i === hover ? 1 : 0.9) : 0.12;
         ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
-        if (view.k > 1.4 || i === hover || (n.degree || 0) > 6) { ctx.globalAlpha = 1; ctx.font = (11 / view.k) + "px sans-serif"; ctx.fillText(n.title.slice(0, 30), n.x + r + 2, n.y + 3); }
+        if (on && ((allLabels && allLabels.checked) || view.k > 1.4 || i === hover || (n.degree || 0) > 6)) { ctx.globalAlpha = 1; ctx.fillStyle = ink; ctx.font = (11 / view.k) + "px sans-serif"; ctx.fillText(n.title.slice(0, 30), n.x + r + 2, n.y + 3); }
       });
       ctx.globalAlpha = 1;
     }
@@ -2263,7 +2496,7 @@ VAULT_JS = r"""
     function at(e) {
       var rect = canvas.getBoundingClientRect();
       var x = (e.clientX - rect.left - view.x) / view.k, y = (e.clientY - rect.top - view.y) / view.k;
-      for (var i = nodes.length - 1; i >= 0; i--) { var dx = nodes[i].x - x, dy = nodes[i].y - y; if (dx * dx + dy * dy < 100 / view.k) return i; }
+      for (var i = nodes.length - 1; i >= 0; i--) { if (!visible(nodes[i])) continue; var dx = nodes[i].x - x, dy = nodes[i].y - y; if (dx * dx + dy * dy < 100 / view.k) return i; }
       return -1;
     }
     var drag = null;
@@ -2343,7 +2576,7 @@ def _vendor_asset(path: str) -> Page | None:
     rel = path[len(prefix):]
     if not rel or ".." in rel.split("/") or rel.startswith("/"):
         return None
-    allowed = rel in {"render.js", "katex/katex.min.js", "katex/katex.min.css"} or (
+    allowed = rel in {"render.js", "katex/katex.min.js", "katex/katex.min.css", "mermaid/mermaid.min.js"} or (
         rel.startswith("katex/fonts/") and rel.endswith(".woff2") and rel.count("/") == 2
     )
     if not allowed:
