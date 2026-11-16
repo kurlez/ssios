@@ -140,13 +140,26 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
     if method == "POST" and path == "/ui/vault/note":
         _csrf(session, body)
         return _vault_note_post(plane, session, body, peer_ip)
+    if method == "POST" and path == "/ui/vault/preview":
+        _csrf(session, body)
+        from ssios.notes_page import preview
+
+        return preview(plane, session, body)
+    if method == "GET" and path == "/ui/vault/index.json":
+        from ssios.notes_page import index_json
+
+        return index_json(plane, session)
     if method == "GET" and path == "/ui/vault":
-        return Page(200, _vault_page(plane, session, "", str(query.get("tag") or ""), str(query.get("view") or "")))
+        from ssios.notes_page import vault_page
+
+        return Page(200, vault_page(plane, session, query))
     if method == "POST" and path == "/ui/vault":
         _csrf(session, body)
         return _vault_paste(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/vault/note":
-        return Page(200, _vault_note(plane, session, str(query.get("path") or ""), "", str(query.get("tag") or ""), str(query.get("view") or "")))
+        from ssios.notes_page import vault_page
+
+        return Page(200, vault_page(plane, session, query))
     if method == "GET" and path == "/ui/vault/asset":
         return _vault_asset(plane, session, str(query.get("path") or ""))
     if method == "POST" and path == "/ui/logout":
@@ -1189,184 +1202,30 @@ def _history(plane, project_id: str, path: str) -> str:
 
 
 def _vault_page(plane, session: dict, notice: str, tag: str = "", view: str = "") -> str:
-    return _vault_view(plane, session, tag=tag, view=view, notice=notice)
+    from ssios.notes_page import vault_page
+
+    return vault_page(plane, session, {"tag": tag, "view": view}, notice)
 
 
 def _vault_note(plane, session: dict, rel: str, notice: str = "", tag: str = "", view: str = "") -> str:
-    return _vault_view(plane, session, rel=rel, tag=tag, view=view, notice=notice)
+    from ssios.notes_page import vault_page
 
-
-def _note_body(text: str) -> str:
-    from ssios.vault import _split_frontmatter
-
-    return _split_frontmatter(text)[1]
-
-
-_VAULT_GROUPS = ("Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older")
-
-
-def _vault_group(now, stamp: float) -> str:
-    from datetime import datetime
-
-    days = (now.date() - datetime.fromtimestamp(stamp, now.tzinfo).date()).days
-    if days <= 0:
-        return "Today"
-    if days == 1:
-        return "Yesterday"
-    if days <= 7:
-        return "Previous 7 days"
-    if days <= 30:
-        return "Previous 30 days"
-    return "Older"
-
-
-def _vault_view(plane, session: dict, *, rel: str = "", tag: str = "", view: str = "", notice: str = "") -> str:
-    """Notes as Obsidian shows a vault: the list on the left, by time or by folder, and one note on the right."""
-    from urllib.parse import quote
-
-    from ssios.calendar_intent import host_clock
-    from ssios.errors import SsiosError
-    from ssios.locale_messages import say
-    from ssios.reading import depth_label, ledger
-    from ssios.vault import account_vault, list_attachments, list_notes, read_note, render_markdown, resolve_link
-
-    account_id = session["account"]["id"]
-    try:
-        notes = list_notes(plane.settings, account_id)
-        extras = list_attachments(plane.settings, account_id)
-        from ssios.vault import own_vault
-
-        # The default vault's folder is named after the account id, which means nothing on the page.
-        vault_name = account_vault(plane.settings, account_id).name if own_vault(plane.settings, account_id) is not None else "Notes"
-    except SsiosError as exc:
-        if exc.code != "path_rejected":
-            raise
-        notes, extras, vault_name = [], [], "Vault"
-        notice = _clip_notice("clip_denied", exc.detail if "vault folder" in exc.detail else say(ui_language(plane, session), "clip_denied"))
-    wanted_tag = str(tag or "")
-    view = "folders" if view == "folders" else "recent"
-    counts: dict[str, int] = {}
-    for item in notes:
-        for name in item.get("tags") or []:
-            counts[name] = counts.get(name, 0) + 1
-    shown = [item for item in notes if not wanted_tag or wanted_tag in (item.get("tags") or [])]
-    if not wanted_tag:
-        shown = shown + extras
-    shown.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
-    chosen = str(rel or "")
-    if not chosen:
-        chosen = next((item["path"] for item in shown if item["path"].casefold().endswith(".md") and item["path"] not in {"Tasks.md", "SSIOS/Tasks.md"}), "")
-    keep = (f"&view={view}" if view == "folders" else "") + (f"&tag={quote(wanted_tag, safe='')}" if wanted_tag else "")
-
-    def row(item: dict) -> str:
-        href = "/ui/vault/note?path=" + quote(item["path"], safe="") + keep
-        mark = " active" if item["path"] == chosen else ""
-        label = item["title"] if item["path"].casefold().endswith(".md") else item["path"].rsplit("/", 1)[-1]
-        return (
-            f'<a class="vault-row{mark}" href="{html.escape(href, quote=True)}" title="{html.escape(item["path"], quote=True)}" '
-            f'data-name="{html.escape((label + " " + item["path"]).casefold(), quote=True)}">{html.escape(label)}</a>'
-        )
-
-    groups: dict[str, list[str]] = {}
-    if view == "folders":
-        for item in sorted(shown, key=lambda one: one["path"].casefold()):
-            groups.setdefault(item.get("folder") or "", []).append(row(item))
-        order = sorted(groups, key=lambda name: (name != "", name.casefold()))
-        labels = {name: name or vault_name for name in order}
-    else:
-        now, _zone = host_clock(plane, _account(session))
-        for item in shown:
-            groups.setdefault(_vault_group(now, float(item.get("mtime") or 0)), []).append(row(item))
-        order = [name for name in _VAULT_GROUPS if name in groups]
-        labels = {name: name for name in order}
-    listing = "".join(
-        f'<details class="vault-group" open><summary>{html.escape(labels[name])} <span class="count">{len(groups[name])}</span></summary>{"".join(groups[name])}</details>'
-        for name in order
-    ) or '<p class="muted">No notes yet.</p>'
-    tags = "".join(
-        f'<a{" class=\"active\"" if name == wanted_tag else ""} href="/ui/vault?tag={html.escape(quote(name, safe=""), quote=True)}{"&amp;view=folders" if view == "folders" else ""}">#{html.escape(name)} <span class="count">{count}</span></a> '
-        for name, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0].casefold()))[:80]
-    )
-    csrf = html.escape(str(session.get("csrf") or ""))
-    base = "/ui/vault" + ("?tag=" + quote(wanted_tag, safe="") if wanted_tag else "")
-    joiner = "&amp;" if wanted_tag else "?"
-    side = (
-        '<aside class="vault-side">'
-        f'<div class="vault-head"><strong title="Vault">{html.escape(vault_name)}</strong>'
-        f'<span class="vault-views"><a{" class=\"active\"" if view == "recent" else ""} href="{html.escape(base, quote=True)}">Recent</a>'
-        f'<a{" class=\"active\"" if view == "folders" else ""} href="{html.escape(base, quote=True)}{joiner}view=folders">Folders</a></span></div>'
-        '<input id="vault-filter" type="search" placeholder="Filter notes" aria-label="Filter notes">'
-        + (f'<details class="vault-tags"><summary>Tags{": #" + html.escape(wanted_tag) if wanted_tag else ""}</summary><p>{tags}' + (' <a href="/ui/vault">All notes</a>' if wanted_tag else "") + "</p></details>" if tags else "")
-        + '<details class="vault-clip"><summary>Clip a page</summary>'
-        f'<form method="post" action="/ui/vault" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}">'
-        '<label>Source URL <input name="url" placeholder="https://example.com/story"></label>'
-        '<label>Pasted article <textarea name="content" rows="4"></textarea></label>'
-        '<label>Or a text file <input type="file" name="file"></label>'
-        '<button type="submit">Clip pasted article</button></form></details>'
-        f'<div class="vault-list">{listing}</div></aside>'
-    )
-    main = '<p class="muted">Choose a note on the left. These notes are on this computer. Open the vault folder in Obsidian.</p>'
-    if chosen:
-        crumbs = " / ".join(html.escape(part) for part in [vault_name] + chosen.split("/"))
-        if chosen.casefold().endswith(".md"):
-            text = read_note(plane.settings, account_id, chosen)
-
-            def link_for(url: str) -> str:
-                if url.startswith(("javascript:", "data:")):
-                    return ""
-                if url.startswith(("https://", "http://")):
-                    return url
-                found = resolve_link(plane.settings, account_id, chosen, url)
-                if not found:
-                    return ""
-                # A note or a PDF opens in the right pane. A picture is served as the picture.
-                kind = "note" if found.casefold().endswith((".md", ".pdf")) else "asset"
-                return f"/ui/vault/{kind}?path=" + quote(found, safe="")
-
-            meta, rendered = render_markdown(text, link_for=link_for)
-            props = "".join(f"<dt>{html.escape(key)}</dt><dd>{html.escape(value)}</dd>" for key, value in meta.items())
-            depth = ledger(plane.accounts.home(account_id)).get("note:" + chosen, {}).get("depth") or "skimmed"
-            path = html.escape(chosen, quote=True)
-            tools = (
-                f'<form class="vault-tools" method="post" action="/ui/vault/note"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="path" value="{path}">'
-                f'<span class="badge depth-{html.escape(depth, quote=True)}" title="A clipped or written note counts as skimmed. Mark it read after reading it with care. Chat says which one it is when it uses the note.">{depth_label(depth)}</span>'
-                + ('<button name="op" value="read" type="submit">Mark as read</button>' if depth != "read" else "")
-                + '<span class="vault-remind"><label for="vault-when">Remind me to read</label>'
-                '<select id="vault-when" name="when"><option value="tonight">tonight</option><option value="tomorrow" selected>tomorrow morning</option>'
-                '<option value="weekend">this weekend</option><option value="week">in a week</option></select>'
-                '<button name="op" value="remind" type="submit">Set</button></span></form>'
-            )
-            first = next((line for line in _note_body(text).splitlines() if line.strip()), "")
-            title = "" if first.lstrip().startswith("#") else f'<h1 class="vault-title">{html.escape(str(meta.get("title") or chosen.rsplit("/", 1)[-1][:-3]))}</h1>'
-            main = (
-                f'<div class="vault-doc"><header class="vault-bar"><p class="vault-crumbs">{crumbs}</p>{tools}</header>'
-                + (f'<details class="vault-props"><summary>Properties</summary><dl>{props}</dl></details>' if props else "")
-                + f'{title}<article class="vault-note">{rendered}</article></div>'
-            )
-        else:
-            src = html.escape("/ui/vault/asset?path=" + quote(chosen, safe=""), quote=True)
-            shown_file = f'<iframe class="vault-pdf" src="{src}" title="{html.escape(chosen, quote=True)}"></iframe>' if chosen.casefold().endswith(".pdf") else f'<img class="vault-image" src="{src}" alt="">'
-            main = f'<header class="vault-bar"><p class="vault-crumbs">{crumbs}</p></header>{shown_file}'
-    math = '<link rel="stylesheet" href="/ui/vendor/katex/katex.min.css"><script src="/ui/vendor/katex/katex.min.js"></script>' if 'class="math' in main else ""
-    body = f'{math}<div class="vault">{side}<section class="vault-main">{notice}{main}</section></div><script src="{VAULT_PATH}"></script>'
-    return _page(session, "Notes", body, bleed=True)
+    return vault_page(plane, session, {"path": rel, "tag": tag, "view": view}, notice)
 
 
 def _vault_note_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
-    from ssios.reading import mark_note, remind_to_read
-    from ssios.scope import AccountScope
-    from ssios.vault import read_note
+    from ssios.notes_page import note_post, vault_page
 
-    rel = str(body.get("path") or "")
-    read_note(plane.settings, session["account"]["id"], rel)
-    scope = AccountScope(plane, _account(session))
-    if str(body.get("op") or "") == "remind":
-        when = remind_to_read(plane, scope, "note:" + rel, rel.rsplit("/", 1)[-1][:-3], str(body.get("when") or "tomorrow"))
-        notice = f"<p>Reminder set for {html.escape(when)}.</p>"
-    else:
-        mark_note(plane, scope, rel, "read", "marked", peer_ip)
-        notice = "<p>Marked as read.</p>"
-    return Page(200, _vault_note(plane, session, rel, notice, str(body.get("tag") or ""), str(body.get("view") or "")))
+    try:
+        return note_post(plane, session, body, peer_ip)
+    except SsiosError as exc:
+        if str(body.get("ajax") or "") == "1" or str(body.get("op") or "") == "attach":
+            return Page(exc.status, json.dumps({"ok": False, "error": exc.detail}), content_type="application/json; charset=utf-8")
+        notice = f'<p class="notice" data-code="{html.escape(exc.code, quote=True)}">{html.escape(exc.detail)}</p>'
+        try:
+            return Page(exc.status, vault_page(plane, session, {"path": str(body.get("path") or "")}, notice))
+        except SsiosError:
+            return Page(exc.status, vault_page(plane, session, {}, notice))
 
 
 def _clip_notice(code: str, detail: str) -> str:
@@ -1727,37 +1586,105 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 30; }
 .lightbox[hidden] { display: none; }
 .lightbox img { max-width: 90vw; max-height: 90vh; }
-.vault { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: calc(100vh - 96px); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+.vault { display: grid; grid-template-columns: 280px minmax(0, 1fr) 280px; height: calc(100vh - 96px); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+.vault.graph-mode { grid-template-columns: 280px minmax(0, 1fr) 0; }
 .vault-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); padding: 10px; gap: 8px; }
-.vault-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.vault-head { display: flex; flex-direction: column; gap: 6px; }
 .vault-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vault-views { display: flex; gap: 4px; flex: none; }
-.vault-views a { padding: 2px 8px; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: .85rem; }
-.vault-views a.active { background: var(--hover); color: var(--ink); }
-#vault-filter { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
-.vault-tags a { display: inline-block; margin: 2px 4px 2px 0; font-size: .85rem; text-decoration: none; }
-.vault-tags a.active { font-weight: 600; }
-.vault-clip form { display: grid; gap: 6px; margin-top: 6px; }
-.vault-list { flex: 1; min-height: 0; overflow: auto; }
-.vault-group > summary { color: var(--muted); font-size: .8rem; font-weight: 600; padding: 8px 4px 4px; cursor: pointer; }
-.vault-row { display: block; padding: 4px 8px 4px 18px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vault-row[hidden], .vault-group[hidden] { display: none; }
-.vault-list a.vault-row { color: var(--ink); }
+.vault-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.vault-actions form { margin: 0; display: inline; }
+.vault-actions button, .vault-actions .button, .vault-new > summary { font: inherit; font-size: .8rem; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+.vault-new { position: relative; }
+.vault-new > summary { list-style: none; }
+.vault-new > summary::-webkit-details-marker { display: none; }
+.vault-new form, .menu-pop { position: absolute; z-index: 20; top: 30px; left: 0; width: 240px; display: grid; gap: 6px; padding: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+.vault-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding-bottom: 6px; flex-wrap: wrap; }
+.vault-tabs a { padding: 3px 7px; border-radius: 7px; color: var(--muted); text-decoration: none; font-size: .8rem; }
+.vault-tabs a.active { background: var(--hover); color: var(--ink); font-weight: 600; }
+#vault-filter, #vault-search, .switcher input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
+.vault-list { flex: 1; min-height: 0; overflow: auto; font-size: .88rem; }
+.vault-list details > summary { cursor: pointer; padding: 3px 4px; border-radius: 6px; color: var(--ink); }
+.vault-list details > summary:hover { background: var(--hover); }
+.tree-folder { margin-left: 0; }
+.tree-folder .tree-folder, .tree-folder > .vault-row { margin-left: 12px; }
+.vault-group > summary { color: var(--muted); font-size: .78rem; font-weight: 600; }
+.vault-row { display: block; padding: 3px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vault-row[hidden], .tree-folder[hidden] { display: none; }
 .vault-row:hover { background: var(--hover); }
-.vault-row.active { background: var(--user); }
-.vault-main { min-width: 0; overflow: auto; padding: 0 32px 48px; }
+.vault-row.active, .search-hit.active { background: var(--user); }
+.vault-row .kind { font-size: .68rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; }
+.search-hit { display: block; padding: 6px 8px; border-radius: 8px; color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
+.search-hit:hover { background: var(--hover); }
+.search-hit .snippet { margin: 3px 0 0; font-size: .8rem; color: var(--muted); line-height: 1.4; }
+.search-hit mark, .snippet mark { background: var(--warn-bg); color: var(--ink); border-radius: 2px; }
+.tag-row { display: block; padding: 2px 8px; border-radius: 6px; color: var(--accent); text-decoration: none; }
+.tag-row.active { background: var(--user); }
+.vault-clip form { display: grid; gap: 6px; margin-top: 6px; }
+.vault-main { min-width: 0; overflow: auto; padding: 0 32px 48px; position: relative; }
 .vault-doc { max-width: 780px; margin: 0 auto; }
-.vault-bar { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 12px 0 10px; margin-bottom: 14px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
-.vault-crumbs { color: var(--muted); font-size: .82rem; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 240px; }
-.vault-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: .82rem; }
-.vault-tools button, .vault-tools select { font: inherit; font-size: .82rem; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; }
-.vault-tools .vault-remind { display: inline-flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid var(--line); }
-.vault-tools label { display: inline; margin: 0; color: var(--muted); white-space: nowrap; }
+.vault-bar { position: sticky; top: 0; z-index: 5; background: var(--panel); padding: 10px 0 8px; margin-bottom: 14px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.vault-crumbs { color: var(--muted); font-size: .82rem; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 200px; }
+.vault-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: .82rem; }
+.vault-tools form { display: inline-flex; gap: 6px; margin: 0; align-items: center; }
+.vault-tools button, .vault-tools select, .vault-tools .button, .vault-tools summary { font: inherit; font-size: .82rem; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+.vault-tools .primary, .note-editor .primary, .empty-note .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .vault-tools .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: .75rem; font-weight: 600; background: var(--warn-bg); color: var(--warn); }
 .vault-tools .badge.depth-read { background: var(--ok-bg); color: var(--ok); }
-.vault-props { margin: 0 0 14px; font-size: .85rem; color: var(--muted); }
-.vault-props dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0 0; }
-.vault-props dt { font-weight: 600; } .vault-props dd { margin: 0; overflow-wrap: anywhere; }
+.menu { position: relative; }
+.menu > summary { list-style: none; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-pop { left: auto; right: 0; width: 280px; }
+.menu-pop form { display: grid; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.menu-pop form:last-child { border-bottom: 0; padding-bottom: 0; }
+.menu-pop label { display: grid; gap: 4px; color: var(--muted); }
+.menu-pop label.inline { display: flex; align-items: center; gap: 6px; }
+.vault-props { margin: 0 0 16px; font-size: .86rem; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.vault-props > summary { color: var(--muted); cursor: pointer; }
+.vault-props dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0 0; }
+.vault-props dt { color: var(--muted); }
+.vault-props dd { margin: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { display: inline-block; padding: 0 8px; border-radius: 999px; background: var(--hover); color: var(--accent); text-decoration: none; font-size: .82rem; }
+.vault-info { min-width: 0; overflow: auto; border-left: 1px solid var(--line); padding: 10px; font-size: .84rem; }
+.vault-info details { border-bottom: 1px solid var(--line); padding: 4px 0 8px; }
+.vault-info summary { cursor: pointer; font-weight: 600; padding: 4px 2px; }
+.outline-row { display: block; padding: 2px 4px; border-radius: 6px; color: var(--ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-row:hover { background: var(--hover); }
+.outline-row.unresolved, .vault-note a.unresolved { color: var(--muted); }
+.vault-note a.unresolved { text-decoration: underline dotted; }
+.link-card { padding: 4px; border-radius: 6px; }
+.link-card a { font-weight: 600; text-decoration: none; }
+.link-card .context { margin: 2px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.35; overflow-wrap: anywhere; }
+.local-graph { width: 100%; height: auto; }
+.local-graph line { stroke: var(--line); stroke-width: 1.2; }
+.local-graph line.side { stroke-dasharray: 3 3; }
+.local-graph .node circle { fill: var(--muted); }
+.local-graph .node.current circle { fill: var(--accent); }
+.local-graph text { font-size: 13px; fill: var(--ink); }
+.local-graph a:hover circle { fill: var(--accent); }
+.vault-graph { width: 100%; height: calc(100% - 70px); display: block; }
+.note-editor { display: grid; gap: 8px; }
+.editor-panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-height: calc(100vh - 260px); }
+.editor-panes textarea { width: 100%; min-height: 100%; resize: vertical; font: .92rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); tab-size: 4; }
+.editor-preview { overflow: auto; border-left: 1px dashed var(--line); padding-left: 16px; }
+.editor-bar { display: flex; gap: 12px; align-items: center; justify-content: flex-end; }
+.editor-bar .editor-state { margin-right: auto; }
+.editor-state.bad { color: var(--danger); }
+.note-editor button { font: inherit; height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.conflict { border-left: 3px solid var(--danger); background: var(--danger-bg); padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; }
+.conflict pre.disk { max-height: 240px; overflow: auto; background: var(--code); padding: 8px; border-radius: 6px; }
+.empty-note { padding: 40px 0; text-align: center; }
+.switcher { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 50; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.switcher[hidden] { display: none; }
+.switcher-box { width: min(640px, 92vw); background: var(--panel); border-radius: 12px; padding: 10px; box-shadow: 0 16px 48px rgba(0,0,0,.25); }
+.switcher-list { max-height: 50vh; overflow: auto; margin: 8px 0; }
+.switcher-row { display: block; padding: 6px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.switcher-row.active, .switcher-row:hover { background: var(--user); }
+.muted.small, .small { font-size: .78rem; }
+.page .vault a.button, .page .vault a.button:hover { color: var(--ink); background: var(--panel); border: 1px solid var(--line); padding: 0 10px; border-radius: 8px; }
+.page .vault a.button.primary, .page .vault a.button.primary:hover { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+.note-editor button, .vault-tools button { white-space: nowrap; }
+.note-editor .editor-bar button { height: 32px; padding: 0 14px; }
+.from { margin-left: 8px; }
 .vault-title { font-size: 1.6rem; line-height: 1.3; margin: 0 0 .6em; }
 .vault-note { line-height: 1.75; font-size: 1rem; overflow-wrap: anywhere; }
 .vault-note > :first-child { margin-top: 0; }
@@ -1796,7 +1723,19 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .vault-note .math-block { display: block; margin: 0 0 1em; overflow-x: auto; text-align: center; }
 .vault-note .remote-image::before { content: "image: "; color: var(--muted); }
 .vault-pdf { width: 100%; height: calc(100vh - 170px); border: 0; }
-@media (max-width: 800px) { .vault { grid-template-columns: 1fr; height: auto; } .vault-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 45vh; } }
+.vault-note h1, .vault-note h2, .vault-note h3, .vault-note h4, .vault-note h5, .vault-note h6 { scroll-margin-top: 70px; }
+.vault-note .embed { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; margin: 0 0 1em; }
+.vault-note .embed-title { font-size: .82rem; margin-bottom: .4em; }
+.vault-note .embed-title a { color: var(--muted); }
+.vault-note .embed-pdf iframe { width: 100%; height: 520px; border: 1px solid var(--line); border-radius: 6px; }
+.vault-note details.callout > summary { cursor: pointer; }
+.vault-note .footnotes { border-top: 1px solid var(--line); margin-top: 2em; padding-top: .6em; font-size: .88rem; color: var(--muted); }
+.vault-note .footnote-ref a { text-decoration: none; font-size: .78em; }
+.vault-note .mermaid-source figcaption { font-size: .78rem; color: var(--muted); margin-bottom: 4px; }
+.vault-note .tok-k { color: #a626a4; } .vault-note .tok-s { color: #50a14f; } .vault-note .tok-c { color: #8a8f98; font-style: italic; } .vault-note .tok-n { color: #c18401; }
+@media (prefers-color-scheme: dark) { .vault-note .tok-k { color: #c678dd; } .vault-note .tok-s { color: #98c379; } .vault-note .tok-c { color: #7f848e; } .vault-note .tok-n { color: #d19a66; } }
+@media (max-width: 1200px) { .vault { grid-template-columns: 260px minmax(0, 1fr); } .vault-info { grid-column: 2; border-left: 0; border-top: 1px solid var(--line); } .vault { height: auto; } .vault-main { max-height: none; } .editor-panes { grid-template-columns: 1fr; } .editor-preview { border-left: 0; padding-left: 0; border-top: 1px dashed var(--line); } }
+@media (max-width: 800px) { .vault { grid-template-columns: 1fr; height: auto; } .vault-side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 45vh; } .vault-info { grid-column: 1; } .vault-main { padding: 0 14px 32px; } }
 .file-viewer .viewer-frame { background: var(--panel); border-radius: 12px; width: min(1000px, 94vw); height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
 .file-viewer .viewer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .file-viewer .viewer-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2082,31 +2021,269 @@ NOTICES_JS = r"""
 NOTICES_PATH = "/ui/assets/notices-" + _asset_hash(NOTICES_JS) + ".js"
 VAULT_JS = r"""
 (function () {
-  var box = document.getElementById("vault-filter");
-  if (!box) return;
-  function apply() {
-    var needle = box.value.trim().toLowerCase();
-    document.querySelectorAll(".vault-group").forEach(function (group) {
-      var any = false;
-      group.querySelectorAll(".vault-row").forEach(function (row) {
-        var show = !needle || (row.getAttribute("data-name") || "").indexOf(needle) >= 0;
-        row.hidden = !show;
-        if (show) any = true;
-      });
-      group.hidden = !any;
-    });
-  }
-  box.addEventListener("input", apply);
+  "use strict";
+  var app = document.querySelector(".vault");
+  if (!app) return;
+  var csrf = app.getAttribute("data-csrf") || "";
+  var current = app.getAttribute("data-path") || "";
+  function mod(e) { return e.ctrlKey || e.metaKey; }
+
+  // Math, drawn by the local KaTeX when the note has any.
   if (window.katex) {
     document.querySelectorAll(".vault-note .math").forEach(function (el) {
       var tex = el.textContent || "";
-      try {
-        window.katex.render(tex, el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" });
-      } catch (err) { el.textContent = tex; }
+      try { window.katex.render(tex, el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" }); }
+      catch (err) { el.textContent = tex; }
     });
   }
-  var active = document.querySelector(".vault-row.active");
+
+  // Filter the file tree.
+  var filter = document.getElementById("vault-filter");
+  if (filter) {
+    filter.addEventListener("input", function () {
+      var needle = filter.value.trim().toLowerCase();
+      document.querySelectorAll(".vault-list .vault-row").forEach(function (row) {
+        row.hidden = !!needle && (row.getAttribute("data-name") || "").indexOf(needle) < 0;
+      });
+      document.querySelectorAll(".vault-list .tree-folder").forEach(function (folder) {
+        var any = folder.querySelector(".vault-row:not([hidden])");
+        folder.hidden = !!needle && !any;
+        if (needle && any) folder.open = true;
+      });
+    });
+  }
+
+  // Remember which folders are open.
+  var KEY = "ssios.vault.open";
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (err) { saved = {}; }
+  document.querySelectorAll(".tree-folder").forEach(function (folder) {
+    var name = folder.getAttribute("data-folder");
+    if (saved[name] && !folder.open) folder.open = true;
+    folder.addEventListener("toggle", function () {
+      saved[name] = folder.open;
+      try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (err) {}
+    });
+  });
+  var active = document.querySelector(".vault-row.active, .search-hit.active");
   if (active && active.scrollIntoView) active.scrollIntoView({ block: "center" });
+
+  // Quick switcher.
+  var box = document.getElementById("switcher");
+  var input = document.getElementById("switcher-input");
+  var list = document.getElementById("switcher-list");
+  var index = null, shown = [], chosen = 0;
+  function score(item, needle) {
+    if (!needle) return 1;
+    var hay = (item.p + " " + (item.t || "") + " " + (item.a || []).join(" ")).toLowerCase();
+    if (hay.indexOf(needle) >= 0) return 3 + (item.p.toLowerCase().split("/").pop().indexOf(needle) === 0 ? 2 : 0);
+    var at = 0;
+    for (var i = 0; i < needle.length; i++) { at = hay.indexOf(needle.charAt(i), at); if (at < 0) return 0; at++; }
+    return 1;
+  }
+  function draw() {
+    var needle = input.value.trim().toLowerCase();
+    shown = (index || []).map(function (item) { return [score(item, needle), item]; })
+      .filter(function (pair) { return pair[0] > 0; })
+      .sort(function (a, b) { return b[0] - a[0] || a[1].p.length - b[1].p.length; })
+      .slice(0, 40).map(function (pair) { return pair[1]; });
+    chosen = Math.min(chosen, Math.max(shown.length - 1, 0));
+    list.textContent = "";
+    shown.forEach(function (item, i) {
+      var row = document.createElement("a");
+      row.className = "switcher-row" + (i === chosen ? " active" : "");
+      row.href = "/ui/vault/note?path=" + encodeURIComponent(item.p);
+      var name = document.createElement("strong");
+      name.textContent = item.p.split("/").pop().replace(/\.md$/i, "");
+      var where = document.createElement("span");
+      where.className = "muted small";
+      where.textContent = " " + item.p;
+      row.appendChild(name); row.appendChild(where);
+      list.appendChild(row);
+    });
+    if (!shown.length) { var none = document.createElement("p"); none.className = "muted"; none.textContent = "No match."; list.appendChild(none); }
+  }
+  function openSwitcher() {
+    if (!box) return;
+    box.hidden = false; input.value = ""; chosen = 0; input.focus();
+    if (index) { draw(); return; }
+    fetch("/ui/vault/index.json", { credentials: "same-origin" }).then(function (r) { return r.json(); })
+      .then(function (rows) { index = rows; draw(); }).catch(function () { index = []; draw(); });
+  }
+  function closeSwitcher() { if (box) box.hidden = true; }
+  if (input) {
+    input.addEventListener("input", function () { chosen = 0; draw(); });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") { chosen = Math.min(chosen + 1, shown.length - 1); draw(); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { chosen = Math.max(chosen - 1, 0); draw(); e.preventDefault(); }
+      else if (e.key === "Enter" && shown[chosen]) { location.href = "/ui/vault/note?path=" + encodeURIComponent(shown[chosen].p); }
+      else if (e.key === "Escape") { closeSwitcher(); }
+    });
+    box.addEventListener("click", function (e) { if (e.target === box) closeSwitcher(); });
+  }
+  var opener = document.getElementById("open-switcher");
+  if (opener) opener.addEventListener("click", openSwitcher);
+
+  // Editor.
+  var form = document.getElementById("note-editor");
+  var area = form ? form.querySelector("textarea[name=text]") : null;
+  var preview = form ? form.querySelector(".editor-preview") : null;
+  var state = form ? form.querySelector(".editor-state") : null;
+  var dirty = false, timer = null;
+  function setState(text, bad) { if (state) { state.textContent = text; state.className = "editor-state small " + (bad ? "bad" : "muted"); } }
+  function renderPreview() {
+    if (!preview) return;
+    fetch("/ui/vault/preview", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ csrf: csrf, path: current, text: area.value }) })
+      .then(function (r) { return r.text(); })
+      .then(function (markup) {
+        preview.innerHTML = markup;
+        if (window.katex) preview.querySelectorAll(".math").forEach(function (el) {
+          try { window.katex.render(el.textContent || "", el, { throwOnError: false, displayMode: el.getAttribute("data-display") === "1" }); } catch (err) {}
+        });
+      }).catch(function () {});
+  }
+  function save() {
+    var base = form.querySelector("input[name=base]");
+    setState("Saving…");
+    fetch("/ui/vault/note", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ csrf: csrf, op: "save", ajax: "1", path: current, base: base.value, text: area.value }) })
+      .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+      .then(function (pair) {
+        var j = pair[1];
+        if (j.ok) { base.value = j.base; dirty = false; setState("Saved"); return; }
+        if (j.conflict) { setState("Changed on disk. Use Save and read to compare.", true); return; }
+        setState(j.error || "Not saved.", true);
+      }).catch(function () { setState("Not saved. Check the connection.", true); });
+  }
+  if (area) {
+    renderPreview();
+    area.addEventListener("input", function () {
+      dirty = true; setState("Unsaved changes");
+      clearTimeout(timer); timer = setTimeout(renderPreview, 350);
+    });
+    area.addEventListener("keydown", function (e) {
+      if (e.key === "Tab" && !e.shiftKey) {
+        e.preventDefault();
+        var at = area.selectionStart;
+        area.setRangeText("\t", at, area.selectionEnd, "end");
+        area.dispatchEvent(new Event("input"));
+      }
+    });
+    area.addEventListener("paste", function (e) {
+      var files = (e.clipboardData && e.clipboardData.files) || [];
+      var picture = null;
+      for (var i = 0; i < files.length; i++) if (/^image\//.test(files[i].type)) { picture = files[i]; break; }
+      if (!picture) return;
+      e.preventDefault();
+      setState("Attaching image…");
+      var reader = new FileReader();
+      reader.onload = function () {
+        fetch("/ui/vault/note", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ csrf: csrf, op: "attach", path: current, data: reader.result }) })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (!j.ok) { setState(j.error || "The image was not attached.", true); return; }
+            area.setRangeText(j.embed, area.selectionStart, area.selectionEnd, "end");
+            area.dispatchEvent(new Event("input"));
+          }).catch(function () { setState("The image was not attached.", true); });
+      };
+      reader.readAsDataURL(picture);
+    });
+    form.addEventListener("submit", function () { dirty = false; });
+    window.addEventListener("beforeunload", function (e) { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+    area.focus();
+  }
+
+  // Shortcuts.
+  document.addEventListener("keydown", function (e) {
+    var key = (e.key || "").toLowerCase();
+    if (mod(e) && key === "o") { e.preventDefault(); openSwitcher(); }
+    else if (mod(e) && e.shiftKey && key === "f") { e.preventDefault(); location.href = "/ui/vault?view=search"; }
+    else if (mod(e) && key === "s" && area) { e.preventDefault(); save(); }
+    else if (mod(e) && key === "e" && current && /\.md$/i.test(current)) {
+      e.preventDefault();
+      location.href = "/ui/vault/note?path=" + encodeURIComponent(current) + (area ? "" : "&mode=edit");
+    }
+    else if (key === "escape") closeSwitcher();
+  });
+  var search = document.getElementById("vault-search");
+  if (search && !search.value) search.focus();
+
+  // Graph of the vault: a small force layout on a canvas.
+  var canvas = document.getElementById("vault-graph");
+  var data = document.getElementById("graph-data");
+  if (canvas && data) {
+    var graph = JSON.parse(data.textContent || "{}");
+    var nodes = graph.nodes || [], edges = graph.edges || [];
+    var ctx = canvas.getContext("2d");
+    var dpr = window.devicePixelRatio || 1;
+    function fit() {
+      var rect = canvas.getBoundingClientRect();
+      canvas.width = Math.max(rect.width, 300) * dpr; canvas.height = Math.max(rect.height, 300) * dpr;
+    }
+    fit(); window.addEventListener("resize", function () { fit(); paint(); });
+    var W = function () { return canvas.width / dpr; }, H = function () { return canvas.height / dpr; };
+    nodes.forEach(function (n, i) { var a = i * 2.39996; var r = 12 * Math.sqrt(i + 1); n.x = W() / 2 + r * Math.cos(a); n.y = H() / 2 + r * Math.sin(a); n.vx = 0; n.vy = 0; });
+    var view = { x: 0, y: 0, k: 1 }, hover = -1, ticks = 0;
+    var style = getComputedStyle(document.body);
+    var ink = style.getPropertyValue("--ink") || "#222", line = style.getPropertyValue("--line") || "#ccc", accent = style.getPropertyValue("--accent") || "#1d4ed8";
+    function step() {
+      var k = 0.02, i, j;
+      for (i = 0; i < nodes.length; i++) for (j = i + 1; j < nodes.length; j++) {
+        var a = nodes[i], b = nodes[j], dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
+        if (d2 > 90000) continue;
+        var f = 400 / d2; a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
+      }
+      edges.forEach(function (e) { var a = nodes[e[0]], b = nodes[e[1]]; var dx = b.x - a.x, dy = b.y - a.y; a.vx += dx * k; a.vy += dy * k; b.vx -= dx * k; b.vy -= dy * k; });
+      nodes.forEach(function (n) { n.vx += (W() / 2 - n.x) * 0.002; n.vy += (H() / 2 - n.y) * 0.002; n.vx *= 0.6; n.vy *= 0.6; n.x += n.vx; n.y += n.vy; });
+    }
+    function paint() {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W(), H());
+      ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+      ctx.strokeStyle = line; ctx.lineWidth = 1 / view.k;
+      edges.forEach(function (e) { var a = nodes[e[0]], b = nodes[e[1]]; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); });
+      nodes.forEach(function (n, i) {
+        var r = 3 + Math.min(Math.sqrt(n.degree || 0) * 1.6, 9);
+        ctx.fillStyle = i === hover ? accent : ink; ctx.globalAlpha = i === hover ? 1 : 0.75;
+        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
+        if (view.k > 1.4 || i === hover || (n.degree || 0) > 6) { ctx.globalAlpha = 1; ctx.font = (11 / view.k) + "px sans-serif"; ctx.fillText(n.title.slice(0, 30), n.x + r + 2, n.y + 3); }
+      });
+      ctx.globalAlpha = 1;
+    }
+    var touched = false;
+    function fitAll() {
+      if (touched || !nodes.length) return;
+      var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      nodes.forEach(function (n) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); });
+      var k = Math.min(2, (W() - 60) / Math.max(x1 - x0, 1), (H() - 60) / Math.max(y1 - y0, 1));
+      view.k = k; view.x = W() / 2 - k * (x0 + x1) / 2; view.y = H() / 2 - k * (y0 + y1) / 2;
+    }
+    (function loop() { if (ticks++ < 300) { step(); fitAll(); paint(); requestAnimationFrame(loop); } })();
+    function at(e) {
+      var rect = canvas.getBoundingClientRect();
+      var x = (e.clientX - rect.left - view.x) / view.k, y = (e.clientY - rect.top - view.y) / view.k;
+      for (var i = nodes.length - 1; i >= 0; i--) { var dx = nodes[i].x - x, dy = nodes[i].y - y; if (dx * dx + dy * dy < 100 / view.k) return i; }
+      return -1;
+    }
+    var drag = null;
+    canvas.addEventListener("mousedown", function (e) { touched = true; drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false }; });
+    window.addEventListener("mouseup", function (e) {
+      if (drag && !drag.moved) { var hit = at(e); if (hit >= 0) location.href = "/ui/vault/note?path=" + encodeURIComponent(nodes[hit].path); }
+      drag = null;
+    });
+    canvas.addEventListener("mousemove", function (e) {
+      if (drag) { var dx = e.clientX - drag.x, dy = e.clientY - drag.y; if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true; view.x = drag.vx + dx; view.y = drag.vy + dy; paint(); return; }
+      var hit = at(e); if (hit !== hover) { hover = hit; canvas.style.cursor = hit >= 0 ? "pointer" : "default"; paint(); }
+    });
+    canvas.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      touched = true;
+      var rect = canvas.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      var k = Math.min(4, Math.max(0.2, view.k * (e.deltaY < 0 ? 1.15 : 0.87)));
+      view.x = mx - (mx - view.x) * k / view.k; view.y = my - (my - view.y) * k / view.k; view.k = k; paint();
+    }, { passive: false });
+  }
 })();
 """
 VAULT_PATH = "/ui/assets/vault-" + _asset_hash(VAULT_JS) + ".js"

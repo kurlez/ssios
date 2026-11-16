@@ -161,6 +161,8 @@ def _tag_list(meta: dict, body: str) -> list[str]:
 
 
 _HEAD_BYTES = 16_000
+_INDEX_VERSION = 2
+NOTE_BYTES = 2_000_000
 
 
 def list_notes(settings, account_id: str) -> list[dict]:
@@ -177,7 +179,8 @@ def list_notes(settings, account_id: str) -> list[dict]:
     root = account_vault(settings, account_id)
     index_path = Path(settings.state_dir) / "accounts" / account_id / "vault-index.json"
     saved = read_json(index_path, {})
-    cache = saved.get("notes") if isinstance(saved, dict) and saved.get("root") == str(root) and isinstance(saved.get("notes"), dict) else {}
+    current = isinstance(saved, dict) and saved.get("root") == str(root) and saved.get("v") == _INDEX_VERSION and isinstance(saved.get("notes"), dict)
+    cache = saved.get("notes") if current else {}
     fresh: dict[str, dict] = {}
     notes = []
     changed = False
@@ -199,20 +202,21 @@ def list_notes(settings, account_id: str) -> list[dict]:
             except (SsiosError, OSError):
                 continue
             meta, body = _split_frontmatter(text)
-            row = {"stamp": stamp, "title": str(meta.get("title") or Path(rel).stem)[:200], "source": str(meta.get("source") or "")[:500], "tags": _tag_list(meta, body)}
+            aliases = [part.strip().strip("\"'") for part in str(meta.get("aliases") or meta.get("alias") or "").strip("[]").split(",") if part.strip()][:20]
+            row = {"stamp": stamp, "title": str(meta.get("title") or Path(rel).stem)[:200], "source": str(meta.get("source") or "")[:500], "tags": _tag_list(meta, body), "aliases": aliases}
             changed = True
         fresh[rel] = row
-        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or []), "mtime": info.st_mtime})
+        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or []), "aliases": list(row.get("aliases") or []), "mtime": info.st_mtime})
     if changed or set(fresh) != set(cache):
         try:
-            write_json(index_path, {"root": str(root), "notes": fresh})
+            write_json(index_path, {"root": str(root), "v": _INDEX_VERSION, "notes": fresh})
         except OSError:
             pass
     return notes
 
 
 def read_note(settings, account_id: str, rel: str) -> str:
-    return read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".md",)), limit=200_000).decode("utf-8", "replace")
+    return read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".md",)), limit=NOTE_BYTES).decode("utf-8", "replace")
 
 
 def list_attachments(settings, account_id: str) -> list[dict]:
@@ -454,19 +458,52 @@ def _table(rows: list[list[str]]) -> str:
 
 
 def _split_frontmatter(markdown: str) -> tuple[dict, str]:
-    if not markdown.startswith("---\n"):
+    """Properties as text, and the body. A list property, inline or one item per line, becomes "a, b"."""
+    props, body = properties(markdown)
+    return {key: ", ".join(value) if isinstance(value, list) else value for key, value in props.items()}, body
+
+
+def properties(markdown: str) -> tuple[dict, str]:
+    """The YAML block at the top, in the subset Obsidian writes: key: value, key: [a, b], and lists of "- item" lines."""
+    text = markdown.replace("\r\n", "\n")
+    if not text.startswith("---\n"):
         return {}, markdown
-    end = markdown.find("\n---\n", 4)
-    if end < 0:
+    end = text.find("\n---", 3)
+    if end < 0 or (len(text) > end + 4 and text[end + 4] not in "\n"):
         return {}, markdown
-    raw = markdown[4:end]
-    meta: dict[str, str] = {}
-    for line in raw.splitlines():
-        if ":" not in line:
+    raw = text[4:end]
+    rest = text[end + 4 :]
+    body = rest[1:] if rest.startswith("\n") else rest
+    props: dict = {}
+    key = ""
+    for line in raw.split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        key, value = line.split(":", 1)
-        meta[key.strip()] = value.strip().strip('"')
-    return meta, markdown[end + 5 :]
+        item = re.match(r"^\s+-\s*(.*)$", line) or re.match(r"^-\s+(.*)$", line)
+        if item and key:
+            current = props.get(key)
+            if not isinstance(current, list):
+                current = [] if current in ("", None) else [current]
+            current.append(_scalar(item.group(1)))
+            props[key] = current
+            continue
+        if ":" not in line or line.startswith(" "):
+            continue
+        name, value = line.split(":", 1)
+        key = name.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            props[key] = [_scalar(part) for part in value[1:-1].split(",") if part.strip()]
+        else:
+            props[key] = _scalar(value)
+    return props, body
+
+
+def _scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 def _md_html(body: str, link_for) -> str:

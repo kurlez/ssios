@@ -30,14 +30,14 @@ class MarkdownTest(unittest.TestCase):
             "## Part 1 中文译文\n"
         )
         out = render(text, _link)
-        self.assertIn("<h1>0xQuit：Binance 热钱包被盗分析</h1>", out)
+        self.assertIn('<h1 id="0xquitbinance-热钱包被盗分析">0xQuit：Binance 热钱包被盗分析</h1>', out)
         self.assertIn("<li><strong>来源</strong>：X（Twitter）@0xQuit</li>", out)
         self.assertIn("<li><strong>发布时间</strong>：\n<ul><li>主分析帖：2026-10-29 14:09 PDT（2026-10-29 21:09 UTC）</li><li>修正帖：2026-10-29 16:07 PDT</li></ul></li>", out)
         self.assertIn('<ul><li>主分析帖：<a href="https://x.com/0xQuit/status/2115913970075009439" rel="noopener noreferrer">https://x.com/0xQuit/status/2115913970075009439</a></li></ul>', out)
         self.assertNotIn("**", out)
         self.assertNotIn("<p>-", out)
         self.assertNotIn("---", out)
-        self.assertTrue(out.index("</ul>\n<hr>") < out.index("<h2>Part 1 中文译文</h2>"))
+        self.assertTrue(out.index("</ul>\n<hr>") < out.index('<h2 id="part-1-中文译文">Part 1 中文译文</h2>'))
 
     def test_blocks(self) -> None:
         out = render(
@@ -56,10 +56,10 @@ class MarkdownTest(unittest.TestCase):
         self.assertIn('<th style="text-align:left">名称</th><th style="text-align:right">数量</th>', out)
         self.assertIn('<td style="text-align:left">a | b</td><td style="text-align:right"><strong>2</strong></td>', out)
         self.assertIn('<td style="text-align:left"><code>x|y</code></td><td style="text-align:right"></td>', out)
-        self.assertIn('<pre><code class="language-python">print(&#x27;&lt;hi&gt;&#x27;)\n# not a heading</code></pre>', out)
+        self.assertIn('<pre><code class="language-python">print(<span class="tok-s">&#x27;&lt;hi&gt;&#x27;</span>)\n<span class="tok-c"># not a heading</span></code></pre>', out)
         self.assertIn("<p>line one<br>line two</p>", out)
         self.assertIn("<hr>", out)
-        self.assertIn("<h6>six</h6>", out)
+        self.assertIn('<h6 id="six">six</h6>', out)
         self.assertIn("<p>####### seven</p>", out)
         loose = render("- a\n\n- b\n\n  more\n\nafter\n", _link)
         self.assertIn("<li><p>b</p>\n<p>more</p></li>", loose)

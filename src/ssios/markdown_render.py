@@ -12,21 +12,109 @@ from __future__ import annotations
 
 import html
 import re
+import threading
+
+from ssios.notes_index import slug
 
 _FENCE = re.compile(r"^ {0,3}(```+|~~~+)\s*([\w+#.-]*)\s*$")
 _HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _RULE = re.compile(r"^ {0,3}([-*_])(?:\s*\1){2,}\s*$")
 _ITEM = re.compile(r"^(\s*)([-*+]|\d{1,9}[.)])(\s+|$)(.*)$")
 _TABLE_BAR = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
-_CALLOUT = re.compile(r"^\[!([A-Za-z-]+)\][+-]?\s*(.*)$")
+_CALLOUT = re.compile(r"^\[!([A-Za-z-]+)\]([+-]?)\s*(.*)$")
+_FOOTDEF = re.compile(r"^\[\^([^\]\s]+)\]:\s?(.*)$")
+_BLOCK_ID = re.compile(r"\s\^([A-Za-z0-9-]{1,40})\s*$")
+_EMBED_LINE = re.compile(r"^!\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]$")
+_STATE = threading.local()
 _SAFE_PREFIX = ("https://", "http://", "/ui/vault/")
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 _TRAIL = ".,;:!?。，、；：！？”’\"'"
 
 
-def render(body: str, link_for) -> str:
-    lines = [line.replace("\t", "    ") for line in str(body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    return _blocks(lines, link_for, tight=False, depth=0)
+def render(body: str, link_for, embed_for=None) -> str:
+    """embed_for(target) returns the HTML for a note placed with ![[Note]], or None to show a link instead."""
+    text = _strip_comments(str(body or "").replace("\r\n", "\n").replace("\r", "\n"))
+    text, notes = _footnote_definitions(text)
+    outer = getattr(_STATE, "doc", None)
+    doc = {"embed_for": embed_for, "notes": notes, "order": [], "ids": outer["ids"] if outer else {}}
+    _STATE.doc = doc
+    try:
+        lines = [line.replace("\t", "    ") for line in text.split("\n")]
+        out = _blocks(lines, link_for, tight=False, depth=0)
+        if doc["order"]:
+            items = "".join(
+                f'<li id="fn-{number}">{inline(notes[key], link_for)} <a class="footnote-back" href="#fnref-{number}" aria-label="Back">↩</a></li>'
+                for number, key in enumerate(doc["order"], start=1)
+            )
+            out += f'\n<section class="footnotes"><ol>{items}</ol></section>'
+    finally:
+        _STATE.doc = outer
+    return out
+
+
+def _fenced_split(text: str) -> list[tuple[bool, str]]:
+    """The text in pieces, each marked as inside a code fence or not."""
+    pieces: list[tuple[bool, str]] = []
+    marker = ""
+    current: list[str] = []
+    for line in text.split("\n"):
+        fence = _FENCE.match(line)
+        if not marker and fence:
+            pieces.append((False, "\n".join(current)))
+            current = [line]
+            marker = fence.group(1)
+            continue
+        current.append(line)
+        if marker and re.match(r"^ {0,3}" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$", line):
+            pieces.append((True, "\n".join(current)))
+            current = []
+            marker = ""
+    pieces.append((bool(marker), "\n".join(current)))
+    return pieces
+
+
+def _strip_comments(text: str) -> str:
+    """%%comments%% are hidden in reading view, as in Obsidian. Code is left alone."""
+    if "%%" not in text:
+        return text
+    return "\n".join(piece if fenced else re.sub(r"%%.*?%%", "", piece, flags=re.S) for fenced, piece in _fenced_split(text))
+
+
+def _footnote_definitions(text: str) -> tuple[str, dict[str, str]]:
+    if "[^" not in text:
+        return text, {}
+    notes: dict[str, str] = {}
+    kept: list[str] = []
+    for fenced, piece in _fenced_split(text):
+        if fenced:
+            kept.append(piece)
+            continue
+        lines = piece.split("\n")
+        out = []
+        key = ""
+        for line in lines:
+            found = _FOOTDEF.match(line)
+            if found:
+                key = found.group(1)
+                notes[key] = found.group(2).strip()
+                continue
+            if key and line.startswith(("    ", "\t")) and line.strip():
+                notes[key] += " " + line.strip()
+                continue
+            key = ""
+            out.append(line)
+        kept.append("\n".join(out))
+    return "\n".join(kept), notes
+
+
+def _heading_id(text: str) -> str:
+    doc = getattr(_STATE, "doc", None)
+    anchor = slug(text)
+    if doc is None:
+        return anchor
+    count = doc["ids"].get(anchor, 0)
+    doc["ids"][anchor] = count + 1
+    return anchor if count == 0 else f"{anchor}-{count}"
 
 
 def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
@@ -49,7 +137,10 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
             index += 1
             lang = fence.group(2)
             attr = f' class="language-{html.escape(lang, quote=True)}"' if lang else ""
-            out.append(f"<pre><code{attr}>" + html.escape("\n".join(code)) + "</code></pre>")
+            if lang.casefold() == "mermaid":
+                out.append('<figure class="mermaid-source"><figcaption>Mermaid diagram, shown as its source</figcaption><pre><code>' + html.escape("\n".join(code)) + "</code></pre></figure>")
+            else:
+                out.append(f"<pre><code{attr}>" + highlight("\n".join(code), lang) + "</code></pre>")
             continue
         opener = line.strip()
         if opener.startswith("$$") or opener == "\\[":
@@ -76,7 +167,7 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
         heading = _HEADING.match(line)
         if heading:
             level = len(heading.group(1))
-            out.append(f"<h{level}>" + inline(heading.group(2), link_for) + f"</h{level}>")
+            out.append(f'<h{level} id="{html.escape(_heading_id(heading.group(2)), quote=True)}">' + inline(heading.group(2), link_for) + f"</h{level}>")
             index += 1
             continue
         if _RULE.match(line):
@@ -121,14 +212,31 @@ def _blocks(lines: list[str], link_for, *, tight: bool, depth: int) -> str:
                 index += 1
             out.append(_list(block, link_for, depth))
             continue
+        placed = _EMBED_LINE.match(line.strip())
+        doc = getattr(_STATE, "doc", None)
+        if placed and doc and doc.get("embed_for") and not placed.group(1).split("#", 1)[0].strip().casefold().endswith(_IMAGE_SUFFIXES):
+            produced = doc["embed_for"](placed.group(1).strip())
+            if produced is not None:
+                out.append(produced)
+                index += 1
+                continue
         para = [line.strip()]
         index += 1
         while index < total and lines[index].strip() and not _starts_block(lines, index):
             para.append(lines[index].strip())
             index += 1
+        block_id = ""
+        marked = _BLOCK_ID.search(para[-1])
+        if marked:
+            block_id = marked.group(1)
+            para[-1] = para[-1][: marked.start()]
         text = "<br>".join(inline(part, link_for) for part in para)
+        anchor = f' id="block-{html.escape(block_id, quote=True)}"' if block_id else ""
         # In a tight list the item's first line is not wrapped, so the bullet and the text share a line.
-        out.append(text if tight and not out else f"<p>{text}</p>")
+        if tight and not out:
+            out.append(f'<span{anchor}>{text}</span>' if anchor else text)
+        else:
+            out.append(f"<p{anchor}>{text}</p>")
     return "\n".join(out)
 
 
@@ -147,9 +255,14 @@ def _quote(lines: list[str], link_for, depth: int) -> str:
     callout = _CALLOUT.match(lines[0].strip()) if lines else None
     if callout:
         kind = callout.group(1).casefold()
-        title = callout.group(2).strip() or kind.capitalize()
+        fold = callout.group(2)
+        title = callout.group(3).strip() or kind.capitalize()
         inner = _blocks(lines[1:], link_for, tight=False, depth=depth + 1)
-        return f'<div class="callout callout-{html.escape(kind, quote=True)}"><div class="callout-title">{inline(title, link_for)}</div>{inner}</div>'
+        css = html.escape(kind, quote=True)
+        if fold:
+            opened = " open" if fold == "+" else ""
+            return f'<details class="callout callout-{css}"{opened}><summary class="callout-title">{inline(title, link_for)}</summary>{inner}</details>'
+        return f'<div class="callout callout-{css}"><div class="callout-title">{inline(title, link_for)}</div>{inner}</div>'
     return "<blockquote>" + _blocks(lines, link_for, tight=False, depth=depth + 1) + "</blockquote>"
 
 
@@ -273,6 +386,20 @@ def inline(text: str, link_for) -> str:
     # One dollar opens a formula only when text follows it directly and the closing dollar is not followed by a digit,
     # so "$12.50 and $3" stays as written.
     text = re.sub(r"(?<![\w$])\$(?=[^\s$])([^$\n]*?[^\s$\\])\$(?![\w$])", math, text)
+    doc = getattr(_STATE, "doc", None)
+    if doc and doc["notes"] and "[^" in text:
+        def reference(found) -> str:
+            key = found.group(1)
+            if key not in doc["notes"]:
+                return found.group(0)
+            first = key not in doc["order"]
+            if first:
+                doc["order"].append(key)
+            number = doc["order"].index(key) + 1
+            back = f' id="fnref-{number}"' if first else ""
+            return hold(f'<sup class="footnote-ref"><a href="#fn-{number}"{back}>{number}</a></sup>')
+
+        text = re.sub(r"\[\^([^\]\s]+)\]", reference, text)
     text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~=<>])", lambda found: hold(html.escape(found.group(1))), text)
 
     def embed(found) -> str:
@@ -282,6 +409,10 @@ def inline(text: str, link_for) -> str:
         if target.casefold().split("#", 1)[0].endswith(_IMAGE_SUFFIXES):
             size = option if re.fullmatch(r"\d{1,4}(x\d{1,4})?", option) else ""
             return f"![{'|' + size if size else ''}]({address})"
+        if doc and doc.get("embed_for"):
+            produced = doc["embed_for"](target)
+            if produced is not None:
+                return hold(produced)
         # A note or a PDF placed in a note is shown as a link to it.
         return f"[{option or target}]({address})"
 
@@ -313,7 +444,8 @@ def inline(text: str, link_for) -> str:
             label = _emphasis(html.escape(found.group(3)))
             href = link_for(found.group(4).replace("%20", " "))
             if href and href.startswith(_SAFE_PREFIX):
-                return hold(f'<a href="{html.escape(href, quote=True)}" rel="noopener noreferrer">{label}</a>')
+                css = ' class="unresolved"' if href.startswith("/ui/vault/") and "missing=1" in href else ""
+                return hold(f'<a{css} href="{html.escape(href, quote=True)}" rel="noopener noreferrer">{label}</a>')
             return hold(label)
         raw = found.group(5) or found.group(6) or ""
         tail = ""
@@ -342,3 +474,45 @@ def _emphasis(escaped: str) -> str:
     text = re.sub(r"~~(?=\S)(.+?)(?<=\S)~~", r"<del>\1</del>", text)
     text = re.sub(r"==(?=\S)(.+?)(?<=\S)==", r"<mark>\1</mark>", text)
     return text
+
+
+_LANGS = {
+    "python": "py", "py": "py", "javascript": "js", "js": "js", "jsx": "js", "ts": "js", "tsx": "js", "typescript": "js", "json": "js",
+    "bash": "sh", "sh": "sh", "shell": "sh", "zsh": "sh", "console": "sh", "yaml": "sh", "yml": "sh", "toml": "sh", "r": "sh", "ruby": "sh", "rb": "sh",
+    "go": "c", "rust": "c", "rs": "c", "java": "c", "c": "c", "cpp": "c", "c++": "c", "cs": "c", "csharp": "c", "kotlin": "c", "swift": "c", "css": "c", "scss": "c",
+    "sql": "sql",
+}
+_KEYWORDS = {
+    "py": "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return self True try while with yield",
+    "js": "async await break case catch class const continue default delete do else export extends false finally for from function if import in instanceof interface let new null of return super switch this throw true try type typeof undefined var void while yield",
+    "sh": "case do done elif else esac export fi for function if in local return then until while true false null",
+    "c": "auto bool break case catch char class const continue default defer do double else enum extern false fn for func go if impl import int interface let long match mod mut new nil null package private protected pub public return self static struct switch this throw true try type use var void while",
+    "sql": "add all and as asc between by case create delete desc distinct drop else end exists from group having in index inner insert into is join left like limit not null on or order outer right select set table then union update values when where with",
+}
+_COMMENT = {"py": r"#[^\n]*", "sh": r"#[^\n]*", "js": r"//[^\n]*|/\*[\s\S]*?\*/", "c": r"//[^\n]*|/\*[\s\S]*?\*/", "sql": r"--[^\n]*|/\*[\s\S]*?\*/"}
+
+
+def highlight(code: str, lang: str) -> str:
+    """Comments, strings, numbers, and keywords, for the common languages. Anything else is shown plain."""
+    family = _LANGS.get(str(lang or "").casefold())
+    if not family:
+        return html.escape(code)
+    words = set(_KEYWORDS[family].split())
+    pattern = re.compile(
+        "(?P<c>" + _COMMENT[family] + r")|(?P<s>\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)"
+        r"|(?P<n>\b\d+(?:\.\d+)?\b)|(?P<w>[A-Za-z_][A-Za-z0-9_]*)"
+    )
+    out = []
+    cursor = 0
+    for found in pattern.finditer(code):
+        out.append(html.escape(code[cursor : found.start()]))
+        piece = html.escape(found.group(0))
+        kind = found.lastgroup
+        if kind == "w":
+            hit = found.group(0) if family != "sql" else found.group(0).casefold()
+            out.append(f'<span class="tok-k">{piece}</span>' if hit in words else piece)
+        else:
+            out.append(f'<span class="tok-{kind}">{piece}</span>')
+        cursor = found.end()
+    out.append(html.escape(code[cursor:]))
+    return "".join(out)
