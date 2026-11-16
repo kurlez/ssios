@@ -59,7 +59,7 @@ Branch `claude/epic-bardeen-zdd6j2`. Obsidian here means the desktop app with it
 | 7 | Graph | 4.5 / 5 | Colour by top folder with a legend, orphan switch, filter, all labels. No custom groups or local-graph depth |
 | 8 | Vault compatibility | 8 / 8 | Link format, Markdown links, and update-links settings are honoured, and Excluded files are left out of search, graph, mentions, and the switcher, as in Obsidian |
 | 9 | Interface | 6 / 7 | Pane toggles kept per browser, autocomplete drops stale answers. Pane widths are fixed |
-| | **Total** | **91 / 100** | |
+| | **Total** | **91.5 / 100** | |
 
 ### How this was checked
 
