@@ -1689,6 +1689,10 @@ pre, code { font-family: ui-monospace, "SF Mono", "Sarasa Mono SC", monospace; }
 .vault.hide-left.hide-right { grid-template-columns: 0 minmax(0, 1fr) 0; }
 .vault.hide-left .vault-side, .vault.hide-right .vault-info { display: none; }
 .pane-toggles { display: inline-flex; gap: 2px; }
+.info-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: .78rem; padding: 0 2px 6px; border-bottom: 1px solid var(--line); }
+.pane-close { font-size: 16px; line-height: 1; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.pane-close:hover { border-color: var(--line); color: var(--ink); background: var(--hover); }
+.pane-toggles button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .pane-toggles button { font-size: 14px; line-height: 1; height: 26px; width: 28px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); cursor: pointer; }
 .graph-controls { display: inline-flex; gap: 10px; align-items: center; font-size: .82rem; }
 .graph-controls input[type=search] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font: inherit; }
@@ -2073,13 +2077,33 @@ VAULT_JS = r"""
   var PANES = "ssios.vault.panes";
   var panes = {};
   try { panes = JSON.parse(localStorage.getItem(PANES) || "{}") || {}; } catch (err) { panes = {}; }
-  function applyPanes() { app.classList.toggle("hide-left", !!panes.left); app.classList.toggle("hide-right", !!panes.right); }
+  function applyPanes() {
+    app.classList.toggle("hide-left", !!panes.left); app.classList.toggle("hide-right", !!panes.right);
+    document.querySelectorAll(".pane-toggles [data-pane]").forEach(function (button) {
+      var side = button.getAttribute("data-pane");
+      button.setAttribute("aria-pressed", panes[side] ? "true" : "false");
+      button.title = (panes[side] ? "Show " : "Hide ") + (side === "left" ? "the file list" : "links and outline");
+    });
+  }
   applyPanes();
   document.querySelectorAll("[data-pane]").forEach(function (button) {
     button.addEventListener("click", function () {
       var side = button.getAttribute("data-pane");
       panes[side] = !panes[side]; applyPanes();
       try { localStorage.setItem(PANES, JSON.stringify(panes)); } catch (err) {}
+    });
+  });
+
+  // Each section of the right pane stays open or folded as you last left it, in this browser.
+  var SECTIONS = "ssios.vault.sections";
+  var folded = {};
+  try { folded = JSON.parse(localStorage.getItem(SECTIONS) || "{}") || {}; } catch (err) { folded = {}; }
+  document.querySelectorAll(".vault-info details[data-section]").forEach(function (section) {
+    var name = section.getAttribute("data-section");
+    if (name in folded) section.open = !folded[name];
+    section.addEventListener("toggle", function () {
+      folded[name] = !section.open;
+      try { localStorage.setItem(SECTIONS, JSON.stringify(folded)); } catch (err) {}
     });
   });
 

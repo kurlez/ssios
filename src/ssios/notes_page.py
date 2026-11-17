@@ -274,11 +274,13 @@ def _info_pane(view, rel: str, text: str, csrf: str = "") -> str:
     )
     return (
         '<aside class="vault-info">'
-        f'<details open><summary>Outline <span class="count">{len(heads)}</span></summary>{outline_html}</details>'
-        f'<details open><summary>Backlinks <span class="count">{len(back)}</span></summary>{partial}{back_html}</details>'
-        f'<details><summary>Unlinked mentions <span class="count">{len(mentions)}</span></summary>{mention_html}</details>'
-        f'<details open><summary>Outgoing links <span class="count">{len(outgoing)}</span></summary>{out_html}</details>'
-        f'<details open><summary>Local graph</summary>{_local_graph(view, rel, outgoing, back)}</details>'
+        '<div class="info-head"><span>Links and outline</span>'
+        '<button type="button" class="pane-close" data-pane="right" title="Close this pane. ◨ in the note bar opens it again." aria-label="Close this pane">×</button></div>'
+        f'<details data-section="outline" open><summary>Outline <span class="count">{len(heads)}</span></summary>{outline_html}</details>'
+        f'<details data-section="backlinks" open><summary>Backlinks <span class="count">{len(back)}</span></summary>{partial}{back_html}</details>'
+        f'<details data-section="mentions"><summary>Unlinked mentions <span class="count">{len(mentions)}</span></summary>{mention_html}</details>'
+        f'<details data-section="outgoing" open><summary>Outgoing links <span class="count">{len(outgoing)}</span></summary>{out_html}</details>'
+        f'<details data-section="graph" open><summary>Local graph</summary>{_local_graph(view, rel, outgoing, back)}</details>'
         "</aside>"
     )
 

@@ -383,3 +383,11 @@ class ExcludedAndPeekTest(PageTest):
         with self.assertRaises(urllib.error.HTTPError) as refused:
             _get(self.base, "/ui/vault/peek?path=..%2Fsecrets.md", self.cookie)
         self.assertEqual(refused.exception.code, 400)
+
+
+class RightPaneTest(PageTest):
+    def test_the_right_pane_has_a_close_button_and_named_sections(self) -> None:
+        status, page = _get(self.base, "/ui/vault/note?path=Projects%2FHarbor%2FPlan.md", self.cookie)
+        self.assertIn('class="pane-close" data-pane="right"', page)
+        for name in ("outline", "backlinks", "mentions", "outgoing", "graph"):
+            self.assertIn(f'data-section="{name}"', page)
