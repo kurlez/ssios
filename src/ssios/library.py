@@ -22,6 +22,8 @@ IMAGE_LIMIT = 50_000_000
 DOCUMENT_LIMIT = 100_000_000
 MEDIA_LIMIT = 500_000_000
 _LOCK = threading.Lock()
+SOURCES = {"paste", "drag", "picker", "folder", "link", "watch", "eagle"}
+MAX_DROP_DEPTH = 12
 MARKER = "ssios-library.json"
 _PARTIAL = {".part", ".crdownload", ".download", ".tmp", ".filepart"}
 _ARCHIVE = {".zip", ".7z", ".rar", ".gz", ".tgz", ".dmg", ".iso", ".tar"}
@@ -165,6 +167,69 @@ def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str,
     _write_metadata(plane, account_id, library_id, data)
     _audit(plane, account_id, peer_ip, "library.folder", folder_id, "ok", 0)
     return {"id": folder_id, "name": title}
+
+
+def ensure_folder_path(plane, account_id: str, library_id: str, parent_id: str, names: list[str], peer_ip: str) -> str:
+    """The folder at parent/names[0]/names[1]/..., made where it is missing. Names match without regard to case."""
+    _require(plane, account_id, library_id, "add")
+    if len(names) > MAX_DROP_DEPTH:
+        raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    with _LOCK:
+        data = _metadata(plane, account_id, library_id, create=False, name="")
+        folders = [row for row in data.get("folders") or [] if isinstance(row, dict)]
+        current = parent_id or ""
+        made = False
+        for raw in names:
+            title = " ".join(str(raw or "").split())[:40]
+            if not title or title.startswith(".") or "/" in title:
+                raise SsiosError("library_folder_name", say(_lang(plane, account_id), "lib_folder_name"), 400)
+            hit = next((row for row in folders if str(row.get("parent_id") or "") == current and str(row.get("name") or "").casefold() == title.casefold()), None)
+            if hit is None:
+                hit = {"id": "fld-" + hashlib.sha256(f"{library_id}:{current}:{title}:{_now()}:{len(folders)}".encode()).hexdigest()[:8], "name": title, "parent_id": current}
+                folders.append(hit)
+                made = True
+            current = str(hit["id"])
+        if made:
+            data["folders"] = folders
+            _write_metadata(plane, account_id, library_id, data)
+    if made:
+        _audit(plane, account_id, peer_ip, "library.folder", current, "ok", 0)
+    return current
+
+
+def clean_tags(raw) -> list[str]:
+    """Tags typed as "a, b" or a list. Blank, slashed, and repeated tags are dropped."""
+    values = raw if isinstance(raw, list) else str(raw or "").replace("，", ",").split(",")
+    found: list[str] = []
+    for value in values:
+        title = " ".join(str(value or "").split()).lstrip("#")[:40]
+        if title and "/" not in title and title.casefold() not in {one.casefold() for one in found}:
+            found.append(title)
+    return found[:20]
+
+
+def add_item_tags(plane, account_id: str, library_id: str, item_id: str, tags: list[str], peer_ip: str) -> dict:
+    """Add several tags to one item at once, and to the library's tag list."""
+    _require(plane, account_id, library_id, "add")
+    with _LOCK:
+        item = get_item(plane, account_id, library_id, item_id)
+        current = [str(tag) for tag in item.get("tags") or []]
+        known = {tag.casefold(): tag for tag in current}
+        for tag in tags:
+            if tag.casefold() not in known:
+                current.append(tag)
+                known[tag.casefold()] = tag
+        item["tags"] = current[:40]
+        _write_item(plane, account_id, library_id, item)
+        data = _metadata(plane, account_id, library_id, create=False, name="")
+        listed = [str(tag) for tag in data.get("tags") or []]
+        lower = {tag.casefold() for tag in listed}
+        added = [tag for tag in tags if tag.casefold() not in lower]
+        if added:
+            data["tags"] = (listed + added)[:2000]
+            _write_metadata(plane, account_id, library_id, data)
+    _audit(plane, account_id, peer_ip, "library.tag", item_id, "ok", 0)
+    return item
 
 
 def tag_counts(plane, account_id: str, library_id: str) -> list[tuple[str, int]]:
@@ -312,17 +377,23 @@ def import_relative(
     source: str,
     peer_ip: str,
     folder_id: str = "",
+    tags: list[str] | None = None,
 ) -> dict:
-    """Import one dropped file. A directory path is rejected and is not walked."""
+    """Import one dropped file. A file inside a dropped folder lands in the same subfolders, made in Files as needed."""
     lang = _lang(plane, account_id)
     parts = [part for part in str(relative or "").replace("\\", "/").split("/") if part not in {"", "."}]
     shown = "/".join(parts) or str(relative or "")
-    if len(parts) > 1 or shown.endswith("/"):
+    if shown.endswith("/") and len(parts) <= 1:
         return {"path": shown.rstrip("/"), "status": "rejected", "code": "drop_directory", "reason": say(lang, "drop_directory"), "id": ""}
     if not parts or any(part in {"..", ".git"} or part.startswith(".") for part in parts):
         return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "library_rejected"), "id": ""}
+    if len(parts) - 1 > MAX_DROP_DEPTH:
+        return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "drop_too_deep", depth=MAX_DROP_DEPTH), "id": ""}
     try:
         parent = folder_id or ""
+        if len(parts) > 1:
+            parent = ensure_folder_path(plane, account_id, library_id, parent, parts[:-1], peer_ip)
+            source = "folder" if source in {"drag", "picker"} else source
         saved = import_path(
             plane,
             account_id,
@@ -335,6 +406,11 @@ def import_relative(
         )
     except SsiosError as exc:
         return {"path": shown, "status": "rejected", "code": exc.code, "reason": exc.detail, "id": ""}
+    if tags and saved.get("result") in {"saved", "version"} and saved.get("id"):
+        try:
+            add_item_tags(plane, account_id, library_id, str(saved["id"]), tags, peer_ip)
+        except SsiosError:
+            pass
     if saved.get("result") == "conflict":
         return {
             "path": shown,
@@ -648,6 +724,9 @@ def _record_item(
     existing_id: str = "",
 ) -> dict:
     stamp = _now()
+    from ssios.library_meta import file_info
+
+    media = file_info(_library_root(plane, account_id, library_id) / "objects" / f"{digest}.{kind['ext']}", kind["ext"])
     with _LOCK:
         items = _items(plane, account_id, library_id)
         match = next((item for item in items if item.get("id") == existing_id), None) if existing_id else None
@@ -672,7 +751,7 @@ def _record_item(
                 "tags": [],
                 "star": 0,
                 "annotation": "",
-                "source_kind": source if source in {"paste", "drag", "picker"} else "picker",
+                "source_kind": source if source in SOURCES else "picker",
                 "imported_at": stamp,
                 "modified_at": stamp,
                 "captured_at": captured,
@@ -681,6 +760,7 @@ def _record_item(
                 "trashed": False,
                 "trashed_at": "",
             }
+            match.update(media)
             _write_item(plane, account_id, library_id, match)
             action = "library.import"
             result = "saved"
@@ -697,6 +777,9 @@ def _record_item(
             match["analysis_model"] = ""
             if captured:
                 match["captured_at"] = captured
+            for key in ("width", "height", "orientation", "duration"):
+                match.pop(key, None)
+            match.update(media)
             if folder_id and folder_id not in (match.get("folder_ids") or []):
                 match["folder_ids"] = list(match.get("folder_ids") or []) + [folder_id]
             _write_item(plane, account_id, library_id, match)

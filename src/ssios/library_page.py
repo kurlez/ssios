@@ -46,15 +46,40 @@ LIBRARY_JS = r"""
     for (var i = 0; i < types.length; i += 1) if (types[i] === "Files") return true;
     return false;
   }
-  function oneEntry(entry) {
+  // A dropped folder is read with its subfolders. Hidden files are skipped, and a drop stops at MAX_FILES files and MAX_DEPTH levels.
+  var MAX_FILES = 5000, MAX_DEPTH = 12, counted = 0;
+  function readAll(reader) {
     return new Promise(function (resolve) {
-      if (!entry) { resolve([]); return; }
+      var all = [];
+      (function next() {
+        reader.readEntries(function (batch) {
+          if (!batch.length) { resolve(all); return; }
+          all = all.concat(Array.prototype.slice.call(batch));
+          next();
+        }, function () { resolve(all); });
+      })();
+    });
+  }
+  function oneEntry(entry, prefix, level) {
+    prefix = prefix || ""; level = level || 0;
+    return new Promise(function (resolve) {
+      if (!entry || (entry.name || "").charAt(0) === ".") { resolve([]); return; }
+      var path = prefix + (entry.name || "");
       if (entry.isDirectory) {
-        resolve([{path: entry.name || "", directory: true}]);
+        if (level >= MAX_DEPTH) { resolve([{path: path, tooDeep: true}]); return; }
+        readAll(entry.createReader()).then(function (children) {
+          return Promise.all(children.map(function (child) { return oneEntry(child, path + "/", level + 1); }));
+        }).then(function (groups) {
+          var flat = [];
+          groups.forEach(function (group) { flat = flat.concat(group); });
+          resolve(flat);
+        });
         return;
       }
       if (entry.isFile) {
-        entry.file(function (file) { resolve([{file: file, path: file.name || entry.name}]); });
+        if (counted >= MAX_FILES) { resolve([{path: path, tooMany: true}]); return; }
+        counted += 1;
+        entry.file(function (file) { resolve([{file: file, path: path}]); }, function () { resolve([]); });
         return;
       }
       resolve([]);
@@ -67,8 +92,9 @@ LIBRARY_JS = r"""
       var entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
       if (entry) entries.push(entry);
     });
+    counted = 0;
     if (entries.length) {
-      return Promise.all(entries.map(oneEntry)).then(function (groups) {
+      return Promise.all(entries.map(function (entry) { return oneEntry(entry, "", 0); })).then(function (groups) {
         var flat = [];
         groups.forEach(function (group) { flat = flat.concat(group); });
         return flat;
@@ -81,8 +107,8 @@ LIBRARY_JS = r"""
     var line = document.createElement("li");
     line.textContent = row.path + " — 0%";
     log.appendChild(line);
-    if (row.directory) {
-      var reason = app.getAttribute("data-directory") || "";
+    if (row.tooDeep || row.tooMany) {
+      var reason = app.getAttribute(row.tooDeep ? "data-too-deep" : "data-too-many") || "";
       line.textContent = row.path + " — " + reason;
       line.className = "bad";
       return Promise.resolve({path: row.path, status: "rejected", reason: reason});
@@ -93,7 +119,9 @@ LIBRARY_JS = r"""
       data.set("library", libraryId);
       data.set("folder", folderId || "");
       data.set("relative", row.path);
-      data.set("source", "drag");
+      data.set("source", row.source || "drag");
+      var tagBox = document.getElementById("lib-import-tags");
+      if (tagBox && tagBox.value.trim()) data.set("tags", tagBox.value);
       data.set("file", row.file, row.file.name || "file");
       var xhr = new XMLHttpRequest();
       xhr.open("POST", "/ui/library/drop");
@@ -239,28 +267,39 @@ LIBRARY_JS = r"""
     var files = event.clipboardData && event.clipboardData.files;
     if (!files || !files.length) return;
     var rows = [];
-    for (var i = 0; i < files.length; i += 1) rows.push({file: files[i], path: files[i].name});
+    for (var i = 0; i < files.length; i += 1) rows.push({file: files[i], path: files[i].name, source: "paste"});
     var chain = Promise.resolve([]);
     rows.forEach(function (row) {
       chain = chain.then(function (results) {
-        return uploadOne(row, "").then(function (result) { results.push(result); return results; });
+        return uploadOne(row, app.getAttribute("data-folder") || "").then(function (result) { results.push(result); return results; });
       });
     });
     chain.then(finish);
   });
-  var picker = form.querySelector("input[type=file]");
+  var picker = form.querySelector("input[name=file]");
   if (picker) picker.addEventListener("change", function () {
     if (picker.files && picker.files.length) form.requestSubmit();
+  });
+  var folderPicker = form.querySelector("input[name=folder_files]");
+  if (folderPicker) folderPicker.addEventListener("change", function () {
+    if (!folderPicker.files || !folderPicker.files.length) return;
+    picker = folderPicker;
+    form.requestSubmit();
   });
   form.addEventListener("submit", function (event) {
     if (!picker || !picker.files || !picker.files.length) return;
     event.preventDefault();
     var rows = [];
-    for (var i = 0; i < picker.files.length; i += 1) rows.push({file: picker.files[i], path: picker.files[i].name});
+    for (var i = 0; i < picker.files.length; i += 1) {
+      var chosenFile = picker.files[i], relative = chosenFile.webkitRelativePath || chosenFile.name;
+      if (relative.split("/").some(function (part) { return part.charAt(0) === "."; })) continue;
+      if (rows.length >= MAX_FILES) { rows.push({path: relative, tooMany: true}); break; }
+      rows.push({file: chosenFile, path: relative, source: chosenFile.webkitRelativePath ? "folder" : "picker"});
+    }
     var chain = Promise.resolve([]);
     rows.forEach(function (row) {
       chain = chain.then(function (results) {
-        return uploadOne(row, "").then(function (result) { results.push(result); return results; });
+        return uploadOne(row, app.getAttribute("data-folder") || "").then(function (result) { results.push(result); return results; });
       });
     });
     chain.then(finish);
@@ -747,6 +786,8 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + f'<button type="button" class="lib-rename-edit" aria-label="{html.escape(say(lang, "lib_rename"), quote=True)}">{html.escape(say(lang, "lib_rename"))}</button></h2>'
             + '<p class="lib-rename-error" hidden></p>'
             + f"<p>{html.escape(version_label)}</p>"
+            + (f'<p class="lib-dims">{html.escape(_dims(selected, lang))}</p>' if _dims(selected, lang) else "")
+            + (f'<p class="lib-source"><a href="{html.escape(str(selected.get("source_url")), quote=True)}" rel="noopener noreferrer">{html.escape(str(selected.get("source_url"))[:80])}</a></p>' if str(selected.get("source_url") or "").startswith(("https://", "http://")) else "")
             + (f"<p>{html.escape(str(selected.get('captured_at') or ''))}</p>" if selected.get("captured_at") else "")
             + f"<form method=\"post\" action=\"/ui/library\">{_hidden(csrf, library_id, ident)}"
             + f'<input type="hidden" name="op" value="star">'
@@ -863,7 +904,17 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + '<input type="hidden" name="op" value="import">'
         + '<input type="hidden" name="source" value="picker">'
         + f'<label class="button">{html.escape(say(lang, "lib_import"))} <input name="file" type="file" multiple></label>'
-        + "</form></div>"
+        + f'<label class="button">{html.escape(say(lang, "import_folder"))} <input name="folder_files" type="file" webkitdirectory multiple></label>'
+        + f'<label class="lib-import-tags">{html.escape(say(lang, "import_tags"))} <input id="lib-import-tags" name="tags" maxlength="200" placeholder="a, b" list="lib-tag-names"></label>'
+        + "</form>"
+        + f'<details class="lib-link"><summary>{html.escape(say(lang, "import_link"))}</summary>'
+        + f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
+        + f'<input type="hidden" name="op" value="import-url"><input type="hidden" name="folder" value="{html.escape(folder, quote=True)}">'
+        + f'<p class="muted small">{html.escape(say(lang, "import_link_hint"))}</p>'
+        + '<input name="url" type="url" required placeholder="https://example.com/picture.png" maxlength="2000">'
+        + f'<input name="tags" placeholder="{html.escape(say(lang, "import_tags"), quote=True)}" maxlength="200" list="lib-tag-names">'
+        + f'<button type="submit">{html.escape(say(lang, "import_link"))}</button></form></details>'
+        + "</div>"
         + zone
         + '<div id="library-grid" class="lib-grid">'
         + ("".join(cards) or f"<p>{html.escape(say(lang, 'lib_empty_view'))}</p>")
@@ -876,6 +927,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + f'<div class="library{selected_class}" id="library-app" data-library="{html.escape(library_id, quote=True)}" data-csrf="{csrf}" '
         + f'data-overlay="{html.escape(say(lang, "drop_overlay"), quote=True)}" '
         + f'data-directory="{html.escape(say(lang, "drop_directory"), quote=True)}" '
+        + f'data-too-deep="{html.escape(say(lang, "drop_too_deep", depth=12), quote=True)}" data-too-many="{html.escape(say(lang, "drop_too_many", count=5000), quote=True)}" '
         + f'data-keep="{html.escape(say(lang, "conflict_keep"), quote=True)}" '
         + f'data-replace="{html.escape(say(lang, "conflict_replace"), quote=True)}" '
         + f'data-apply="{html.escape(say(lang, "conflict_apply"), quote=True)}" '
@@ -979,6 +1031,14 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     if op == "import":
         raw, filename, source = _upload(body)
         saved = import_bytes(plane, account_id, library_id, raw, name=filename, source=source, peer_ip=peer_ip)
+        if saved.get("result") == "conflict":
+            return Page(200, library_page(plane, session, {"library": library_id}, _conflict_form(session, library_id, saved, _language(plane, account_id))))
+        return Page(200, library_page(plane, session, {"library": library_id, "item": saved["id"]}, "<p>Saved the file.</p>"))
+    if op == "import-url":
+        from ssios.library import clean_tags
+        from ssios.library_import import import_url
+
+        saved = import_url(plane, account_id, library_id, str(body.get("url") or ""), peer_ip, folder_id=str(body.get("folder") or ""), tags=clean_tags(body.get("tags") or ""))
         if saved.get("result") == "conflict":
             return Page(200, library_page(plane, session, {"library": library_id}, _conflict_form(session, library_id, saved, _language(plane, account_id))))
         return Page(200, library_page(plane, session, {"library": library_id, "item": saved["id"]}, "<p>Saved the file.</p>"))
@@ -1088,6 +1148,16 @@ def _preview_box(item: dict) -> tuple[int, int]:
     return (160, 160)
 
 
+def _dims(item: dict, lang: str) -> str:
+    from ssios.library_meta import describe
+
+    text = describe(item)
+    shape = {"landscape": ("Landscape", "横向"), "portrait": ("Portrait", "纵向"), "square": ("Square", "方形")}.get(str(item.get("orientation") or ""))
+    if shape:
+        text += " · " + shape[1 if lang == "zh" else 0]
+    return text
+
+
 def _human_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -1193,7 +1263,7 @@ def _upload(body: dict) -> tuple[bytes, str, str]:
     source = str(body.get("source") or "picker")
     uploads = body.get("uploads") if isinstance(body.get("uploads"), list) else []
     if uploads and isinstance(uploads[0], dict) and isinstance(uploads[0].get("bytes"), (bytes, bytearray)):
-        return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker"} else "picker"
+        return bytes(uploads[0]["bytes"]), str(uploads[0].get("name") or "upload"), source if source in {"paste", "drag", "picker", "folder"} else "picker"
     return b"", str(body.get("name") or ""), source
 
 
@@ -1385,9 +1455,12 @@ def accept_drop(plane, session: dict, fields: dict, files: list[dict], peer_ip: 
         decided["path"] = fields.get("relative") or decided.get("path") or ""
         results = [decided]
         return {"results": results, "summary": drop_summary(lang, results)}
+    from ssios.library import clean_tags
+
     folder_id = str(fields.get("folder") or "")
     source = str(fields.get("source") or "drag")
     relative = str(fields.get("relative") or "")
+    tags = clean_tags(fields.get("tags") or "")
     results = []
     if not files:
         results.append(
@@ -1419,9 +1492,10 @@ def accept_drop(plane, session: dict, fields: dict, files: list[dict], peer_ip: 
                 chosen["id"],
                 item.get("path"),
                 relative=shown,
-                source=source if source in {"paste", "drag", "picker"} else "drag",
+                source=source if source in {"paste", "drag", "picker", "folder"} else "drag",
                 peer_ip=peer_ip,
                 folder_id=folder_id,
+                tags=tags,
             )
         )
     return {"results": results, "summary": drop_summary(lang, results)}
