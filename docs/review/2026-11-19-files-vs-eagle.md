@@ -141,3 +141,17 @@ Measured on the CI container with 10,000 synthetic items: listing 0.07 s warm, t
 | | **100** | **96** | |
 
 The same pass found that the R2 change had dropped the folder from the page's listing (a folder view showed every file). It is fixed and covered by `test_folder_view_still_narrows_and_keeps_its_place`. The browser drop test in `tests/test_library_drop.py` still expected dropped folders to be skipped; it now expects the folder's files in a folder of the same name, which was checked in Chromium.
+
+## R4 Tags: done at 96
+
+| Criterion | Points | Score | Evidence |
+| --- | --- | --- | --- |
+| Tag manager: counts, rename, merge, delete | 30 | 28 | "Manage tags" lists every tag with its file count and a finder. Rename onto an existing name merges the two (an item with both ends with one, the existing spelling wins); delete takes the tag off every file and asks first. Each change says how many files it touched and is audited. Merging several tags needs one rename each; Eagle can select several and merge at once |
+| Tag groups with a colour | 15 | 15 | Add, rename, recolour, and delete groups; a tag is in one group at a time; renamed and merged tags keep their group; deleting a group keeps its tags. Eagle's imported groups show their colours. The sidebar lists tags under their groups with a colour dot |
+| Autocomplete | 15 | 14 | One `datalist` of the library's tags serves the inspector, the batch dialog, the filter bar, import, and the manager. It is the browser's own list, which matches from the start of a word only |
+| Add and remove a tag on one item | 10 | 10 | The inspector takes several tags at once ("a, b") and each chip has a × button. Chips link to the tag's view |
+| Several tags in the filter | 10 | 10 | From R3: all, any, or none of a list |
+| Common tags in a selection | 5 | 5 | Existing |
+| Untagged view | 5 | 5 | Existing |
+| Tests | 10 | 9 | `tests/test_files_tags.py`, 10 tests, including permissions for a viewer of a shared library. Checked in Chromium: group, merge, delete with the confirm dialog (dismiss keeps the tag), inspector add and ×, no sideways scroll at phone width. The check found delete buttons drawn as blank red blocks and the import tag box spilling into the inspector, both fixed |
+| | **100** | **96** | |

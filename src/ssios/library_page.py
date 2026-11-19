@@ -619,6 +619,13 @@ LIBRARY_JS = r"""
   }
 })();
 (function () {
+  // A delete in the tag manager asks first. Without a script the form still posts.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest ? event.target.closest("button[data-confirm]") : null;
+    if (button && !window.confirm(button.getAttribute("data-confirm"))) event.preventDefault();
+  });
+})();
+(function () {
   // The filter bar sends only the filters that are set, so a filtered view is a short link.
   var form = document.getElementById("lib-filters");
   if (!form) return;
@@ -761,9 +768,30 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
     tag_rows = tag_counts(plane, account_id, library_id, catalog)
     tag_list = '<datalist id="lib-tag-names">' + "".join(f'<option value="{html.escape(name, quote=True)}">' for name, _count in tag_rows) + "</datalist>"
-    for name, count in tag_rows:
+    from ssios.library_tags import colour_of, groups_of
+
+    tag_groups, tag_owner = groups_of(meta)
+
+    def tag_link(name: str, count: int) -> str:
         mark = ' class="active"' if name == tag else ""
-        tags.append(f'<a{mark} href="{base}&amp;tag={html.escape(_quote(name, safe=""), quote=True)}">{html.escape(name)} <span class="count">{count}</span></a>')
+        return f'<a{mark} href="{base}&amp;tag={html.escape(_quote(name, safe=""), quote=True)}">{html.escape(name)} <span class="count">{count}</span></a>'
+
+    counted = dict(tag_rows)
+    for group in tag_groups:
+        members = [name for name, _count in tag_rows if tag_owner.get(name.casefold()) is group]
+        if not members:
+            continue
+        dot = colour_of(str(group.get("color") or ""))
+        tags.append(
+            f'<p class="lib-tag-group"><span class="dot" style="background:{html.escape(dot or "transparent", quote=True)}"></span>{html.escape(str(group.get("name") or ""))}</p>'
+            + "".join(tag_link(name, counted[name]) for name in members)
+        )
+    loose = [(name, count) for name, count in tag_rows if name.casefold() not in tag_owner]
+    if loose and tags:
+        tags.append(f'<p class="lib-tag-group">{html.escape(say(lang, "lib_ungrouped"))}</p>')
+    tags.extend(tag_link(name, count) for name, count in loose)
+    if tag_rows:
+        tags.append(f'<a class="lib-manage" href="{base}&amp;manage=tags">{html.escape(say(lang, "lib_manage_tags"))}</a>')
     from ssios.library_filter import sort_items, sort_of
 
     sort, descending = sort_of(query)
@@ -829,7 +857,15 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             f'<button type="submit" name="star" value="{n}" class="{"on" if n <= star else ""}" aria-label="{n}">{"★" if n <= star else "☆"}</button>'
             for n in range(1, 6)
         )
-        chips = "".join(f'<span class="lib-chip">{html.escape(str(tag))}</span>' for tag in selected.get("tags") or [])
+        from urllib.parse import quote as _quote_tag
+
+        chips = "".join(
+            f'<form method="post" action="/ui/library" class="lib-chip">{_hidden(csrf, library_id, ident)}'
+            f'<input type="hidden" name="op" value="untag-item"><input type="hidden" name="tag" value="{html.escape(str(one), quote=True)}">'
+            f'<a href="{base}&amp;tag={html.escape(_quote_tag(str(one), safe=""), quote=True)}">{html.escape(str(one))}</a>'
+            f'<button type="submit" aria-label="{html.escape(say(lang, "lib_untag_one", tag=str(one)), quote=True)}">×</button></form>'
+            for one in selected.get("tags") or []
+        )
         inspector = (
             preview
             + f'<h2 class="lib-rename" data-name="{html.escape(str(selected.get("name") or ""), quote=True)}" data-id="{ident}">'
@@ -847,7 +883,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + f'<div class="lib-chips">{chips}</div>'
             + f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
             + '<input type="hidden" name="op" value="tag-item">'
-            + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40"></label>'
+            + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="200" list="lib-tag-names" placeholder="a, b" autocomplete="off"></label>'
             + f'<button type="submit">{html.escape(say(lang, "lib_add_tag"))}</button></form>'
             + _analysis_block(selected, lang, csrf, library_id, ident, _depth(plane, account_id, library_id, selected))
         )
@@ -968,6 +1004,9 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + more
         + _batch_bar(lang, str(chosen.get("role") or "owner"), trash, bool(folder))
     )
+    if str(query.get("manage") or "") == "tags":
+        grid = tag_list + _tag_manager(lang, csrf, library_id, base, meta, tag_rows, str(chosen.get("role") or "owner"), str(query.get("tq") or ""))
+        selected = None
     selected_class = " has-selection" if selected else ""
     body = (
         notice
@@ -1161,7 +1200,18 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     elif op == "assign":
         update_item(plane, account_id, library_id, str(body.get("item") or ""), peer_ip=peer_ip, folder_id=str(body.get("folder") or ""))
     elif op == "tag-item":
-        update_item(plane, account_id, library_id, str(body.get("item") or ""), peer_ip=peer_ip, tag=str(body.get("tag") or ""))
+        from ssios.library import add_item_tags, clean_tags
+
+        wanted = clean_tags(body.get("tag"))
+        if not wanted:
+            raise SsiosError("library_rejected", say(_language(plane, account_id), "library_rejected"), 400)
+        add_item_tags(plane, account_id, library_id, str(body.get("item") or ""), wanted, peer_ip)
+    elif op == "untag-item":
+        from ssios.library_tags import remove_item_tag
+
+        remove_item_tag(plane, account_id, library_id, str(body.get("item") or ""), str(body.get("tag") or ""), peer_ip)
+    elif op in {"tag-rename", "tag-delete", "tag-group", "group-add", "group-update", "group-delete"}:
+        return _tag_manager_post(plane, session, body, peer_ip, op, library_id)
     elif op == "star":
         try:
             star = int(body.get("star") or 0)
@@ -1199,6 +1249,132 @@ def _preview_box(item: dict) -> tuple[int, int]:
     if item.get("ext") == "pdf" or item.get("group") != "image":
         return (160, 200)
     return (160, 160)
+
+
+def _tag_manager(lang: str, csrf: str, library_id: str, base: str, meta: dict, tag_rows: list, role: str, needle: str) -> str:
+    """Every tag with its count. Rename (onto an existing name merges), group, and delete, as in Eagle's tag manager."""
+    from urllib.parse import quote as _quote
+
+    from ssios.library_tags import NAMED, colour_of, groups_of
+
+    zh = lang == "zh"
+
+    def t(en: str, cn: str) -> str:
+        return html.escape(cn if zh else en)
+
+    def esc(value) -> str:
+        return html.escape(str(value), quote=True)
+
+    can = role in {"owner", "organize"}
+    groups, owner = groups_of(meta)
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="library" value="{esc(library_id)}">'
+    rows = []
+    shown = [(name, count) for name, count in tag_rows if needle.casefold() in name.casefold()]
+    for name, count in shown:
+        group = owner.get(name.casefold())
+        dot = colour_of(str(group.get("color") or "")) if group else ""
+        link = f'<a href="{base}&amp;tag={esc(_quote(name, safe=""))}">{html.escape(name)}</a>'
+        actions = ""
+        if can:
+            choices = f'<option value="">{t("No group", "不分组")}</option>' + "".join(
+                f'<option value="{esc(row.get("id") or "")}"{" selected" if row is group else ""}>{html.escape(str(row.get("name") or ""))}</option>' for row in groups
+            )
+            actions = (
+                f'<form method="post" action="/ui/library" class="lib-tm-rename">{hidden}<input type="hidden" name="op" value="tag-rename"><input type="hidden" name="old" value="{esc(name)}">'
+                f'<input name="new" value="{esc(name)}" maxlength="40" list="lib-tag-names" aria-label="{t("New name", "新名称")}" autocomplete="off">'
+                f'<button type="submit">{t("Rename or merge", "改名或合并")}</button></form>'
+                + (
+                    f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="tag-group"><input type="hidden" name="tag" value="{esc(name)}">'
+                    f'<select name="group" aria-label="{t("Group", "分组")}">{choices}</select><button type="submit">{t("Set group", "设分组")}</button></form>'
+                    if groups
+                    else ""
+                )
+                + f'<form method="post" action="/ui/library" class="lib-tm-delete">{hidden}<input type="hidden" name="op" value="tag-delete"><input type="hidden" name="tag" value="{esc(name)}">'
+                f'<button type="submit" class="lib-danger" data-confirm="{esc(say(lang, "lib_tag_delete_confirm", tag=name, count=count))}">{t("Delete", "删除")}</button></form>'
+            )
+        rows.append(
+            f'<tr><td><span class="dot" style="background:{esc(dot or "transparent")}"></span>{link}</td>'
+            f'<td class="num">{count}</td><td>{html.escape(str(group.get("name") or "")) if group else ""}</td><td class="lib-tm-actions">{actions}</td></tr>'
+        )
+    palette = "".join(f'<option value="{key}">{key}</option>' for key in NAMED)
+    group_rows = []
+    for row in groups:
+        dot = colour_of(str(row.get("color") or ""))
+        members = len(row.get("tags") or [])
+        manage = ""
+        if can:
+            current = str(row.get("color") or "")
+            colours = f'<option value="">{t("No colour", "无颜色")}</option>' + "".join(f'<option value="{key}"{" selected" if key == current else ""}>{key}</option>' for key in NAMED)
+            if current and current not in NAMED:
+                colours += f'<option value="{esc(current)}" selected>{html.escape(current)}</option>'
+            manage = (
+                f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="group-update"><input type="hidden" name="group" value="{esc(row.get("id") or "")}">'
+                f'<input name="name" value="{esc(row.get("name") or "")}" maxlength="40" aria-label="{t("Group name", "分组名称")}"><select name="color" aria-label="{t("Colour", "颜色")}">{colours}</select>'
+                f'<button type="submit">{t("Save", "保存")}</button></form>'
+                f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="group-delete"><input type="hidden" name="group" value="{esc(row.get("id") or "")}">'
+                f'<button type="submit" class="lib-danger" data-confirm="{esc(say(lang, "lib_group_delete_confirm", group=str(row.get("name") or "")))}">{t("Delete group", "删除分组")}</button></form>'
+            )
+        group_rows.append(
+            f'<li><span class="dot" style="background:{esc(dot or "transparent")}"></span><strong>{html.escape(str(row.get("name") or ""))}</strong> '
+            f'<span class="muted">{say(lang, "lib_group_count", count=members)}</span><div class="lib-tm-actions">{manage}</div></li>'
+        )
+    add_group = ""
+    if can:
+        add_group = (
+            f'<form method="post" action="/ui/library" class="lib-tm-add">{hidden}<input type="hidden" name="op" value="group-add">'
+            f'<label>{t("New group", "新分组")} <input name="name" maxlength="40" required></label>'
+            f'<label>{t("Colour", "颜色")} <select name="color"><option value="">{t("No colour", "无颜色")}</option>{palette}</select></label>'
+            f'<button type="submit">{t("Add group", "添加分组")}</button></form>'
+        )
+    return (
+        '<section class="lib-tag-manager">'
+        + f'<p><a href="{base}">← {t("Back to files", "返回文件")}</a></p>'
+        + f'<h2>{t("Tags", "标签")} <span class="muted">{len(tag_rows)}</span></h2>'
+        + f'<form method="get" action="/ui/library" class="lib-tm-find"><input type="hidden" name="library" value="{esc(library_id)}"><input type="hidden" name="manage" value="tags">'
+        + f'<input type="search" name="tq" value="{esc(needle)}" placeholder="{t("Find a tag", "查找标签")}"><button type="submit">{t("Find", "查找")}</button></form>'
+        + f'<p class="muted small">{t("Renaming a tag onto a name that exists merges the two. Deleting a tag takes it off every file; the files stay.", "把标签改成已有的名称会把两个标签合并。删除标签会从所有文件上去掉它，文件本身保留。")}</p>'
+        + '<div class="lib-tm-scroll"><table class="lib-tm"><thead><tr>'
+        + f'<th>{t("Tag", "标签")}</th><th class="num">{t("Files", "文件")}</th><th>{t("Group", "分组")}</th><th></th></tr></thead><tbody>'
+        + ("".join(rows) or f'<tr><td colspan="4">{t("No tags yet.", "还没有标签。")}</td></tr>')
+        + "</tbody></table></div>"
+        + f'<h2>{t("Tag groups", "标签分组")}</h2><ul class="lib-tm-groups">{"".join(group_rows)}</ul>'
+        + add_group
+        + "</section>"
+    )
+
+
+def _files(count: int) -> str:
+    return "1 file" if count == 1 else f"{count} files"
+
+
+def _tag_manager_post(plane, session: dict, body: dict, peer_ip: str, op: str, library_id: str) -> Page:
+    from ssios.library_tags import add_group, delete_tag, rename_tag, set_tag_group, update_group
+
+    account_id = session["account"]["id"]
+    lang = _language(plane, account_id)
+    zh = lang == "zh"
+    if op == "tag-rename":
+        result = rename_tag(plane, account_id, library_id, str(body.get("old") or ""), str(body.get("new") or ""), peer_ip)
+        if result["merged"]:
+            note = f'合并到“{result["name"]}”，改了 {result["items"]} 个文件。' if zh else f'Merged into "{result["name"]}" on {_files(result["items"])}.'
+        else:
+            note = f'已改名为“{result["name"]}”，{result["items"]} 个文件。' if zh else f'Renamed to "{result["name"]}" on {_files(result["items"])}.'
+    elif op == "tag-delete":
+        result = delete_tag(plane, account_id, library_id, str(body.get("tag") or ""), peer_ip)
+        note = f'已从 {result["items"]} 个文件上去掉这个标签。' if zh else f'Removed the tag from {_files(result["items"])}.'
+    elif op == "tag-group":
+        set_tag_group(plane, account_id, library_id, str(body.get("tag") or ""), str(body.get("group") or ""), peer_ip)
+        note = "已保存分组。" if zh else "Group saved."
+    elif op == "group-add":
+        add_group(plane, account_id, library_id, str(body.get("name") or ""), str(body.get("color") or ""), peer_ip)
+        note = "已添加分组。" if zh else "Group added."
+    elif op == "group-update":
+        update_group(plane, account_id, library_id, str(body.get("group") or ""), peer_ip, name=str(body.get("name") or ""), colour=str(body.get("color") or ""))
+        note = "已保存分组。" if zh else "Group saved."
+    else:
+        update_group(plane, account_id, library_id, str(body.get("group") or ""), peer_ip, delete=True)
+        note = "已删除分组，标签保留。" if zh else "Group deleted. Its tags stay."
+    return Page(200, library_page(plane, session, {"library": library_id, "manage": "tags"}, f'<p class="notice">{html.escape(note)}</p>'))
 
 
 def _filter_bar(query: dict, filters: dict, lang: str, library_id: str, text_query: str, sort: str, descending: bool, csrf: str, chosen: dict, smart_row) -> str:
@@ -1396,7 +1572,7 @@ def _batch_dialogs(lang: str, folders: list[dict]) -> str:
     )
     return (
         f'<dialog id="lib-tag-dialog" class="lib-dialog"><form method="dialog">'
-        f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40"></label>'
+        f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="40" list="lib-tag-names" autocomplete="off"></label>'
         f'<button type="submit" data-batch="tag">{html.escape(say(lang, "lib_batch_tag"))}</button>'
         f'<button type="submit" data-batch="untag">{html.escape(say(lang, "lib_batch_untag"))}</button>'
         f'<button type="button" data-close>{html.escape(say(lang, "lib_batch_clear"))}</button></form></dialog>'

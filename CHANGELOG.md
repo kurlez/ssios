@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Files R4 tags: a tag manager ("Manage tags") with file counts, rename, merge (rename onto an existing tag), and delete across the library; tag groups with colours, shown in the sidebar, including groups imported from Eagle; tag autocomplete everywhere a tag is typed; the inspector adds several tags at once and removes one with ×.
 - Files R3 search and filters: a filter bar above the grid with type, extension, rating, tags (all, any, none), date added, size, orientation, minimum dimensions, and colour. Sorts by date added, date modified, name, size, rating, or dimensions, in either direction. The current filters and keywords can be saved as a smart folder. Keywords now also match the source link and folder names, and every word must appear.
 - Files R2 index: each item records its main colours (up to five) next to its size in pixels, shown as a strip in the inspector. Older items get them from `ssios library-reindex --username NAME` or, a few at a time, from the background timer. The catalog is kept in memory and in `catalog-cache.json`, so the Files page reads it once: a library of 10,000 items opens in about a tenth of a second instead of nearly two. The grid shows 400 cards with a "Show more" link.
 

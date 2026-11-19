@@ -1926,7 +1926,9 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-toolbar input[name="q"] { width: 8rem; min-width: 0; flex: 1; }
 .lib-toolbar label { display: flex; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
 .lib-toolbar form:first-child { flex: 1 1 auto; min-width: 0; }
-.lib-import { margin-left: auto; flex: 0 0 auto; }
+.lib-import { margin-left: auto; flex: 0 1 auto; flex-wrap: wrap !important; min-width: 0; }
+.lib-import-tags { min-width: 0; flex: 0 1 auto !important; }
+.lib-import-tags input { width: 9em; min-width: 0; }
 .lib-import input[type=file] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
 .lib-import label.button { border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; cursor: pointer; background: var(--panel); }
 .drop-zone { display: grid; place-items: center; gap: 8px; min-height: 220px; margin-bottom: 12px; border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }
@@ -1985,6 +1987,24 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-stars .on { color: var(--warn); }
 .lib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .lib-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+form.lib-chip { display: inline-flex; align-items: center; gap: 4px; margin: 0 4px 4px 0; padding: 1px 4px 1px 10px; }
+form.lib-chip a { color: inherit; text-decoration: none; }
+form.lib-chip button { border: 0; background: transparent; padding: 0 4px; line-height: 1; font-size: 14px; color: var(--muted); cursor: pointer; min-height: 0; }
+form.lib-chip button:hover { color: var(--ink); }
+.lib-tag-group { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; font-size: 0.8em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; flex: 0 0 auto; border: 1px solid var(--line); vertical-align: middle; }
+.lib-manage { font-size: 0.85em; color: var(--accent); }
+.lib-tag-manager { display: grid; gap: 10px; min-width: 0; }
+.lib-tm-scroll { overflow-x: auto; max-width: 100%; }
+.lib-tm { width: 100%; border-collapse: collapse; }
+.lib-tm th, .lib-tm td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.lib-tm .num { text-align: right; font-variant-numeric: tabular-nums; }
+.lib-tm-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.lib-tm-actions form, .lib-tm-find, .lib-tm-add { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0; }
+.lib-tm-actions input { width: 9em; min-width: 0; }
+.lib-tm-groups { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.lib-tm-groups li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+button.lib-danger { color: #b91c1c; background: var(--panel); border: 1px solid currentColor; }
 .lib-actions { display: grid; gap: 8px; margin-top: 8px; }
 @media (max-width: 1100px) {
   .library, .library.has-selection { grid-template-columns: minmax(0, 180px) minmax(0, 1fr); }
