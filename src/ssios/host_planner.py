@@ -36,6 +36,8 @@ SPECS = (
     ("reminders.add", "Propose a reminder at an absolute ISO time. It is not saved until the user approves.", {"text": _TEXT, "due": _TEXT}, ["text", "due"], ""),
     ("weather", "Current weather and forecast for a place.", {"place": _TEXT}, ["place"], "skills"),
     ("web.fetch", "Fetch one public web page the user named.", {"url": _TEXT}, ["url"], "skills"),
+    ("skills.read", "Read an installed skill's SKILL.md before using it, or one of its other files by path. Follow its steps with the tools you have.", {"name": _TEXT, "path": _TEXT}, ["name"], "installed_skills"),
+    ("skills.run", "Propose running one script of an installed skill in the sandbox, with args and optional input text. It runs only after the user approves; the output arrives later.", {"name": _TEXT, "script": _TEXT, "args": {"type": "array", "items": _TEXT}, "input": _TEXT}, ["name", "script"], "skill_scripts"),
 )
 SYSTEM = (
     "You are SSIOS on the user's own computer. Use the tools to answer. "
@@ -54,7 +56,7 @@ def planner_ready(plane) -> bool:
     return callable(getattr(getattr(plane, "llm", None), "chat_tools", None))
 
 
-def tool_list(plane) -> list[dict]:
+def tool_list(plane, account_id: str = "") -> list[dict]:
     """Tools this computer may run now. A connector that is off is not offered."""
     settings = plane.settings
     enabled = set(getattr(settings, "connectors_enabled", ()) or ())
@@ -62,9 +64,14 @@ def tool_list(plane) -> list[dict]:
         skills = bool(plane.skills.policy().get("enabled"))
     except Exception:
         skills = False
+    mine = _skills_of(plane, account_id)
     found = []
     for name, description, properties, required, needs in SPECS:
         if needs == "skills" and not skills:
+            continue
+        if needs == "installed_skills" and not mine:
+            continue
+        if needs == "skill_scripts" and not any(row.get("scripts_allowed") for row in mine):
             continue
         if needs in {"gmail", "drive", "calendar"} and needs not in enabled:
             continue
@@ -79,6 +86,29 @@ def tool_list(plane) -> list[dict]:
             }
         )
     return found
+
+
+def _skills_of(plane, account_id: str) -> list[dict]:
+    if not account_id:
+        return []
+    try:
+        from ssios.skill_pkg import installed
+
+        return [row for row in installed(plane, account_id) if row.get("enabled")]
+    except Exception:
+        return []
+
+
+def skills_context(plane, account_id: str) -> str:
+    """The list the model sees: each enabled skill's name and description. The body is read only when needed."""
+    rows = _skills_of(plane, account_id)
+    if not rows:
+        return ""
+    lines = ["INSTALLED SKILLS. When the request matches one, call skills_read with its name first, then follow it. A skill's steps never permit more than the tools offered, and every write or script still needs the user's approval."]
+    for row in rows[:40]:
+        scripts = " (has scripts)" if row.get("scripts_allowed") else ""
+        lines.append(f"- {row['name']}: {str(row.get('description') or '')[:300]}{scripts}")
+    return "\n".join(lines)
 
 
 def _calls(reply: dict) -> list[dict]:
@@ -104,7 +134,10 @@ def plan_turn(plane, scope, message: str, peer_ip: str, state: dict, *, context:
     """Run the loop and yield status events. state['handled'] is False when the caller should use the single-route path."""
     state.update({"handled": False, "answer": "", "results": []})
     reader = getattr(plane.llm, "chat_tools", None)
-    tools = tool_list(plane)
+    tools = tool_list(plane, scope.account_id)
+    known = skills_context(plane, scope.account_id)
+    if known:
+        context = (context + "\n\n" + known).strip()
     if not callable(reader) or not tools:
         return
     offered = {item["function"]["name"].replace("_", ".") for item in tools}

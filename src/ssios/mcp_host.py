@@ -28,6 +28,7 @@ READ_TOOLS = {
     "weather": "",
     "files.search": "",
     "files.read": "",
+    "skills.read": "",
 }
 WRITE_TOOLS = {
     "calendar.create": "calendar.create_event",
@@ -39,6 +40,7 @@ WRITE_TOOLS = {
     "reminders.add": "",
     "reminders.cancel": "",
     "web.clip": "",
+    "skills.run": "",
 }
 TOOL_NAMES = tuple(READ_TOOLS) + tuple(WRITE_TOOLS)
 # Results of these carry text written by someone else. These two tools send a request to an address.
@@ -114,6 +116,8 @@ _PREFIX = {
     "weather": "w",
     "files.search": "f",
     "files.read": "f",
+    "skills.read": "s",
+    "skills.run": "s",
 }
 _SECRET = re.compile(r"ya29\.|refresh_token|client_secret|access_token", re.IGNORECASE)
 _MIRROR_HOSTS = ("archive.is", "archive.org", "webcache.googleusercontent.com", "outline.com", "12ft.io")
@@ -197,6 +201,8 @@ def apply_write(scope, record: dict) -> dict:
         return {"action": "connector.write", "status": "pending-on-connector"}
     if tool == "web.clip":
         return {"action": "vault.clip", "status": "staged"}
+    if tool == "skills.run":
+        return _apply_skill_run(scope, args, str(record.get("approval_id") or ""))
     raise SsiosError("mcp_tool_denied", "That write cannot be applied.", 403)
 
 
@@ -239,6 +245,8 @@ def _read(plane, account: dict, tool: str, arguments: dict, peer_ip: str, result
             body, count = _files_read(plane, scope, arguments)
         elif tool == "web.fetch":
             body, count = _web_fetch(plane, scope, arguments, peer_ip)
+        elif tool == "skills.read":
+            body, count = _skill_read(plane, scope, arguments)
         else:
             body, count = _weather(plane, scope, arguments, peer_ip)
     except SsiosError as exc:
@@ -259,6 +267,9 @@ def _write(plane, account: dict, tool: str, arguments: dict, peer_ip: str, resul
         approval_id = _propose_memory(scope, arguments)
     elif tool == "web.clip":
         approval_id = _propose_clip(plane, scope, arguments, peer_ip)
+    elif tool == "skills.run":
+        arguments = _check_skill_run(plane, scope, arguments)
+        approval_id = _propose_local(scope, tool, arguments)
     else:
         approval_id = _propose_local(scope, tool, arguments)
     _audit(plane, account["id"], peer_ip, tool, "pending", 0, 0)
@@ -380,6 +391,76 @@ def _reminders_list(scope) -> tuple[str, int]:
     rows = ReminderStore(scope.home).open_items()
     lines = [f"{item.get('id')} {item.get('due')} {item.get('text')}" for item in rows]
     return "\n".join(lines), len(lines)
+
+
+def _skill_read(plane, scope, arguments: dict) -> tuple[str, int]:
+    """SKILL.md or one reference file of an installed, enabled skill."""
+    from ssios.skill_pkg import files_of, read_file
+
+    name = str(arguments.get("name") or "").strip()
+    path = str(arguments.get("path") or "SKILL.md").strip() or "SKILL.md"
+    text = read_file(plane, scope.account_id, name, path)
+    if path == "SKILL.md":
+        others = [one for one in files_of(plane, scope.account_id, name) if one != "SKILL.md"]
+        if others:
+            text += "\n\nFiles in this skill: " + ", ".join(others[:60])
+    return f"SKILL {name} / {path} (installed by the owner):\n{text}", 1
+
+
+def _check_skill_run(plane, scope, arguments: dict) -> dict:
+    """A run the owner can approve: an enabled skill, scripts allowed for it, a script that is in it."""
+    from ssios.skill_pkg import get
+    from ssios.skill_sandbox import backend
+
+    name = str(arguments.get("name") or "").strip()
+    meta = get(plane, scope.account_id, name)
+    if not meta.get("enabled"):
+        raise SsiosError("mcp_tool_denied", "That skill is turned off.", 403)
+    if not meta.get("scripts_allowed"):
+        raise SsiosError("mcp_tool_denied", "Scripts of that skill are not allowed. The owner can allow them on the Skills page.", 403)
+    script = str(arguments.get("script") or "").strip().lstrip("./")
+    if script not in (meta.get("scripts") or []):
+        raise SsiosError("mcp_tool_denied", "That script is not part of the skill.", 404)
+    if not backend():
+        raise SsiosError("mcp_tool_denied", "This computer has no sandbox for skill scripts, so they do not run.", 503)
+    args = arguments.get("args") if isinstance(arguments.get("args"), list) else []
+    return {"name": name, "script": script, "args": [str(one)[:2000] for one in args][:20], "input": str(arguments.get("input") or "")[:100_000]}
+
+
+def _apply_skill_run(scope, args: dict, approval_id: str) -> dict:
+    """Run the approved script in the sandbox. The output goes back to the conversation the run came from."""
+    from ssios.skill_pkg import get, home_of
+    from ssios.skill_sandbox import run
+
+    plane = scope.plane
+    name = str(args.get("name") or "")
+    meta = get(plane, scope.account_id, name)
+    if not meta.get("enabled") or not meta.get("scripts_allowed") or str(args.get("script") or "") not in (meta.get("scripts") or []):
+        raise SsiosError("mcp_tool_denied", "That skill or script is no longer allowed.", 403)
+    result = run(home_of(plane, scope.account_id) / name, str(args["script"]), list(args.get("args") or []), str(args.get("input") or ""))
+    plane.security_audit.write(
+        actor=scope.account_id,
+        ip="127.0.0.1",
+        action="skill.run",
+        target=name,
+        result="timeout" if result["timed_out"] else ("ok" if result["exit"] == 0 else "error"),
+        extra={"backend": result["backend"], "byte_count": str(len(result["stdout"]) + len(result["stderr"]))},
+    )
+    lines = [f"Skill {name}, {args['script']}: " + ("stopped after the time limit." if result["timed_out"] else f"exit {result['exit']} in {result['seconds']} s.")]
+    if result["stdout"].strip():
+        lines += ["", "```", result["stdout"].strip()[:8000], "```"]
+    if result["stderr"].strip():
+        lines += ["", "Errors:", "```", result["stderr"].strip()[-4000:], "```"]
+    if result["files"]:
+        lines += ["", "Files it wrote (not kept): " + ", ".join(f"{one['name']} ({one['size']} B)" for one in result["files"])]
+    text = "\n".join(lines)
+    try:
+        found = scope.chat().find_approval(approval_id)
+        if found:
+            scope.chat().append(found[0], {"role": "assistant", "text": text, "route": {"route": "skill", "reason": "Output of an approved skill script, run in the sandbox.", "source": "rule"}})
+    except Exception:
+        pass
+    return {"action": "skills.run", "status": "ran" if result["exit"] == 0 else "failed", "text": text, "exit": result["exit"]}
 
 
 def _propose_local(scope, tool: str, arguments: dict) -> str:

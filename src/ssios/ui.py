@@ -84,6 +84,15 @@ def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = 
         return Page(200, _dashboard(plane, session))
     if method == "GET" and path == "/ui/notices":
         return _notices(plane, session)
+    if method == "GET" and path == "/ui/skills":
+        from ssios.skill_page import skills_page
+
+        return Page(200, skills_page(plane, session, query))
+    if method == "POST" and path == "/ui/skills":
+        from ssios.skill_page import skills_post
+
+        _csrf(session, body)
+        return skills_post(plane, session, body, peer_ip)
     if method == "GET" and path == "/ui/library":
         from ssios.library_page import library_page
 
@@ -879,7 +888,7 @@ def _approval_status_page(plane, session, scope, approval_id: str, result: dict 
         "Decided",
         "<h2>" + html.escape(label) + "</h2>"
         + (f"<p>When: <time datetime=\"{html.escape(when)}\">{html.escape(when)}</time> ({html.escape(zone_name)})</p>" if when else "")
-        + f"<p>{html.escape(outcome)}</p>"
+        + (f"<pre class=\"skill-output\">{html.escape(outcome)}</pre>" if "\n" in outcome else f"<p>{html.escape(outcome)}</p>")
         + f"<p>Stored status: {html.escape(status)}</p>"
         + retry
         + extra
@@ -911,6 +920,8 @@ def _approval_outcome(scope, record: dict, result: dict | None) -> str:
         return "Saved the guest result for this account."
     if action == "goal.update":
         return "Updated the task."
+    if isinstance(result, dict) and result.get("action") == "skills.run":
+        return str(result.get("text") or "")
     if isinstance(result, dict) and result.get("status"):
         return "Status: " + str(result.get("status"))
     return "The decision was recorded."
@@ -2017,6 +2028,21 @@ form.lib-chip button:hover { color: var(--ink); }
 .lib-trash-bar { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .lib-trash-bar form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
 .lib-trash-bar input[name=confirm] { width: 7em; }
+.skill-install { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.skill-install label { display: grid; gap: 4px; flex: 1 1 320px; }
+.skill-review, .skill-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 12px 0; background: var(--panel); display: grid; gap: 8px; min-width: 0; }
+.skill-review h2, .skill-card h3 { margin: 0; }
+.skill-level { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 0.8em; border: 1px solid currentColor; }
+.level-low { color: #15803d; } .level-medium { color: #b45309; } .level-high { color: #b91c1c; }
+.skill-scroll { overflow-x: auto; max-width: 100%; }
+.skill-findings { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.skill-findings th, .skill-findings td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.skill-findings .snippet { display: inline-block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+.sev-high td:first-child { color: #b91c1c; font-weight: 600; } .sev-medium td:first-child { color: #b45309; }
+.skill-confirm { display: grid; gap: 6px; }
+.skill-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.skill-actions form { margin: 0; }
+.skill-md, .skill-output { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 0.85em; }
 button.lib-danger { color: #b91c1c; background: var(--panel); border: 1px solid currentColor; }
 .lib-actions { display: grid; gap: 8px; margin-top: 8px; }
 @media (max-width: 1100px) {
@@ -2775,6 +2801,7 @@ def _shell(session: dict, main: str, conversations: str = "") -> str:
         "<a href=\"/ui/vault\">Notes</a>"
         "<a href=\"/ui/tasks\">Tasks <span id=\"notice-count\" class=\"badge\" hidden></span></a>"
         "<a href=\"/ui/settings\">Settings</a>"
+        "<a href=\"/ui/skills\">Skills</a>"
         + admin
         + "<p class=\"menu-label\">More</p>"
         "<a href=\"/ui\">Console</a><a href=\"/ui/tasks\">Tasks</a><a href=\"/ui/audit\">Activity</a>"
