@@ -167,3 +167,30 @@ The same pass found that the R2 change had dropped the folder from the page's li
 | Same tag with different case or spacing | 10 | 10 | "Sea View", " sea  view ", "#SEA VIEW" all become the library's existing spelling, in the inspector, on import, in batches, in folder auto-tags, and on accepted suggestions |
 | Tests | 15 | 12 | `tests/test_files_autotag.py`, 10 tests, including a Chinese account. Checked in Chromium: the suggested view, accept one, dismiss one, accept all, folder auto-tags saved. Two older tests that expected the model to add tags directly now accept the suggestion first. No browser check of a real model run |
 | | **100** | **95** | |
+
+## R6 Delete and trash: done at 96
+
+| Criterion | Points | Score | Evidence |
+| --- | --- | --- | --- |
+| Trash and restore, one or many | 20 | 20 | Existing, kept |
+| Empty the trash with a confirmation | 15 | 15 | The trash view shows how many files are there and asks for the word `delete` (or `删除`) before Empty trash. Owner only |
+| Permanently delete selected items | 10 | 10 | The batch Delete permanently now runs as one pass (`library_trash.purge_many`) instead of reading the catalog once per file; files not in the trash are reported and left alone |
+| Rename and delete a folder; its files stay | 20 | 19 | In a folder's view, "Rename or delete folder". Rename refuses a name already used beside it. Delete removes the folder and its subfolders after a confirm and says how many files stayed; the files lose only those folders. Eagle can also delete a folder together with its files; that is left out on purpose |
+| Remove an item from a folder | 5 | 5 | The inspector lists the file's folders, each with ×; the batch bar already had it |
+| Empty automatically after N days, off by default | 10 | 10 | Never, 7, 30, 60, or 90 days per library; the background timer deletes what has been in the trash longer |
+| A stored file goes only when unused | 10 | 9 | Kept while any item, any version, or a duplicate waiting for keep-or-replace points to it; every extension of that hash is removed, and the cached preview too. Not checked against Eagle's own library folder, which Files never writes to |
+| Tests | 10 | 8 | `tests/test_files_trash.py`, 11 tests. Checked in Chromium: trash two from the inspector, set 30 days, empty with the word, rename a folder, delete it with the confirm, the file stays |
+| | **100** | **96** | |
+
+## Summary after R1–R6
+
+| # | Requirement | Before | After |
+| --- | --- | --- | --- |
+| R1 | Import | 47 | 98 |
+| R2 | Index | 25 | 97 |
+| R3 | Search and filters | 33 | 96 |
+| R4 | Tags | 37 | 96 |
+| R5 | Generated tags | 20 | 95 |
+| R6 | Delete and trash | 55 | 96 |
+
+Not checked on a Mac: a real Finder drag of a folder, Safari, `sips` for colours of HEIC photos, and a real Ollama run producing suggestions. The gaps left on purpose or for later: endless scrolling instead of "Show more", a free colour picker, merging several tags in one step, and deleting a folder together with its files.

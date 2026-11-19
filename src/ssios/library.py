@@ -593,29 +593,10 @@ def purge_item(plane, account_id: str, library_id: str, item_id: str, confirm: s
     item = get_item(plane, account_id, library_id, item_id)
     if not item.get("trashed"):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
-    from ssios.library_analyze import revoke_recall
-    from ssios.library_share import reader_ids
+    from ssios.library_trash import purge_many
 
-    for reader_id in reader_ids(plane, account_id, library_id):
-        revoke_recall(plane, reader_id, item_id, peer_ip)
-    path = _item_path(plane, account_id, library_id, item_id)
-    if path.is_file() and not path.is_symlink():
-        path.unlink()
-    cited = set()
-    for other in _items(plane, account_id, library_id):
-        if other.get("id") == item_id:
-            continue
-        cited.add(str(other.get("sha256") or ""))
-        for version in other.get("versions") or []:
-            if isinstance(version, dict):
-                cited.add(str(version.get("sha256") or ""))
-    for version in item.get("versions") or []:
-        digest = str(version.get("sha256") or "") if isinstance(version, dict) else ""
-        if digest and digest not in cited:
-            blob = _library_root(plane, account_id, library_id) / "objects" / f"{digest}.{item.get('ext')}"
-            if blob.is_file() and not blob.is_symlink():
-                blob.unlink()
-    _audit(plane, account_id, peer_ip, "library.purge", item_id, "ok", int(item.get("size") or 0))
+    # The row, its preview, and every stored file nothing else uses.
+    purge_many(plane, account_id, library_id, [item_id], peer_ip)
 
 
 def _migrate_files(plane, account_id: str, library_id: str) -> None:

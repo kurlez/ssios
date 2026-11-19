@@ -60,6 +60,28 @@ def batch_apply(plane, account_id: str, library_id: str, raw_ids, op: str, peer_
         found = canonical([tag], known_tags(plane, account_id, library_id))
         tag = found[0] if found else tag
     results = []
+    if op == "purge":
+        # One pass for the whole selection: each stored file is checked once against what is left.
+        from ssios.library_trash import purge_many
+
+        if confirm != "delete":
+            raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
+        wanted = [item_id for item_id in parse_ids(raw_ids) if _ITEM.fullmatch(item_id)]
+        trashed = set()
+        for item_id in wanted:
+            try:
+                if get_item(plane, account_id, library_id, item_id).get("trashed"):
+                    trashed.add(item_id)
+            except SsiosError:
+                pass
+        purge_many(plane, account_id, library_id, sorted(trashed), peer_ip)
+        for item_id in wanted:
+            if item_id in trashed:
+                _audit(plane, account_id, peer_ip, "library.batch_purge", item_id, "ok", 0)
+                results.append({"id": item_id, "ok": True})
+            else:
+                results.append({"id": item_id, "ok": False, "code": "library_rejected", "error": say(lang, "library_rejected")})
+        return {"results": results}
     for item_id in parse_ids(raw_ids):
         try:
             _one(plane, account_id, library_id, item_id, op, peer_ip, lang, role, tag=tag, folder_id=folder_id, confirm=confirm, model=model)

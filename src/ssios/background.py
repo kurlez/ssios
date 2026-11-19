@@ -178,6 +178,13 @@ def tick(plane) -> None:
         except Exception:
             pass
         try:
+            # Files that have been in the trash longer than the owner chose. Off unless a number of days is set.
+            from ssios.library_trash import auto_empty
+
+            auto_empty(plane, row)
+        except Exception:
+            pass
+        try:
             # Sizes and colours for files imported before the index had them. Local work, a few seconds a tick.
             from ssios.library_index import index_next
 

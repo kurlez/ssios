@@ -2014,6 +2014,9 @@ form.lib-chip button:hover { color: var(--ink); }
 .lib-folder-tags form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
 .lib-folder-tags summary { cursor: pointer; font-size: 0.9em; }
 .lib-folder-tags input[name=tags] { flex: 1 1 12em; min-width: 0; }
+.lib-trash-bar { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.lib-trash-bar form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
+.lib-trash-bar input[name=confirm] { width: 7em; }
 button.lib-danger { color: #b91c1c; background: var(--panel); border: 1px solid currentColor; }
 .lib-actions { display: grid; gap: 8px; margin-top: 8px; }
 @media (max-width: 1100px) {

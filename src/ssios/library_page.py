@@ -886,6 +886,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + f'<p>{html.escape(say(lang, "lib_star"))}</p><div class="lib-stars">{stars}</div></form>'
             + f'<div class="lib-chips">{chips}</div>'
             + _suggestions(selected, lang, csrf, library_id, ident)
+            + _item_folders(selected, meta, lang, csrf, library_id, ident, base, str(chosen.get("role") or "owner") in {"owner", "organize"})
             + f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
             + '<input type="hidden" name="op" value="tag-item">'
             + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="200" list="lib-tag-names" placeholder="a, b" autocomplete="off"></label>'
@@ -986,7 +987,8 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         '<div class="lib-toolbar">'
         + _filter_bar(query, filters, lang, library_id, text_query, sort, descending, csrf, chosen, smart_row)
         + tag_list
-        + (_folder_tags_form(meta, folder, lang, csrf, library_id) if folder and str(chosen.get("role") or "owner") in {"owner", "organize"} else "")
+        + (_folder_tags_form(meta, folder, lang, csrf, library_id) + _folder_manage_form(meta, folder, lang, csrf, library_id) if folder and str(chosen.get("role") or "owner") in {"owner", "organize"} else "")
+        + (_trash_bar(meta, lang, csrf, library_id, counts["trash"]) if trash and str(chosen.get("role") or "owner") == "owner" else "")
         + (_suggested_bar(lang, csrf, library_id, counts.get("suggested", 0)) if suggested_view else "")
         + f'<form id="library-import" class="lib-import" method="post" action="/ui/library" enctype="multipart/form-data">'
         + f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -1218,6 +1220,8 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         from ssios.library_tags import remove_item_tag
 
         remove_item_tag(plane, account_id, library_id, str(body.get("item") or ""), str(body.get("tag") or ""), peer_ip)
+    elif op in {"empty-trash", "trash-days", "folder-rename", "folder-delete", "unfolder-item"}:
+        return _trash_post(plane, session, body, peer_ip, op, library_id)
     elif op in {"suggest-accept", "suggest-dismiss"}:
         from ssios.library_autotag import review
 
@@ -1280,6 +1284,68 @@ def _preview_box(item: dict) -> tuple[int, int]:
     if item.get("ext") == "pdf" or item.get("group") != "image":
         return (160, 200)
     return (160, 160)
+
+
+def _item_folders(item: dict, meta: dict, lang: str, csrf: str, library_id: str, ident: str, base: str, can: bool) -> str:
+    """The folders a file is in. × takes it out of one; the file stays in the library."""
+    names = {str(row.get("id") or ""): row for row in meta.get("folders") or [] if isinstance(row, dict)}
+    known = [row for row in meta.get("folders") or [] if isinstance(row, dict)]
+    chips = []
+    for folder_id in item.get("folder_ids") or []:
+        row = names.get(str(folder_id))
+        if row is None:
+            continue
+        label = html.escape(_folder_label(known, row))
+        remove = (
+            f'<input type="hidden" name="op" value="unfolder-item"><input type="hidden" name="folder" value="{html.escape(str(folder_id), quote=True)}">'
+            f'<button type="submit" aria-label="{html.escape(say(lang, "lib_unfolder_one", folder=str(row.get("name") or "")), quote=True)}">×</button>'
+            if can
+            else ""
+        )
+        chips.append(f'<form method="post" action="/ui/library" class="lib-chip">{_hidden(csrf, library_id, ident)}<a href="{base}&amp;folder={html.escape(str(folder_id), quote=True)}">📁 {label}</a>{remove}</form>')
+    return f'<div class="lib-chips lib-item-folders">{"".join(chips)}</div>' if chips else ""
+
+
+def _trash_bar(meta: dict, lang: str, csrf: str, library_id: str, count: int) -> str:
+    from ssios.library_trash import RETENTION_CHOICES
+
+    zh = lang == "zh"
+    days = int(meta.get("trash_days") or 0)
+    choices = "".join(
+        f'<option value="{n}"{" selected" if n == days else ""}>{html.escape(("从不" if zh else "Never") if n == 0 else (f"{n} 天后" if zh else f"After {n} days"))}</option>'
+        for n in RETENTION_CHOICES
+    )
+    empty = ""
+    if count:
+        empty = (
+            f'<form method="post" action="/ui/library" class="lib-empty-trash">{_hidden(csrf, library_id)}<input type="hidden" name="op" value="empty-trash">'
+            f'<label>{html.escape(say(lang, "lib_empty_hint", count=count))} <input name="confirm" autocomplete="off" required></label>'
+            f'<button type="submit" class="lib-danger">{html.escape("清空回收站" if zh else "Empty trash")}</button></form>'
+        )
+    return (
+        f'<div class="lib-trash-bar">{empty}'
+        f'<form method="post" action="/ui/library">{_hidden(csrf, library_id)}<input type="hidden" name="op" value="trash-days">'
+        f'<label>{html.escape("自动清空回收站" if zh else "Empty the trash automatically")} <select name="days">{choices}</select></label>'
+        f'<button type="submit">{html.escape("保存" if zh else "Save")}</button></form></div>'
+    )
+
+
+def _folder_manage_form(meta: dict, folder: str, lang: str, csrf: str, library_id: str) -> str:
+    row = next((one for one in meta.get("folders") or [] if isinstance(one, dict) and one.get("id") == folder), None)
+    if row is None:
+        return ""
+    zh = lang == "zh"
+    hidden = _hidden(csrf, library_id) + f'<input type="hidden" name="folder" value="{html.escape(folder, quote=True)}">'
+    name = str(row.get("name") or "")
+    return (
+        f'<details class="lib-folder-tags"><summary>{html.escape("重命名或删除文件夹" if zh else "Rename or delete folder")}</summary>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="folder-rename">'
+        f'<input name="name" value="{html.escape(name, quote=True)}" maxlength="40" required aria-label="{html.escape("文件夹名称" if zh else "Folder name", quote=True)}">'
+        f'<button type="submit">{html.escape("重命名" if zh else "Rename")}</button></form>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="folder-delete">'
+        f'<button type="submit" class="lib-danger" data-confirm="{html.escape(say(lang, "lib_folder_delete_confirm", folder=name), quote=True)}">{html.escape("删除文件夹" if zh else "Delete folder")}</button>'
+        f'<span class="muted small">{html.escape("文件会留在资料库里。" if zh else "Its files stay in the library.")}</span></form></details>'
+    )
 
 
 def _suggestions(item: dict, lang: str, csrf: str, library_id: str, ident: str) -> str:
@@ -1451,6 +1517,32 @@ def _tag_manager(lang: str, csrf: str, library_id: str, base: str, meta: dict, t
 
 def _files(count: int) -> str:
     return "1 file" if count == 1 else f"{count} files"
+
+
+def _trash_post(plane, session: dict, body: dict, peer_ip: str, op: str, library_id: str) -> Page:
+    from ssios.library_trash import delete_folder, empty_trash, remove_from_folder, rename_folder, set_retention
+
+    account_id = session["account"]["id"]
+    zh = _language(plane, account_id) == "zh"
+    folder_id = str(body.get("folder") or "")
+    if op == "empty-trash":
+        count = empty_trash(plane, account_id, library_id, str(body.get("confirm") or ""), peer_ip)
+        note = f"已永久删除 {count} 个文件。" if zh else f"Deleted {_files(count)} for good."
+        return Page(200, library_page(plane, session, {"library": library_id, "trash": "1"}, f'<p class="notice">{html.escape(note)}</p>'))
+    if op == "trash-days":
+        days = set_retention(plane, account_id, library_id, body.get("days"), peer_ip)
+        note = ("已关闭自动清空。" if zh else "Automatic emptying is off.") if not days else (f"回收站里超过 {days} 天的文件会被永久删除。" if zh else f"Files in the trash longer than {days} days will be deleted for good.")
+        return Page(200, library_page(plane, session, {"library": library_id, "trash": "1"}, f'<p class="notice">{html.escape(note)}</p>'))
+    if op == "folder-rename":
+        rename_folder(plane, account_id, library_id, folder_id, str(body.get("name") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id, "folder": folder_id}))
+    if op == "folder-delete":
+        result = delete_folder(plane, account_id, library_id, folder_id, peer_ip)
+        note = f"已删除文件夹，{result['items']} 个文件留在资料库里。" if zh else f"Folder deleted. {_files(result['items'])[0].upper() + _files(result['items'])[1:]} stayed in the library."
+        return Page(200, library_page(plane, session, {"library": library_id}, f'<p class="notice">{html.escape(note)}</p>'))
+    item_id = str(body.get("item") or "")
+    remove_from_folder(plane, account_id, library_id, item_id, folder_id, peer_ip)
+    return Page(200, library_page(plane, session, {"library": library_id, "item": item_id}))
 
 
 def _tag_manager_post(plane, session: dict, body: dict, peer_ip: str, op: str, library_id: str) -> Page:
