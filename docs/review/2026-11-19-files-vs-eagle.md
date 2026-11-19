@@ -155,3 +155,15 @@ The same pass found that the R2 change had dropped the folder from the page's li
 | Untagged view | 5 | 5 | Existing |
 | Tests | 10 | 9 | `tests/test_files_tags.py`, 10 tests, including permissions for a viewer of a shared library. Checked in Chromium: group, merge, delete with the confirm dialog (dismiss keeps the tag), inspector add and ×, no sideways scroll at phone width. The check found delete buttons drawn as blank red blocks and the import tag box spilling into the inspector, both fixed |
 | | **100** | **96** | |
+
+## R5 Generated tags: done at 95
+
+| Criterion | Points | Score | Evidence |
+| --- | --- | --- | --- |
+| Folder auto-tags on import and on move | 25 | 24 | `library_autotag`: a folder's tags go on every file imported into it (picker, drop, link, watch folder, a kept-or-replaced duplicate) and every file moved into it from the inspector or a batch. When saving them, "Also add them to the files already here" fills older files. A file moved into a subfolder does not get the parent folder's tags, which Eagle also does not do by default |
+| Rule tags | 15 | 15 | Library settings, all off by default: type, orientation (from R2), and a dropped folder's subfolder names. In the account's language (`图片`, `横向`) |
+| Model tags are suggestions | 25 | 24 | Analysis writes `suggested_tags`. The inspector shows them dashed with ✓ and × each, plus Accept all and Dismiss all; a dismissed tag is not suggested again. A "Suggested tags" view lists the files waiting and can accept or dismiss them all, after a confirm. Suggestions are not searchable until accepted |
+| Background analysis follows the same rule | 10 | 10 | It calls the same analysis; covered by a test |
+| Same tag with different case or spacing | 10 | 10 | "Sea View", " sea  view ", "#SEA VIEW" all become the library's existing spelling, in the inspector, on import, in batches, in folder auto-tags, and on accepted suggestions |
+| Tests | 15 | 12 | `tests/test_files_autotag.py`, 10 tests, including a Chinese account. Checked in Chromium: the suggested view, accept one, dismiss one, accept all, folder auto-tags saved. Two older tests that expected the model to add tags directly now accept the suggestion first. No browser check of a real model run |
+| | **100** | **95** | |

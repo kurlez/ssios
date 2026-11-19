@@ -30,7 +30,9 @@ class AnalyzeTest(PlaneTest):
             model=ScriptedModel(phrase, ["harbor"], "HARBOR"),
         )
         self.assertEqual(analyzed["description"], phrase)
-        self.assertIn("harbor", analyzed["tags"])
+        # The model's tags wait for the owner.
+        self.assertNotIn("harbor", analyzed["tags"])
+        self.assertEqual(analyzed["suggested_tags"], ["harbor"])
         self.assertEqual(analyzed["ocr"], "HARBOR")
         self.assertEqual(analyzed["analysis_model"], "scripted")
         scope = AccountScope(self.plane, self.account)

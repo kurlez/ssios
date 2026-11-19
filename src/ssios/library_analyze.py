@@ -105,11 +105,10 @@ def analyze_item(plane, account_id: str, library_id: str, item_id: str, peer_ip:
     item["ocr"] = ocr
     item["analysis_model"] = str(parsed.get("model") or "")[:40]
     item["analysis_at"] = _now()
-    current = [str(tag) for tag in item.get("tags") or []]
-    for tag in tags:
-        if tag not in current:
-            current.append(tag)
-    item["tags"] = current[:40]
+    # The model's tags are suggestions. They become tags only when the owner accepts them.
+    from ssios.library_autotag import known_tags, suggest
+
+    item["suggested_tags"] = suggest(item, tags, known_tags(plane, account_id, library_id))
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, "library.analyze", item_id, "ok", int(item.get("size") or 0))
     from ssios.library_share import reader_ids

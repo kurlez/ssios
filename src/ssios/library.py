@@ -210,7 +210,11 @@ def clean_tags(raw) -> list[str]:
 
 def add_item_tags(plane, account_id: str, library_id: str, item_id: str, tags: list[str], peer_ip: str) -> dict:
     """Add several tags to one item at once, and to the library's tag list."""
+    from ssios.library_autotag import canonical, known_tags
+
     _require(plane, account_id, library_id, "add")
+    # "Sky" or " sky " becomes the library's "sky".
+    tags = canonical(tags, known_tags(plane, account_id, library_id))
     with _LOCK:
         item = get_item(plane, account_id, library_id, item_id)
         current = [str(tag) for tag in item.get("tags") or []]
@@ -407,9 +411,15 @@ def import_relative(
         )
     except SsiosError as exc:
         return {"path": shown, "status": "rejected", "code": exc.code, "reason": exc.detail, "id": ""}
-    if tags and saved.get("result") in {"saved", "version"} and saved.get("id"):
+    wanted = list(tags or [])
+    if len(parts) > 1 and saved.get("result") == "saved":
+        from ssios.library_autotag import rules_of
+
+        if rules_of(metadata(plane, account_id, library_id))["folder_names"]:
+            wanted += parts[:-1]
+    if wanted and saved.get("result") in {"saved", "version"} and saved.get("id"):
         try:
-            add_item_tags(plane, account_id, library_id, str(saved["id"]), tags, peer_ip)
+            add_item_tags(plane, account_id, library_id, str(saved["id"]), clean_tags(wanted), peer_ip)
         except SsiosError:
             pass
     if saved.get("result") == "conflict":
@@ -500,9 +510,12 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
         item["folder_ids"] = folders
         action = "library.folder"
     if tag:
-        title = " ".join(tag.split())[:40]
+        from ssios.library_autotag import canonical, known_tags, tag_key
+
+        found = canonical([tag], known_tags(plane, account_id, library_id))
+        title = found[0] if found else ""
         tags = list(item.get("tags") or [])
-        if title and title not in tags:
+        if title and tag_key(title) not in {tag_key(one) for one in tags}:
             tags.append(title)
         item["tags"] = tags
         action = "library.tag"
@@ -521,6 +534,11 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
     item["modified_at"] = _now()
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, action, item_id, "ok", int(item.get("size") or 0))
+    if folder_id:
+        from ssios.library_autotag import on_move
+
+        if on_move(plane, account_id, library_id, item_id, folder_id, peer_ip):
+            item = get_item(plane, account_id, library_id, item_id)
     if (star is not None and int(star) > 0) or (annotation is not None and str(annotation).strip()):
         # A star or a note of the account's own is the account having read the file.
         from ssios.library_analyze import _account
@@ -792,6 +810,15 @@ def _record_item(
             action = "library.version"
             result = "version"
     _audit(plane, account_id, peer_ip, action, match["id"], result, size)
+    if result == "saved" or folder_id:
+        # Folder auto-tags for a file entering a folder, rule tags for a new file. Never fails the import.
+        try:
+            from ssios.library_autotag import on_import
+
+            if on_import(plane, account_id, library_id, match["id"], [folder_id] if folder_id else [], peer_ip, new=result == "saved"):
+                match = get_item(plane, account_id, library_id, match["id"])
+        except SsiosError:
+            pass
     public = dict(match)
     public["version_count"] = len(match.get("versions") or [])
     public["result"] = result

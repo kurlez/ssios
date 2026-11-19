@@ -54,6 +54,11 @@ def batch_apply(plane, account_id: str, library_id: str, raw_ids, op: str, peer_
         raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
     _require(plane, account_id, library_id, _OPS[op])
     role = _role_of(plane, account_id, library_id) or ""
+    if op == "tag" and tag:
+        from ssios.library_autotag import canonical, known_tags
+
+        found = canonical([tag], known_tags(plane, account_id, library_id))
+        tag = found[0] if found else tag
     results = []
     for item_id in parse_ids(raw_ids):
         try:
@@ -115,6 +120,10 @@ def _one(plane, account_id, library_id, item_id, op, peer_ip, lang, role, *, tag
     item["modified_at"] = _now()
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, "library.batch_" + op, item_id, "ok", int(item.get("size") or 0))
+    if op == "folder":
+        from ssios.library_autotag import on_move
+
+        on_move(plane, account_id, library_id, item_id, folder_id, peer_ip)
 
 
 def _tag(item: dict, tag: str, lang: str, *, add: bool) -> None:
@@ -122,10 +131,10 @@ def _tag(item: dict, tag: str, lang: str, *, add: bool) -> None:
     if not title or "/" in title:
         raise SsiosError("library_rename", say(lang, "lib_batch_value"), 400)
     tags = [str(one) for one in item.get("tags") or []]
-    if add and title not in tags:
+    if add and title.casefold() not in {one.casefold() for one in tags}:
         tags.append(title)
     if not add:
-        tags = [one for one in tags if one != title]
+        tags = [one for one in tags if one.casefold() != title.casefold()]
     item["tags"] = tags[:40]
 
 

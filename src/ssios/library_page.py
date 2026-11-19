@@ -707,6 +707,9 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             uncategorized=uncategorized,
             untagged=untagged,
         )
+    suggested_view = str(query.get("suggested") or "") == "1"
+    if suggested_view:
+        items = [row for row in filter_items(catalog) if row.get("suggested_tags")]
     filters = parse_filters(query)
     items = apply_filters(items, filters)
     ranked = False
@@ -802,6 +805,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         "uncategorized": len(filter_items(catalog, uncategorized=True)),
         "untagged": len(filter_items(catalog, untagged=True)),
         "trash": len(filter_items(catalog, trash=True)),
+        "suggested": sum(1 for row in filter_items(catalog) if row.get("suggested_tags")),
     }
     cards = []
     try:
@@ -881,6 +885,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + f'<input type="hidden" name="op" value="star">'
             + f'<p>{html.escape(say(lang, "lib_star"))}</p><div class="lib-stars">{stars}</div></form>'
             + f'<div class="lib-chips">{chips}</div>'
+            + _suggestions(selected, lang, csrf, library_id, ident)
             + f'<form method="post" action="/ui/library">{_hidden(csrf, library_id, ident)}'
             + '<input type="hidden" name="op" value="tag-item">'
             + f'<label>{html.escape(say(lang, "lib_tag"))} <input name="tag" maxlength="200" list="lib-tag-names" placeholder="a, b" autocomplete="off"></label>'
@@ -917,7 +922,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
                 + '<input type="hidden" name="op" value="trash">'
                 + f'<button type="submit">{html.escape(say(lang, "lib_trash_item"))}</button></form></div>'
             )
-    nav = _nav(base, lang, counts, folder, trash, uncategorized, untagged, smart_id)
+    nav = _nav(base, lang, counts, folder, trash, uncategorized, untagged, smart_id, suggested_view)
     left = (
         '<div class="lib-side">'
         + "".join(switcher)
@@ -969,6 +974,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         )
         + _watch_form(meta, lang, csrf, library_id)
         + (_auto_analyze_form(meta, lang, csrf, library_id) if chosen.get("kind") != "shared" or chosen.get("role") == "owner" else "")
+        + (_rule_tags_form(meta, lang, csrf, library_id) if chosen.get("kind") != "shared" or chosen.get("role") == "owner" else "")
         + _share_block(chosen, lang, csrf, library_id)
         + "</details></div>"
     )
@@ -980,6 +986,8 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         '<div class="lib-toolbar">'
         + _filter_bar(query, filters, lang, library_id, text_query, sort, descending, csrf, chosen, smart_row)
         + tag_list
+        + (_folder_tags_form(meta, folder, lang, csrf, library_id) if folder and str(chosen.get("role") or "owner") in {"owner", "organize"} else "")
+        + (_suggested_bar(lang, csrf, library_id, counts.get("suggested", 0)) if suggested_view else "")
         + f'<form id="library-import" class="lib-import" method="post" action="/ui/library" enctype="multipart/form-data">'
         + f'<input type="hidden" name="csrf" value="{csrf}">'
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
@@ -1210,6 +1218,29 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         from ssios.library_tags import remove_item_tag
 
         remove_item_tag(plane, account_id, library_id, str(body.get("item") or ""), str(body.get("tag") or ""), peer_ip)
+    elif op in {"suggest-accept", "suggest-dismiss"}:
+        from ssios.library_autotag import review
+
+        value = str(body.get("tag") or "")
+        value_or_all = "*" if value == "*" else value
+        review(plane, account_id, library_id, str(body.get("item") or ""), peer_ip, accept=value_or_all if op == "suggest-accept" else None, dismiss=value_or_all if op == "suggest-dismiss" else None)
+    elif op == "suggest-all":
+        from ssios.library_autotag import review_all
+
+        review_all(plane, account_id, library_id, peer_ip, accept=str(body.get("decision") or "") == "accept")
+        return Page(200, library_page(plane, session, {"library": library_id}))
+    elif op == "folder-tags":
+        from ssios.library_autotag import set_folder_tags
+
+        folder_id = str(body.get("folder") or "")
+        result = set_folder_tags(plane, account_id, library_id, folder_id, str(body.get("tags") or ""), peer_ip, apply_now=bool(body.get("apply")))
+        zh = _language(plane, account_id) == "zh"
+        note = (f"已保存。加到了 {result['items']} 个已有文件。" if zh else f"Saved. Added to {_files(result['items'])} already in the folder.") if body.get("apply") else ("已保存。" if zh else "Saved.")
+        return Page(200, library_page(plane, session, {"library": library_id, "folder": folder_id}, f'<p class="notice">{html.escape(note)}</p>'))
+    elif op == "rule-tags":
+        from ssios.library_autotag import RULES, set_rules
+
+        set_rules(plane, account_id, library_id, {name: bool(body.get(name)) for name in RULES}, peer_ip)
     elif op in {"tag-rename", "tag-delete", "tag-group", "group-add", "group-update", "group-delete"}:
         return _tag_manager_post(plane, session, body, peer_ip, op, library_id)
     elif op == "star":
@@ -1249,6 +1280,81 @@ def _preview_box(item: dict) -> tuple[int, int]:
     if item.get("ext") == "pdf" or item.get("group") != "image":
         return (160, 200)
     return (160, 160)
+
+
+def _suggestions(item: dict, lang: str, csrf: str, library_id: str, ident: str) -> str:
+    """Tags the model suggested. Each waits for the owner: accept it, or dismiss it so it is not offered again."""
+    offered = [str(tag) for tag in item.get("suggested_tags") or []]
+    if not offered:
+        return ""
+    zh = lang == "zh"
+    hidden = _hidden(csrf, library_id, ident)
+    chips = "".join(
+        f'<span class="lib-suggest"><span>{html.escape(tag)}</span>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-accept"><input type="hidden" name="tag" value="{html.escape(tag, quote=True)}">'
+        f'<button type="submit" aria-label="{html.escape(("接受 " if zh else "Accept ") + tag, quote=True)}">✓</button></form>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-dismiss"><input type="hidden" name="tag" value="{html.escape(tag, quote=True)}">'
+        f'<button type="submit" aria-label="{html.escape(("忽略 " if zh else "Dismiss ") + tag, quote=True)}">×</button></form></span>'
+        for tag in offered
+    )
+    return (
+        f'<div class="lib-suggestions"><p class="muted small">{html.escape("模型建议的标签，接受后才会加上：" if zh else "Suggested by the model. Not added until you accept:")}</p>'
+        f'<div class="lib-chips">{chips}</div><div class="lib-actions">'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-accept"><input type="hidden" name="tag" value="*">'
+        f'<button type="submit">{html.escape("全部接受" if zh else "Accept all")}</button></form>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-dismiss"><input type="hidden" name="tag" value="*">'
+        f'<button type="submit">{html.escape("全部忽略" if zh else "Dismiss all")}</button></form></div></div>'
+    )
+
+
+def _suggested_bar(lang: str, csrf: str, library_id: str, count: int) -> str:
+    zh = lang == "zh"
+    hidden = _hidden(csrf, library_id)
+    return (
+        f'<div class="lib-suggest-bar"><p>{html.escape(f"{count} 个文件有待确认的标签。" if zh else f"{count} files have suggested tags.")}</p>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-all"><input type="hidden" name="decision" value="accept">'
+        f'<button type="submit" data-confirm="{html.escape("接受所有文件上的全部建议标签？" if zh else "Accept every suggested tag on every file?", quote=True)}">{html.escape("全部接受" if zh else "Accept all")}</button></form>'
+        f'<form method="post" action="/ui/library">{hidden}<input type="hidden" name="op" value="suggest-all"><input type="hidden" name="decision" value="dismiss">'
+        f'<button type="submit" data-confirm="{html.escape("忽略所有建议标签？" if zh else "Dismiss every suggested tag?", quote=True)}">{html.escape("全部忽略" if zh else "Dismiss all")}</button></form></div>'
+    )
+
+
+def _folder_tags_form(meta: dict, folder: str, lang: str, csrf: str, library_id: str) -> str:
+    row = next((one for one in meta.get("folders") or [] if isinstance(one, dict) and one.get("id") == folder), None)
+    if row is None:
+        return ""
+    zh = lang == "zh"
+    current = ", ".join(str(tag) for tag in row.get("auto_tags") or [])
+    title = ("文件夹自动标签" if zh else "Folder auto-tags") + (f": {current}" if current else "")
+    return (
+        f'<details class="lib-folder-tags"><summary>{html.escape(title)}</summary>'
+        f'<form method="post" action="/ui/library">{_hidden(csrf, library_id)}<input type="hidden" name="op" value="folder-tags"><input type="hidden" name="folder" value="{html.escape(folder, quote=True)}">'
+        f'<p class="muted small">{html.escape("导入或移入这个文件夹的文件会自动加上这些标签。" if zh else "Files imported or moved into this folder get these tags.")}</p>'
+        f'<input name="tags" value="{html.escape(current, quote=True)}" maxlength="400" list="lib-tag-names" placeholder="a, b" autocomplete="off">'
+        f'<label><input type="checkbox" name="apply" value="1"> {html.escape("也加到已在文件夹里的文件" if zh else "Also add them to the files already here")}</label>'
+        f'<button type="submit">{html.escape("保存" if zh else "Save")}</button></form></details>'
+    )
+
+
+def _rule_tags_form(meta: dict, lang: str, csrf: str, library_id: str) -> str:
+    from ssios.library_autotag import rules_of
+
+    zh = lang == "zh"
+    rules = rules_of(meta)
+    labels = {
+        "type": ("Add the file type as a tag (image, video, document…)", "把文件类型加为标签（图片、视频、文档…）"),
+        "orientation": ("Add the orientation as a tag (landscape, portrait, square)", "把方向加为标签（横向、纵向、方形）"),
+        "folder_names": ("Add the names of a dropped folder's subfolders as tags", "把拖入文件夹里的子文件夹名加为标签"),
+    }
+    boxes = "".join(
+        f'<label><input type="checkbox" name="{name}" value="1"{" checked" if rules[name] else ""}> {html.escape(labels[name][1 if zh else 0])}</label>'
+        for name in labels
+    )
+    return (
+        f'<form method="post" action="/ui/library" class="lib-watch">{_hidden(csrf, library_id)}<input type="hidden" name="op" value="rule-tags">'
+        f'<p>{html.escape("导入新文件时自动加的标签，默认关闭。" if zh else "Tags added to new files at import. All off until you turn them on.")}</p>'
+        f'{boxes}<button type="submit">{html.escape("保存自动标签" if zh else "Save automatic tags")}</button></form>'
+    )
 
 
 def _tag_manager(lang: str, csrf: str, library_id: str, base: str, meta: dict, tag_rows: list, role: str, needle: str) -> str:
@@ -1587,13 +1693,15 @@ def _batch_dialogs(lang: str, folders: list[dict]) -> str:
     )
 
 
-def _nav(base: str, lang: str, counts: dict, folder: str, trash: bool, uncategorized: bool, untagged: bool, smart_id: str) -> str:
+def _nav(base: str, lang: str, counts: dict, folder: str, trash: bool, uncategorized: bool, untagged: bool, smart_id: str, suggested: bool = False) -> str:
     links = [
-        ("", "lib_all", "all", not folder and not trash and not uncategorized and not untagged and not smart_id),
+        ("", "lib_all", "all", not folder and not trash and not uncategorized and not untagged and not smart_id and not suggested),
         ("&amp;uncategorized=1", "lib_uncategorized", "uncategorized", uncategorized),
         ("&amp;untagged=1", "lib_untagged", "untagged", untagged),
-        ("&amp;trash=1", "lib_trash", "trash", trash),
     ]
+    if counts.get("suggested"):
+        links.append(("&amp;suggested=1", "lib_suggested", "suggested", suggested))
+    links.append(("&amp;trash=1", "lib_trash", "trash", trash))
     return '<nav class="lib-nav">' + "".join(
         f'<a class="{"active" if on else ""}" href="{base}{suffix}">{html.escape(say(lang, key))}<span class="lib-count">{counts[count]}</span></a>'
         for suffix, key, count, on in links

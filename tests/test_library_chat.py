@@ -116,6 +116,9 @@ class FilesInChatTest(PlaneTest):
         from ssios.library_page import library_page
 
         analyze_item(self.plane, self.account_id, self.library_id, self.amc["id"], "127.0.0.1", model=ScriptedModel("eighth grade contest problems", ["数学", "contest"], ""))
+        from ssios.library_autotag import review
+
+        review(self.plane, self.account_id, self.library_id, self.amc["id"], "127.0.0.1", accept="*")
         update_item(self.plane, self.account_id, self.library_id, self.bp["id"], peer_ip="127.0.0.1", tag="work")
         update_item(self.plane, self.account_id, self.library_id, self.photo["id"], peer_ip="127.0.0.1", tag="contest")
         add_tag(self.plane, self.account_id, self.library_id, "empty", "127.0.0.1")

@@ -2004,6 +2004,16 @@ form.lib-chip button:hover { color: var(--ink); }
 .lib-tm-actions input { width: 9em; min-width: 0; }
 .lib-tm-groups { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .lib-tm-groups li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lib-suggestions { display: grid; gap: 6px; border: 1px dashed var(--line); border-radius: 10px; padding: 8px; }
+.lib-suggest { display: inline-flex; align-items: center; gap: 2px; border: 1px dashed var(--muted); border-radius: 999px; padding: 1px 4px 1px 10px; margin: 0 4px 4px 0; font-size: 12px; }
+.lib-suggest form { display: inline; margin: 0; }
+.lib-suggest button { border: 0; background: transparent; padding: 0 4px; min-height: 0; line-height: 1; cursor: pointer; color: var(--muted); font-size: 13px; }
+.lib-suggest button:hover { color: var(--ink); }
+.lib-suggest-bar, .lib-folder-tags { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.lib-suggest-bar form { margin: 0; }
+.lib-folder-tags form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+.lib-folder-tags summary { cursor: pointer; font-size: 0.9em; }
+.lib-folder-tags input[name=tags] { flex: 1 1 12em; min-width: 0; }
 button.lib-danger { color: #b91c1c; background: var(--panel); border: 1px solid currentColor; }
 .lib-actions { display: grid; gap: 8px; margin-top: 8px; }
 @media (max-width: 1100px) {
