@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Files R2 index: each item records its main colours (up to five) next to its size in pixels, shown as a strip in the inspector. Older items get them from `ssios library-reindex --username NAME` or, a few at a time, from the background timer. The catalog is kept in memory and in `catalog-cache.json`, so the Files page reads it once: a library of 10,000 items opens in about a tenth of a second instead of nearly two. The grid shows 400 cards with a "Show more" link.
 
 Not run against a real Ollama model. Both features are off in the sample config. See [docs/search.md](docs/search.md).
 

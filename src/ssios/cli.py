@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
     sub.add_parser("launchd-plist", parents=[common])
-    for name in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread"):
+    for name in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread", "library-reindex"):
         command = sub.add_parser(name, parents=[common])
         command.add_argument("--username", required=True, help="the account that owns the library")
         if name == "vault-sync":
@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--name", required=True)
         if name in ("library-create", "eagle-import"):
             command.add_argument("--location", default="", help="directory that will hold the library's own folder. Default: the state directory")
+        if name == "library-reindex":
+            command.add_argument("--library", default="", help="library id, from library-list. Default: every library the account owns")
+            command.add_argument("--all", action="store_true", help="index every item again, not only those that need it")
         if name == "library-move":
             command.add_argument("--library", required=True, help="library id, from library-list")
             command.add_argument("--location", required=True, help="directory that will hold the library's own folder")
@@ -140,6 +143,15 @@ def run_library_command(settings, args) -> int:
 
             rows = [{key: row.get(key) for key in ("id", "name", "kind", "role", "location", "offline")} for row in list_libraries(plane, account_id)]
             report = {"libraries": rows}
+        elif args.command == "library-reindex":
+            from ssios.library import list_libraries
+            from ssios.library_index import reindex_library
+
+            chosen = [row for row in list_libraries(plane, account_id) if not row.get("offline") and (not args.library or row["id"] == args.library) and (row.get("kind") != "shared" or row.get("role") == "owner")]
+            if args.library and not chosen:
+                print(json.dumps({"error": "library_missing", "detail": "No library with that id is open to this account."}, ensure_ascii=False), flush=True)
+                return 1
+            report = {"libraries": {str(row["id"]): reindex_library(plane, account_id, str(row["id"]), force=args.all) for row in chosen}}
         elif args.command == "library-create":
             from ssios.library import create_library
 
@@ -263,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
-    if args.command in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread"):
+    if args.command in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread", "library-reindex"):
         return run_library_command(settings, args)
     if args.command == "audit-verify":
         plane = ControlPlane(settings)

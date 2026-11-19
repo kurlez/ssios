@@ -112,3 +112,17 @@ Branch `claude/epic-bardeen-zdd6j2`. Eagle means Eagle 4 as a desktop asset libr
 | Progress, summary, duplicates | 10 | 10 | Existing per-file progress and keep-or-replace choice |
 | Tests and a browser check | 5 | 5 | `tests/test_files_import.py`, including a streamed upload through the real route. The browser check found that the streaming parser dropped the tags field, which is fixed |
 | | **100** | **98** | |
+
+## R2 Index: done at 97
+
+Measured on the CI container with 10,000 synthetic items: listing 0.07 s warm, the Files page 0.11 s (it was 1.85 s), the first read after a restart about 0.4 s.
+
+| Criterion | Points | Score | Evidence |
+| --- | --- | --- | --- |
+| Width and height from the header | 15 | 15 | `library_meta` for PNG, JPEG, GIF, WebP (three kinds), BMP, TIFF (both byte orders), HEIC, and MP4 with duration. `HeaderTest` covers each one |
+| Colour palette | 20 | 19 | `library_palette`: up to five colours with their share, transparent pixels left out. A local tool (`sips`, ImageMagick, ffmpeg) makes a 64-pixel BMP for JPEG, HEIC, GIF, WebP, TIFF, and a video frame; without one, PNG and BMP are decoded in Python and a PDF uses its cached preview. Shown as a strip in the inspector; each colour links to a colour filter for R3. Video frames are not covered by a test |
+| Re-index of older items | 15 | 15 | `ssios library-reindex --username` (`--library`, `--all`) and the background timer, which works for up to two seconds a tick. An edit made while colours are worked out is kept; a file replaced meanwhile is skipped |
+| One catalog read per page; 10,000 items under half a second | 25 | 24 | `library_catalog` keeps the rows in memory and parses only files whose time, size, or inode changed. The page reads it once and filters for the counts and tags. The grid shows 400 cards with a "Show more" link instead of 10,000 at once, which costs a click Eagle does not ask for |
+| Survives a restart and notices changed files | 10 | 9 | `catalog-cache.json` holds the rows with their keys; a restart reads that one file. A file changed by a sync tool, a new file, and a removed file are all noticed. On a file system with one-second times, a same-size rewrite within the same second by another program could be missed until the next change |
+| Tests | 15 | 15 | `tests/test_files_index.py`, 21 tests, including 10,000 items under the time limits and a check that the page reads the catalog once |
+| | **100** | **97** | |

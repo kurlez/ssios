@@ -627,6 +627,10 @@ def library_script_path() -> str:
     return "/ui/assets/library-" + _asset_hash(LIBRARY_JS) + ".js"
 
 
+# Cards per page. Eagle scrolls without end; here the next cards are one link away, which keeps a page fast.
+PAGE_SIZE = 400
+
+
 def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     from ssios.ui import _page
 
@@ -655,16 +659,17 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     untagged = str(query.get("untagged") or "") == "1"
     smart_id = str(query.get("smart") or "")
     text_query = " ".join(str(query.get("q") or "").split())[:200]
+    from ssios.library import _items, filter_items
+
+    # One catalog read for the whole page: the listing, the counts, and the tag list all come from it.
+    catalog = _items(plane, account_id, library_id)
     if smart_id:
         from ssios.library_query import smart_items
 
         items = smart_items(plane, account_id, library_id, smart_id)
     else:
-        items = list_items(
-            plane,
-            account_id,
-            library_id,
-            folder=folder,
+        items = filter_items(
+            catalog,
             tag=tag,
             trash=trash,
             uncategorized=uncategorized,
@@ -722,7 +727,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
     from ssios.library import tag_counts
 
-    for name, count in tag_counts(plane, account_id, library_id):
+    for name, count in tag_counts(plane, account_id, library_id, catalog):
         mark = ' class="active"' if name == tag else ""
         tags.append(f'<a{mark} href="{base}&amp;tag={html.escape(_quote(name, safe=""), quote=True)}">{html.escape(name)} <span class="count">{count}</span></a>')
     sort = str(query.get("sort") or "newest")
@@ -735,12 +740,28 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     elif not ranked:
         items = sorted(items, key=lambda item: str(item.get("modified_at") or item.get("imported_at") or ""), reverse=True)
     counts = {
-        "all": len(list_items(plane, account_id, library_id)),
-        "uncategorized": len(list_items(plane, account_id, library_id, uncategorized=True)),
-        "untagged": len(list_items(plane, account_id, library_id, untagged=True)),
-        "trash": len(list_items(plane, account_id, library_id, trash=True)),
+        "all": len(filter_items(catalog)),
+        "uncategorized": len(filter_items(catalog, uncategorized=True)),
+        "untagged": len(filter_items(catalog, untagged=True)),
+        "trash": len(filter_items(catalog, trash=True)),
     }
     cards = []
+    try:
+        shown = max(PAGE_SIZE, min(int(str(query.get("limit") or PAGE_SIZE)), 100_000))
+    except ValueError:
+        shown = PAGE_SIZE
+    total = len(items)
+    more = ""
+    if total > shown:
+        from urllib.parse import urlencode
+
+        keep = {key: str(value) for key, value in query.items() if key not in {"limit", "item", "csrf"} and isinstance(value, str)}
+        keep["limit"] = str(shown + PAGE_SIZE)
+        more = (
+            f'<p class="lib-more"><a href="/ui/library?{html.escape(urlencode(keep), quote=True)}">'
+            f'{html.escape(say(lang, "lib_more", shown=shown, total=total))}</a></p>'
+        )
+        items = items[:shown]
     for item in items:
         ident = html.escape(str(item.get("id") or ""), quote=True)
         label = html.escape(str(item.get("name") or ""))
@@ -787,6 +808,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
             + '<p class="lib-rename-error" hidden></p>'
             + f"<p>{html.escape(version_label)}</p>"
             + (f'<p class="lib-dims">{html.escape(_dims(selected, lang))}</p>' if _dims(selected, lang) else "")
+            + _swatches(selected, base)
             + (f'<p class="lib-source"><a href="{html.escape(str(selected.get("source_url")), quote=True)}" rel="noopener noreferrer">{html.escape(str(selected.get("source_url"))[:80])}</a></p>' if str(selected.get("source_url") or "").startswith(("https://", "http://")) else "")
             + (f"<p>{html.escape(str(selected.get('captured_at') or ''))}</p>" if selected.get("captured_at") else "")
             + f"<form method=\"post\" action=\"/ui/library\">{_hidden(csrf, library_id, ident)}"
@@ -919,6 +941,7 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
         + '<div id="library-grid" class="lib-grid">'
         + ("".join(cards) or f"<p>{html.escape(say(lang, 'lib_empty_view'))}</p>")
         + "</div>"
+        + more
         + _batch_bar(lang, str(chosen.get("role") or "owner"), trash, bool(folder))
     )
     selected_class = " has-selection" if selected else ""
@@ -1146,6 +1169,25 @@ def _preview_box(item: dict) -> tuple[int, int]:
     if item.get("ext") == "pdf" or item.get("group") != "image":
         return (160, 200)
     return (160, 160)
+
+
+def _swatches(item: dict, base: str) -> str:
+    """The main colours, largest first. Each one links to the files that share it."""
+    from urllib.parse import quote as _quote
+
+    from ssios.library_palette import hex_rgb
+
+    cells = []
+    for row in item.get("palette") or []:
+        colour = str(row.get("color") or "") if isinstance(row, dict) else ""
+        if hex_rgb(colour) is None or not colour.startswith("#"):
+            continue
+        share = round(float(row.get("ratio") or 0) * 100)
+        cells.append(
+            f'<a class="lib-swatch" href="{base}&amp;color={html.escape(_quote(colour[1:]), quote=True)}" title="{html.escape(colour)} · {share}%" '
+            f'style="background:{html.escape(colour, quote=True)};flex-grow:{max(1, share)}"><span class="sr-only">{html.escape(colour)}</span></a>'
+        )
+    return f'<div class="lib-palette">{"".join(cells)}</div>' if cells else ""
 
 
 def _dims(item: dict, lang: str) -> str:

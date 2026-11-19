@@ -232,7 +232,7 @@ def add_item_tags(plane, account_id: str, library_id: str, item_id: str, tags: l
     return item
 
 
-def tag_counts(plane, account_id: str, library_id: str) -> list[tuple[str, int]]:
+def tag_counts(plane, account_id: str, library_id: str, items: list[dict] | None = None) -> list[tuple[str, int]]:
     """Every tag in the library with the number of live items that carry it.
 
     A tag made on the page, by analysis, or by a batch edit is listed the same way.
@@ -240,7 +240,8 @@ def tag_counts(plane, account_id: str, library_id: str) -> list[tuple[str, int]]
     counts: dict[str, int] = {}
     for name in metadata(plane, account_id, library_id).get("tags") or []:
         counts.setdefault(str(name), 0)
-    for item in list_items(plane, account_id, library_id):
+    live = list_items(plane, account_id, library_id) if items is None else filter_items(items)
+    for item in live:
         for name in item.get("tags") or []:
             counts[str(name)] = counts.get(str(name), 0) + 1
     return sorted(counts.items(), key=lambda row: (-row[1], row[0].casefold()))
@@ -435,8 +436,13 @@ def drop_summary(lang: str, results: list[dict]) -> str:
 
 def list_items(plane, account_id: str, library_id: str, *, folder: str = "", tag: str = "", trash: bool = False, uncategorized: bool = False, untagged: bool = False) -> list[dict]:
     library_or_default(plane, account_id, library_id)
+    return filter_items(_items(plane, account_id, library_id), folder=folder, tag=tag, trash=trash, uncategorized=uncategorized, untagged=untagged)
+
+
+def filter_items(items: list[dict], *, folder: str = "", tag: str = "", trash: bool = False, uncategorized: bool = False, untagged: bool = False) -> list[dict]:
+    """The rows of one catalog read that a sidebar entry shows. A page reads the catalog once and filters it here."""
     rows = []
-    for item in _items(plane, account_id, library_id):
+    for item in items:
         if bool(item.get("trashed")) != trash:
             continue
         folders = item.get("folder_ids") if isinstance(item.get("folder_ids"), list) else []
@@ -724,9 +730,9 @@ def _record_item(
     existing_id: str = "",
 ) -> dict:
     stamp = _now()
-    from ssios.library_meta import file_info
+    from ssios.library_index import index_fields
 
-    media = file_info(_library_root(plane, account_id, library_id) / "objects" / f"{digest}.{kind['ext']}", kind["ext"])
+    media = index_fields(_library_root(plane, account_id, library_id), digest, kind["ext"])
     with _LOCK:
         items = _items(plane, account_id, library_id)
         match = next((item for item in items if item.get("id") == existing_id), None) if existing_id else None
@@ -777,7 +783,7 @@ def _record_item(
             match["analysis_model"] = ""
             if captured:
                 match["captured_at"] = captured
-            for key in ("width", "height", "orientation", "duration"):
+            for key in ("width", "height", "orientation", "duration", "palette", "indexed"):
                 match.pop(key, None)
             match.update(media)
             if folder_id and folder_id not in (match.get("folder_ids") or []):
@@ -992,17 +998,9 @@ def _write_metadata(plane, account_id: str, library_id: str, data: dict) -> None
 
 
 def _items(plane, account_id: str, library_id: str) -> list[dict]:
-    folder = _library_root(plane, account_id, library_id) / "items"
-    if not folder.is_dir():
-        return []
-    rows = []
-    for path in sorted(folder.glob("item-*.json")):
-        if path.is_symlink():
-            continue
-        data = read_json(path, {})
-        if isinstance(data, dict) and data.get("id"):
-            rows.append(data)
-    return rows
+    from ssios.library_catalog import rows
+
+    return rows(_library_root(plane, account_id, library_id))
 
 
 def _write_item(plane, account_id: str, library_id: str, item: dict) -> None:

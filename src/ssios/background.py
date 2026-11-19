@@ -177,6 +177,13 @@ def tick(plane) -> None:
             run_brief(plane, row, now)
         except Exception:
             pass
+        try:
+            # Sizes and colours for files imported before the index had them. Local work, a few seconds a tick.
+            from ssios.library_index import index_next
+
+            index_next(plane, row)
+        except Exception:
+            pass
         if local:
             try:
                 analyze_next(plane, row)
