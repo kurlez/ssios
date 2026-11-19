@@ -247,7 +247,7 @@ class PlaywrightDropTest(PlaneTest):
                   });
                   const one = new File([bytes(png)], "one.png");
                   const two = new File([bytes(pngB)], "two.png");
-                  const harbor = new File([bytes(png)], "harbor.png");
+                  const harbor = new File([bytes(png), new Uint8Array([0])], "harbor.png");
                   const notes = new File([bytes(zip)], "notes.zip");
                   const hidden = new File([bytes(png)], ".secret.png");
                   const album = dirEntry("Album", [fileEntry(harbor), fileEntry(notes), fileEntry(hidden)]);
@@ -272,17 +272,17 @@ class PlaywrightDropTest(PlaneTest):
                 [_b64(PNG), _b64(PNG_B), _b64(b"PK\x03\x04notes")],
             )
             page.evaluate("() => window.__drop(['one.png', 'Album', 'two.png'])")
+            # A dropped folder is read through the entry API: its files land in a folder of the same name.
             page.wait_for_function(
-                "() => document.querySelectorAll('#drop-log li.ok').length >= 2"
-                " && (document.getElementById('drop-log').innerText || '').includes('不支持拖入文件夹')"
+                "() => document.querySelectorAll('#drop-log li.ok').length >= 3"
+                " && (document.getElementById('drop-log').innerText || '').includes('notes.zip')"
             )
             text = page.inner_text("#drop-log")
             self.assertIn("one.png", text)
             self.assertIn("two.png", text)
-            self.assertIn("Album", text)
-            self.assertIn("不支持拖入文件夹，请拖入文件。", text)
-            self.assertNotIn("harbor.png", text)
-            self.assertNotIn("notes.zip", text)
+            self.assertIn("Album/harbor.png", text)
+            self.assertIn("Album/notes.zip", text)
+            self.assertNotIn(".secret.png", text)
             page.evaluate("() => window.__drop(['one.png'])")
             page.wait_for_selector("#drop-log button.primary")
             page.locator("#drop-log label input").check()

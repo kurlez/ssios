@@ -618,6 +618,22 @@ LIBRARY_JS = r"""
     }
   }
 })();
+(function () {
+  // The filter bar sends only the filters that are set, so a filtered view is a short link.
+  var form = document.getElementById("lib-filters");
+  if (!form) return;
+  form.addEventListener("submit", function () {
+    Array.prototype.forEach.call(form.elements, function (field) {
+      if (!field.name || field.type === "submit") return;
+      var empty = field.value === "" || (field.name === "tagmode" && field.value === "all" && !form.elements.tags.value);
+      if (field.name === "dir" || field.name === "sort") empty = false;
+      if (empty) field.disabled = true;
+    });
+    setTimeout(function () {
+      Array.prototype.forEach.call(form.elements, function (field) { field.disabled = false; });
+    }, 0);
+  });
+})();
 """
 
 
@@ -663,18 +679,29 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
     # One catalog read for the whole page: the listing, the counts, and the tag list all come from it.
     catalog = _items(plane, account_id, library_id)
-    if smart_id:
-        from ssios.library_query import smart_items
+    from ssios.library_filter import apply as apply_filters
+    from ssios.library_filter import parse as parse_filters
 
-        items = smart_items(plane, account_id, library_id, smart_id)
+    smart_row = None
+    if smart_id:
+        from ssios.library_query import smart_filter, smart_row as find_smart
+
+        try:
+            smart_row = find_smart(plane, account_id, library_id, smart_id)
+        except SsiosError:
+            smart_row = {}
+        items = smart_filter(catalog, smart_row) if smart_row else []
     else:
         items = filter_items(
             catalog,
+            folder=folder,
             tag=tag,
             trash=trash,
             uncategorized=uncategorized,
             untagged=untagged,
         )
+    filters = parse_filters(query)
+    items = apply_filters(items, filters)
     ranked = False
     if text_query:
         from ssios.library_query import _blob
@@ -683,13 +710,18 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
         from ssios.library_chat import tag_filter
 
+        names = {str(row.get("id") or ""): str(row.get("name") or "") for row in meta.get("folders") or [] if isinstance(row, dict)}
+        for item in items:
+            item["_folder_names"] = " ".join(names.get(str(one), "") for one in item.get("folder_ids") or [])
         wanted, rest = tag_filter(text_query)
         if wanted:
             items = [item for item in items if all(one in {str(name).casefold() for name in item.get("tags") or []} for one in wanted)]
         needle = rest.casefold()
         if needle:
             close = [] if trash else meaning_ids(plane, account_id, library_id, rest)
-            items = by_meaning([item for item in items if needle in _blob(item) or str(item.get("id") or "") in close], close, needle)
+            # Every word must appear somewhere, in any order. Search by meaning adds what the words miss.
+            words = needle.split()
+            items = by_meaning([item for item in items if all(word in _blob(item) for word in words) or str(item.get("id") or "") in close], close, needle)
             ranked = bool(close) and "sort" not in query
     selected = None
     item_id = str(query.get("item") or "")
@@ -727,18 +759,16 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
 
     from ssios.library import tag_counts
 
-    for name, count in tag_counts(plane, account_id, library_id, catalog):
+    tag_rows = tag_counts(plane, account_id, library_id, catalog)
+    tag_list = '<datalist id="lib-tag-names">' + "".join(f'<option value="{html.escape(name, quote=True)}">' for name, _count in tag_rows) + "</datalist>"
+    for name, count in tag_rows:
         mark = ' class="active"' if name == tag else ""
         tags.append(f'<a{mark} href="{base}&amp;tag={html.escape(_quote(name, safe=""), quote=True)}">{html.escape(name)} <span class="count">{count}</span></a>')
-    sort = str(query.get("sort") or "newest")
-    if sort not in {"name", "newest", "size"}:
-        sort = "newest"
-    if sort == "name":
-        items = sorted(items, key=lambda item: str(item.get("name") or "").casefold())
-    elif sort == "size":
-        items = sorted(items, key=lambda item: int(item.get("size") or 0), reverse=True)
-    elif not ranked:
-        items = sorted(items, key=lambda item: str(item.get("modified_at") or item.get("imported_at") or ""), reverse=True)
+    from ssios.library_filter import sort_items, sort_of
+
+    sort, descending = sort_of(query)
+    if not ranked:
+        items = sort_items(items, sort, descending)
     counts = {
         "all": len(filter_items(catalog)),
         "uncategorized": len(filter_items(catalog, uncategorized=True)),
@@ -910,16 +940,10 @@ def library_page(plane, session: dict, query: dict, notice: str = "") -> str:
     zone = ""
     if empty:
         zone = f'<div class="drop-zone"><p>{html.escape(say(lang, "lib_drop_empty"))}</p></div>'
-    options = "".join(
-        f'<option value="{key}"{" selected" if sort == key else ""}>{html.escape(say(lang, label))}</option>'
-        for key, label in (("newest", "lib_sort_newest"), ("name", "lib_sort_name"), ("size", "lib_sort_size"))
-    )
     grid = (
         '<div class="lib-toolbar">'
-        + f'<form method="get" action="/ui/library"><input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
-        + f'<label>{html.escape(say(lang, "search_files"))} <input name="q" value="{html.escape(text_query, quote=True)}" maxlength="200"></label>'
-        + f'<label>{html.escape(say(lang, "lib_sort"))} <select name="sort">{options}</select></label>'
-        + f'<button type="submit">{html.escape(say(lang, "search_files"))}</button></form>'
+        + _filter_bar(query, filters, lang, library_id, text_query, sort, descending, csrf, chosen, smart_row)
+        + tag_list
         + f'<form id="library-import" class="lib-import" method="post" action="/ui/library" enctype="multipart/form-data">'
         + f'<input type="hidden" name="csrf" value="{csrf}">'
         + f'<input type="hidden" name="library" value="{html.escape(library_id, quote=True)}">'
@@ -1065,6 +1089,12 @@ def _library_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         if saved.get("result") == "conflict":
             return Page(200, library_page(plane, session, {"library": library_id}, _conflict_form(session, library_id, saved, _language(plane, account_id))))
         return Page(200, library_page(plane, session, {"library": library_id, "item": saved["id"]}, "<p>Saved the file.</p>"))
+    if op == "smart-filters":
+        from ssios.library_query import add_filter_folder
+
+        filters = {key[2:]: str(value) for key, value in body.items() if key.startswith("f_") and isinstance(value, str)}
+        row = add_filter_folder(plane, account_id, library_id, str(body.get("name") or ""), filters, str(body.get("q") or ""), peer_ip)
+        return Page(200, library_page(plane, session, {"library": library_id, "smart": row["id"]}, f"<p>{html.escape(say(_language(plane, account_id), 'smart_saved'))}</p>"))
     if op == "smart":
         from ssios.library_query import add_smart_folder
 
@@ -1169,6 +1199,111 @@ def _preview_box(item: dict) -> tuple[int, int]:
     if item.get("ext") == "pdf" or item.get("group") != "image":
         return (160, 200)
     return (160, 160)
+
+
+def _filter_bar(query: dict, filters: dict, lang: str, library_id: str, text_query: str, sort: str, descending: bool, csrf: str, chosen: dict, smart_row) -> str:
+    """Keywords, sort, and Eagle's filters in one GET form, so a filtered view is a link."""
+    from urllib.parse import urlencode
+
+    from ssios.library_filter import ADDED, COLOURS, GROUPS, SHAPES, as_query, describe
+
+    zh = lang == "zh"
+
+    def esc(value) -> str:
+        return html.escape(str(value), quote=True)
+
+    def t(en: str, cn: str) -> str:
+        return html.escape(cn if zh else en)
+
+    def option(value: str, label: str, current: str) -> str:
+        return f'<option value="{esc(value)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
+
+    view = {key: str(query.get(key) or "") for key in ("folder", "tag", "smart", "trash", "uncategorized", "untagged") if str(query.get(key) or "")}
+    hidden = f'<input type="hidden" name="library" value="{esc(library_id)}">' + "".join(f'<input type="hidden" name="{esc(key)}" value="{esc(value)}">' for key, value in view.items())
+    sorts = (("added", "Date added", "添加时间"), ("modified", "Date modified", "修改时间"), ("name", "Name", "名称"), ("size", "File size", "文件大小"), ("star", "Rating", "评分"), ("pixels", "Dimensions", "尺寸"))
+    sort_select = "".join(option(key, cn if zh else en, sort) for key, en, cn in sorts)
+    direction = option("desc", "↓ " + ("降序" if zh else "Descending"), "desc" if descending else "asc") + option("asc", "↑ " + ("升序" if zh else "Ascending"), "desc" if descending else "asc")
+    group_names = {"image": ("Images", "图片"), "video": ("Video", "视频"), "audio": ("Audio", "音频"), "document": ("Documents", "文档"), "design": ("Design files", "设计文件"), "font": ("Fonts", "字体")}
+    chosen_types = filters.get("type") or []
+    types = "".join(
+        f'<label class="chip-check"><input type="checkbox" name="type" value="{esc(group)}"{" checked" if group in chosen_types else ""}> {t(*group_names[group])}</label>'
+        for group in GROUPS
+    )
+    star = str(filters.get("star") or "")
+    stars = option("", "任意" if zh else "Any", star) + "".join(option(str(n), "★" * n + ("及以上" if zh else " and up") if n < 5 else "★★★★★", star) for n in range(1, 6))
+    mode = filters.get("tagmode", "all")
+    modes = option("all", "全部包含" if zh else "Has all", mode) + option("any", "包含任一" if zh else "Has any", mode) + option("none", "都不包含" if zh else "Has none", mode)
+    added = filters.get("added", "")
+    added_names = {"today": ("Today", "今天"), "7d": ("Last 7 days", "7 天内"), "30d": ("Last 30 days", "30 天内"), "365d": ("Last year", "一年内")}
+    added_select = option("", "任意时间" if zh else "Any time", added) + "".join(option(key, added_names[key][1 if zh else 0], added) for key in ADDED)
+    shape = filters.get("shape", "")
+    shape_names = {"landscape": ("Landscape", "横向"), "portrait": ("Portrait", "纵向"), "square": ("Square", "方形")}
+    shape_select = option("", "任意" if zh else "Any", shape) + "".join(option(key, shape_names[key][1 if zh else 0], shape) for key in SHAPES)
+    colour = filters.get("color", "")
+    swatches = f'<label class="swatch-pick any" title="{t("Any colour", "任意颜色")}"><input type="radio" name="color" value=""{" checked" if not colour else ""}><span>∅</span></label>'
+    custom = colour and colour not in {code for code, _en, _cn in COLOURS}
+    for code, en, cn in COLOURS:
+        swatches += f'<label class="swatch-pick" title="{html.escape(cn if zh else en)}"><input type="radio" name="color" value="{code}"{" checked" if code == colour else ""}><span style="background:#{code}"></span></label>'
+    if custom:
+        swatches += f'<label class="swatch-pick" title="#{esc(colour)}"><input type="radio" name="color" value="{esc(colour)}" checked><span style="background:#{esc(colour)}"></span></label>'
+
+    def number(name: str, value, placeholder: str, step: str = "1") -> str:
+        shown = "" if value in (None, "") else ("%g" % value if isinstance(value, float) else str(value))
+        return f'<input type="number" name="{name}" value="{esc(shown)}" min="0" step="{step}" placeholder="{esc(placeholder)}" inputmode="decimal">'
+
+    active = describe(filters, lang)
+    # The chips show what is set; the panel stays closed so the grid stays in view.
+    open_attr = ""
+    keep = {"library": library_id, **view}
+    if text_query:
+        keep["q"] = text_query
+    clear = "/ui/library?" + urlencode(keep)
+    chips = ""
+    if active:
+        chips = (
+            '<div class="lib-chips">'
+            + "".join(f'<span class="chip">{html.escape(label)}</span>' for label in active)
+            + f'<a class="chip clear" href="{esc(clear)}">{t("Clear filters", "清除筛选")}</a></div>'
+        )
+    save = ""
+    can_organize = str(chosen.get("role") or "owner") in {"owner", "organize"}
+    if (active or text_query) and can_organize and not smart_row:
+        saved = as_query(filters)
+        save = (
+            f'<details class="lib-save-smart"><summary>{t("Save as smart folder", "存为智能文件夹")}</summary>'
+            f'<form method="post" action="/ui/library"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="library" value="{esc(library_id)}"><input type="hidden" name="op" value="smart-filters">'
+            + "".join(f'<input type="hidden" name="f_{esc(key)}" value="{esc(value)}">' for key, value in saved.items())
+            + f'<input type="hidden" name="q" value="{esc(text_query)}">'
+            f'<label>{t("Name", "名称")} <input name="name" maxlength="40" required></label>'
+            f'<button type="submit">{t("Save", "保存")}</button></form></details>'
+        )
+    if smart_row:
+        chips = f'<div class="lib-chips"><span class="chip">{html.escape(str(smart_row.get("name") or ""))}: {html.escape(str(smart_row.get("text") or ""))}</span></div>' + chips
+    return (
+        f'<form method="get" action="/ui/library" class="lib-filters" id="lib-filters">{hidden}'
+        + '<div class="lib-filter-row">'
+        + f'<label class="grow">{html.escape(say(lang, "search_files"))} <input type="search" name="q" value="{esc(text_query)}" maxlength="200"></label>'
+        + f'<label>{html.escape(say(lang, "lib_sort"))} <select name="sort">{sort_select}</select></label>'
+        + f'<label><span class="sr-only">{t("Direction", "方向")}</span><select name="dir">{direction}</select></label>'
+        + f'<button type="submit">{html.escape(say(lang, "search_files"))}</button></div>'
+        + f'<details class="lib-filter-panel"{open_attr}><summary>{t("Filters", "筛选")}{(" · " + str(len(active))) if active else ""}</summary>'
+        + '<div class="lib-filter-grid">'
+        + f'<fieldset><legend>{t("Type", "类型")}</legend>{types}'
+        + f'<label>{t("Extension", "扩展名")} <input name="ext" value="{esc(",".join(filters.get("ext") or []))}" placeholder="png, pdf" maxlength="60"></label></fieldset>'
+        + f'<fieldset><legend>{t("Rating", "评分")}</legend><select name="star">{stars}</select></fieldset>'
+        + f'<fieldset><legend>{t("Tags", "标签")}</legend><input name="tags" value="{esc(", ".join(filters.get("tags") or []))}" list="lib-tag-names" placeholder="a, b" maxlength="200"><select name="tagmode">{modes}</select></fieldset>'
+        + f'<fieldset><legend>{t("Date added", "添加时间")}</legend><select name="added">{added_select}</select>'
+        + f'<label>{t("From", "从")} <input type="date" name="from" value="{esc(filters.get("from", ""))}"></label><label>{t("To", "到")} <input type="date" name="to" value="{esc(filters.get("to", ""))}"></label></fieldset>'
+        + f'<fieldset><legend>{t("File size (MB)", "文件大小（MB）")}</legend>{number("size_min", filters.get("size_min"), "min", "any")} – {number("size_max", filters.get("size_max"), "max", "any")}</fieldset>'
+        + f'<fieldset><legend>{t("Dimensions", "尺寸")}</legend><select name="shape">{shape_select}</select>'
+        + f'{number("min_w", filters.get("min_w"), t("min width", "最小宽"))} × {number("min_h", filters.get("min_h"), t("min height", "最小高"))}</fieldset>'
+        + f'<fieldset class="wide"><legend>{t("Colour", "颜色")}</legend><div class="swatch-row">{swatches}</div></fieldset>'
+        + f'</div><p><button type="submit">{t("Apply", "应用")}</button> <a href="{esc(clear)}">{t("Clear filters", "清除筛选")}</a></p></details>'
+        + "</form>"
+        + chips
+        + save
+    )
 
 
 def _swatches(item: dict, base: str) -> str:

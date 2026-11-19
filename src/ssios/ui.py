@@ -50,7 +50,8 @@ class Page:
 def handle(plane, method: str, target: str, headers, body: dict, peer_ip: str = "127.0.0.1") -> Page:
     parts = urlsplit(target)
     path = parts.path.rstrip("/") or "/ui"
-    query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
+    # A repeated key keeps its last value, except the Files type boxes, which can be ticked together.
+    query = {key: (",".join(values) if key == "type" else values[-1]) for key, values in parse_qs(parts.query).items()}
     if path == "/ui/clip":
         return _browser_clip(plane, method, headers, body, peer_ip)
     rejected = _check_origin(plane, headers, method)
@@ -1932,6 +1933,35 @@ tr:hover .kebab summary, .page .kebab summary { opacity: 1; }
 .lib-palette { display: flex; gap: 2px; height: 22px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
 .lib-palette .lib-swatch { display: block; min-width: 14px; flex-basis: 0; }
 .lib-more { text-align: center; }
+.lib-toolbar { flex-wrap: wrap; }
+.lib-toolbar form.lib-filters { display: grid; gap: 8px; min-width: 0; flex: 1 1 100%; }
+.lib-toolbar > .lib-chips, .lib-toolbar > .lib-save-smart { flex: 1 1 100%; }
+.lib-filter-grid label { white-space: normal; }
+.lib-filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.lib-filter-row .grow { flex: 1 1 220px; display: grid; gap: 4px; }
+.lib-filter-row .grow input { width: 100%; }
+.lib-filter-panel > summary { cursor: pointer; font-weight: 600; }
+.lib-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 10px; margin-top: 8px; }
+.lib-filter-grid fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; margin: 0; }
+.lib-filter-grid fieldset.wide { grid-column: 1 / -1; }
+.lib-filter-grid legend { font-size: 0.85em; color: var(--muted); padding: 0 4px; }
+.lib-filter-grid fieldset { align-content: flex-start; align-items: center; }
+.lib-filter-grid fieldset > label { display: flex; gap: 6px; align-items: center; flex: 1 1 100%; min-width: 0; }
+.lib-filter-grid input:not([type=checkbox]):not([type=radio]), .lib-filter-grid select { min-width: 0; max-width: 100%; }
+.lib-filter-grid fieldset > label > input, .lib-filter-grid input[name=tags] { flex: 1 1 8em; width: auto; }
+.lib-filter-grid input[type=number] { width: 6.5em; flex: 0 1 6.5em; }
+.lib-filter-grid label.chip-check { flex: 0 0 auto; white-space: nowrap; }
+.chip-check { display: inline-flex; gap: 4px; align-items: center; font-size: 0.9em; }
+.swatch-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.swatch-pick { position: relative; cursor: pointer; }
+.swatch-pick input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.swatch-pick span { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.swatch-pick input:checked + span { outline: 2px solid var(--accent, #2563eb); outline-offset: 2px; }
+.swatch-pick input:focus-visible + span { outline: 2px dashed var(--accent, #2563eb); outline-offset: 2px; }
+.lib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lib-chips .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 0.85em; background: var(--panel); }
+.lib-chips .chip.clear { text-decoration: none; }
+.lib-save-smart > summary { cursor: pointer; font-size: 0.9em; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(148px, 100%), 1fr)); gap: 12px; min-height: 120px; }
 .lib-card { position: relative; display: grid; gap: 6px; align-content: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-decoration: none; color: var(--ink); min-width: 0; }

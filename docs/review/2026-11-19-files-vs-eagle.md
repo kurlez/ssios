@@ -126,3 +126,18 @@ Measured on the CI container with 10,000 synthetic items: listing 0.07 s warm, t
 | Survives a restart and notices changed files | 10 | 9 | `catalog-cache.json` holds the rows with their keys; a restart reads that one file. A file changed by a sync tool, a new file, and a removed file are all noticed. On a file system with one-second times, a same-size rewrite within the same second by another program could be missed until the next change |
 | Tests | 15 | 15 | `tests/test_files_index.py`, 21 tests, including 10,000 items under the time limits and a check that the page reads the catalog once |
 | | **100** | **97** | |
+
+## R3 Search and filters: done at 96
+
+| Criterion | Points | Score | Evidence |
+| --- | --- | --- | --- |
+| Keywords over every field | 15 | 15 | Name, tags, note, description, text in the file, source link, and folder names. Every word must appear, in any order. Folder names are joined in for one page read and never stored on the item |
+| Filter bar | 40 | 36 | `library_filter`: type (several at once), extension, rating and up, tags with all, any, or none, date added (today, 7, 30, 365 days, or a from–to range), size in MB, orientation, minimum width and height, and twelve colour swatches matched against each item's palette (a colour in the inspector also links to its filter). Active filters show as chips with Clear. Eagle applies filters as they are clicked; here the panel has an Apply button, and the colour choice is twelve swatches rather than a free picker (a free colour still works from the inspector link) |
+| Sorts, both directions | 10 | 10 | Date added, date modified, name, file size, rating, and pixel count, each ascending or descending. The old `sort=newest` links still work |
+| Save the current filters as a smart folder | 10 | 10 | "Save as smart folder" stores the filters and keywords; the folder is worked out again each time, so later files that match appear and trashed ones do not. Written queries (`tag:x AND star>=3`) still work |
+| Fast on 10,000 items | 10 | 10 | The filters narrow the rows of the single catalog read. A page with five filters, a keyword, and a sort on 10,000 items stays under half a second in the test |
+| Search by meaning with filters | 5 | 5 | Meaning results pass through the same filters |
+| Tests and a browser check | 10 | 10 | `tests/test_files_filters.py`, 13 tests including the real GET route with two type boxes ticked. In Chromium: colour and type, then orientation, saved as a smart folder, rating ascending, keyword with tags none; no page errors and no sideways scroll at phone width. The check found the filter panel hidden under the import buttons, which is fixed, and the form now sends only the filters that are set |
+| | **100** | **96** | |
+
+The same pass found that the R2 change had dropped the folder from the page's listing (a folder view showed every file). It is fixed and covered by `test_folder_view_still_narrows_and_keeps_its_place`. The browser drop test in `tests/test_library_drop.py` still expected dropped folders to be skipped; it now expects the folder's files in a folder of the same name, which was checked in Chromium.
