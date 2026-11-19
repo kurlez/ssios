@@ -235,16 +235,13 @@ class IndexTest(PlaneTest):
         self.assertIn("background:#dc1e28", text)
         self.assertIn("&amp;color=dc1e28", text)
 
-    def test_a_new_version_is_indexed_again(self) -> None:
+    def test_same_name_different_content_is_indexed_on_its_own(self) -> None:
         item = self.add(png(split(10, 10, RED, RED)), "a.png")
-        staged = self.add(png(split(10, 30, BLUE, BLUE)), "a.png")
-        self.assertEqual(staged["result"], "conflict", staged)
-        from ssios.library import resolve_conflict
-
-        resolve_conflict(self.plane, self.account_id, self.library_id, staged["conflict_id"], "replace", "127.0.0.1")
-        row = get_item(self.plane, self.account_id, self.library_id, item["id"])
-        self.assertEqual(row["orientation"], "portrait")
-        self.assertEqual(row["palette"][0]["color"], "#143cc8")
+        other = self.add(png(split(10, 30, BLUE, BLUE)), "a.png")
+        self.assertEqual(other["result"], "saved", other)
+        self.assertNotEqual(other["id"], item["id"])
+        self.assertEqual((other["orientation"], other["palette"][0]["color"]), ("portrait", "#143cc8"))
+        self.assertEqual(get_item(self.plane, self.account_id, self.library_id, item["id"])["orientation"], "square")
 
     def strip(self, item_id: str) -> None:
         row = get_item(self.plane, self.account_id, self.library_id, item_id)

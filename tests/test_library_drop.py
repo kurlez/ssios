@@ -138,7 +138,7 @@ class DropImportTest(PlaneTest):
         self.assertTrue(any(row["path"].endswith("notes.zip") for row in rejected))
         self.assertTrue(any(row["path"].endswith(".secret.png") for row in rejected))
 
-    def test_streamed_reimport_is_a_version_and_oversize_stops(self) -> None:
+    def test_streamed_same_name_is_a_new_file_and_oversize_stops(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as folder:
@@ -149,25 +149,15 @@ class DropImportTest(PlaneTest):
             )
             self.assertEqual(first["result"], "saved")
             path.write_bytes(b"%PDF-1.4\nhello again")
+            # Same name, different content: a second file, not a version of the first.
             second = import_path(
                 self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
             )
-            self.assertEqual(second["result"], "conflict")
-            self.assertEqual(second["conflict_kind"], "name")
+            self.assertEqual(second["result"], "saved")
+            self.assertNotEqual(second["id"], first["id"])
             from ssios.library import get_item, resolve_conflict
 
-            kept = resolve_conflict(self.plane, self.account["id"], self.library_id, second["conflict_id"], "keep", "127.0.0.1")
-            self.assertEqual(kept["status"], "kept")
             self.assertEqual(len(get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]), 1)
-            path.write_bytes(b"%PDF-1.4\nhello again")
-            third = import_path(
-                self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
-            )
-            replaced = resolve_conflict(self.plane, self.account["id"], self.library_id, third["conflict_id"], "replace", "127.0.0.1")
-            self.assertEqual(replaced["status"], "version")
-            versions = get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]
-            self.assertEqual(len(versions), 2)
-            self.assertNotEqual(versions[0]["sha256"], versions[1]["sha256"])
             same = import_path(
                 self.plane, self.account["id"], self.library_id, path, name="other.pdf", source="drag", peer_ip="127.0.0.1"
             )
@@ -182,10 +172,7 @@ class DropImportTest(PlaneTest):
 
             rows = [json.loads(line) for line in (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
             keeps = [row for row in rows if row.get("action") == "library.keep"]
-            replaces = [row for row in rows if row.get("action") == "library.replace"]
-            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in keeps))
             self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "identical" for row in keeps))
-            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in replaces))
             self.assertNotIn("sheet.pdf", json.dumps(rows))
             import ssios.library as library
 

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Files: a file with the same name as one already in the folder but different content is now imported as a separate file, as in Eagle. Files keeps no versions; only the same content already in the library still asks whether to keep it.
 - Files R6 delete and trash: Empty trash with a typed confirmation; automatic emptying after 7 to 90 days, off by default; permanent delete of a selection in one pass, which also removes cached previews and every stored file nothing else uses; rename a folder, and delete a folder and its subfolders while their files stay in the library; take a file out of one folder from the inspector.
 - Files R5 generated tags: folders can carry auto-tags that go on every file imported or moved into them. Library settings can add the file type, orientation, and dropped-folder names as tags at import (off by default). Tags from model analysis, on demand or in the background, are now suggestions: accept or dismiss them one at a time, per file, or across the library from the new "Suggested tags" view. A tag that differs from an existing one only by case, spacing, or a leading # becomes the existing tag.
 - Files R4 tags: a tag manager ("Manage tags") with file counts, rename, merge (rename onto an existing tag), and delete across the library; tag groups with colours, shown in the sidebar, including groups imported from Eagle; tag autocomplete everywhere a tag is typed; the inspector adds several tags at once and removes one with ×.

@@ -277,7 +277,7 @@ def import_bytes(
     peer_ip: str,
     folder_id: str = "",
 ) -> dict:
-    """Store one finished file. A name or byte conflict is staged until the owner chooses."""
+    """Store one finished file. Content already in the library is staged until the owner chooses."""
     lang = _lang(plane, account_id)
     _require(plane, account_id, library_id, "add")
     filename = _check_name(name, lang)
@@ -844,24 +844,10 @@ def _find_conflict(plane, account_id: str, library_id: str, filename: str, diges
     identical = next((item for item in items if item.get("sha256") == digest), None)
     if identical is not None:
         return {"item": identical, "conflict_kind": "identical"}
-    named = next(
-        (
-            item
-            for item in items
-            if str(item.get("name") or "").casefold() == filename.casefold() and _same_folder(item, folder_id)
-        ),
-        None,
-    )
-    if named is not None and named.get("sha256") != digest:
-        return {"item": named, "conflict_kind": "name"}
+    # A file with the same name and different content is a different file, as in Eagle. It is imported
+    # beside the other one; Files keeps no versions of it.
+    del filename, folder_id
     return None
-
-
-def _same_folder(item: dict, folder_id: str) -> bool:
-    folders = item.get("folder_ids") if isinstance(item.get("folder_ids"), list) else []
-    if folder_id:
-        return folder_id in folders
-    return not folders
 
 
 def _stage_conflict(plane, account_id, library_id, stored, conflict, filename, kind, captured, source, folder_id, digest: str = "", size: int = 0, incoming=None) -> dict:
