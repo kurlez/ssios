@@ -174,6 +174,7 @@ def skills_page(plane, session: dict, query: dict, notice: str = "") -> str:
 def skills_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
     from ssios.skill_install import fetch_skill
     from ssios.skill_pkg import drop_stage, install, remove, update
+    from ssios.skill_sandbox import backend
 
     account = session["account"]
     account_id = account["id"]
@@ -185,7 +186,7 @@ def skills_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
             record = fetch_skill(plane, account_id, str(body.get("url") or ""), peer_ip)
             return Page(200, skills_page(plane, session, {"stage": record["id"]}))
         if op == "install":
-            meta = install(plane, account_id, str(body.get("stage") or ""), allow_scripts=admin and bool(body.get("scripts")), accept_warnings=bool(body.get("accept")))
+            meta = install(plane, account_id, str(body.get("stage") or ""), allow_scripts=admin and bool(body.get("scripts")) and bool(backend()), accept_warnings=bool(body.get("accept")))
             plane.security_audit.write(actor=account_id, ip=peer_ip, action="skill.install", target=meta["name"], result=str((meta.get("report") or {}).get("level") or ""), extra={"scripts": "on" if meta.get("scripts_allowed") else "off"})
             note = f"已安装 {meta['name']}。" if zh else f"Installed {meta['name']}."
         elif op == "cancel":
@@ -197,7 +198,7 @@ def skills_post(plane, session: dict, body: dict, peer_ip: str) -> Page:
         elif op == "scripts":
             if not admin:
                 raise SsiosError("skill_rejected", "Only an admin can allow scripts.", 403)
-            meta = update(plane, account_id, str(body.get("name") or ""), scripts_allowed=str(body.get("allowed") or "") == "1")
+            meta = update(plane, account_id, str(body.get("name") or ""), scripts_allowed=str(body.get("allowed") or "") == "1" and bool(backend()))
             plane.security_audit.write(actor=account_id, ip=peer_ip, action="skill.scripts", target=meta["name"], result="on" if meta["scripts_allowed"] else "off")
             note = ("已允许脚本。" if zh else "Its scripts may run, each after your approval.") if meta["scripts_allowed"] else ("已禁止脚本。" if zh else "Its scripts are off.")
         elif op == "remove":
