@@ -50,6 +50,18 @@ def interpreter(kind: str) -> str:
     return ""
 
 
+def _bwrap_program(program: str) -> tuple[list[str], str]:
+    """The real interpreter, plus a read-only bind when it lives outside the system folders."""
+    real = Path(program).resolve()
+    prefix = real.parent.parent if real.parent.name == "bin" else real.parent
+    roots = [Path(name) for name in ("/usr", "/bin", "/lib", "/lib64", "/sbin") if Path(name).exists()]
+    inside = any(real == root or root in real.parents for root in roots)
+    binds: list[str] = []
+    if prefix.is_dir() and prefix != Path("/") and not inside:
+        binds = ["--ro-bind", str(prefix), str(prefix)]
+    return binds, str(real)
+
+
 def _mac_profile(skill: Path, work: Path, program: Path) -> str:
     def lit(path) -> str:
         return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -122,6 +134,8 @@ def run(skill_dir: Path, script: str, args: list[str], stdin: str = "", inputs: 
                 elif path.is_dir():
                     command += ["--ro-bind", str(path), "/" + name]
             command += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--ro-bind", str(skill), "/skill", "--bind", str(work), "/work", "--chdir", "/work"]
+            extra, program = _bwrap_program(program)
+            command += extra
             command += [program, "/skill/" + relative, *values]
         else:
             command = ["/usr/bin/sandbox-exec", "-p", _mac_profile(skill, work, Path(program)), program, str(target), *values]

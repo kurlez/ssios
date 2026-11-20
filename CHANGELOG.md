@@ -2,7 +2,7 @@
 
 ## 0.4.0 — 2026-11-20
 
-Files rounds, an Obsidian-style Notes vault, and skill install. The package version is `0.4.0` (`pyproject.toml` and `ssios.__version__`). Synthetic data only. The suite ran 488 tests: 475 passed, 13 skipped. The scorecard mean is 90 / 100.
+Files rounds, an Obsidian-style Notes vault, and skill install. The package version is `0.4.0` (`pyproject.toml` and `ssios.__version__`). Synthetic data only. The suite ran 489 tests: 476 passed, 13 skipped. The scorecard mean is 90 / 100.
 
 - Skills: install a skill (Agent Skills layout, SKILL.md) from a GitHub folder, a .zip, or a SKILL.md link. Each skill gets a line-by-line safety check before it can be installed; refused skills cannot be installed and warnings must be accepted. The local model sees installed skills, reads one when a request matches, and follows it with its existing tools. An admin can allow a skill's scripts; each run needs approval and runs in a sandbox with no network (sandbox-exec on macOS, bubblewrap on Linux). See docs/skills.md.
 - Files: a file with the same name as one already in the folder but different content is now imported as a separate file, as in Eagle. Files keeps no versions; only the same content already in the library still asks whether to keep it.

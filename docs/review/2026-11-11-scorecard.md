@@ -64,7 +64,7 @@ Branch `claude/epic-bardeen-zdd6j2`. Scores are out of 100 for each requirement 
 
 Mean of the 33 rows above: **90 / 100** (2973 / 33).
 
-`PYTHONPATH=src:tests SSIOS_TEST=1 python3 -m unittest discover -s tests` — 488 ran, 475 passed, 13 skipped.
+`PYTHONPATH=src:tests SSIOS_TEST=1 python3 -m unittest discover -s tests` — 489 ran, 476 passed, 13 skipped.
 
 Screenshots, synthetic data only: `tasks-badge-1280.png`, `tasks-checklist-1280.png`, `files-m1-1280.png`, `files-drop-1280.png`, `files-conflict-1280.png`, `files-share-1280.png`, `chat-render-1280.png`, `notes-vault-1280.png`, `note-clip-1280.png`, `needs-reconnect-1280.png`.
 

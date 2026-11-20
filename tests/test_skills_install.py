@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import ipaddress
 import stat
+import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 from ssios.errors import SsiosError
 from ssios.skill_install import fetch_skill, resolve
@@ -287,6 +289,19 @@ class InstallTest(PlaneTest):
         self.assertIn("Files in this skill: reference.md, scripts/count.py", tool_text)
         update(self.plane, self.account_id, "harbor-report", enabled=False)
         self.assertNotIn("skills_read", [row["function"]["name"] for row in tool_list(self.plane, self.account_id)])
+
+    def test_an_interpreter_outside_the_system_folders_is_bound(self) -> None:
+        from ssios.skill_sandbox import _bwrap_program
+
+        system, _real = _bwrap_program("/usr/bin/python3")
+        self.assertEqual(system, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "bin" / "python3"
+            binary.parent.mkdir()
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binds, real = _bwrap_program(str(binary))
+            self.assertEqual(binds, ["--ro-bind", tmp, tmp])
+            self.assertEqual(real, str(binary))
 
     @unittest.skipUnless(backend(), "no sandbox on this computer")
     def test_a_script_runs_in_the_sandbox_only_after_approval(self) -> None:
