@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import stat
 from pathlib import Path
 
@@ -44,17 +45,29 @@ def chmod_tree_private(path: Path) -> None:
 
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """Write beside the file, then rename over it.
+
+    Each writer has its own temporary name. With one shared name, two requests
+    saving the same file at once wrote into each other's bytes, and the slower
+    one failed because its temporary file had already been renamed away.
+    """
     secure_mkdir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
-    os.chmod(path, mode)
+        try:
+            os.write(fd, data)
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_json(path: Path, default: object) -> object:
@@ -180,3 +193,30 @@ def copy_tree_regular(src: Path, dst: Path) -> None:
                 raise SsiosError("seed_symlink", "fixture contains a symlink", 500)
             data = source.read_bytes()
             write_nofollow(dst, str((rel / name).as_posix()) if rel != Path(".") else name, data)
+
+
+def real_directory(location: str, state_dir: Path) -> tuple[Path | None, str]:
+    """The real folder a path names, and an empty reason. Or None and why it cannot be used.
+
+    A link in the path is followed first, then the real folder is checked. On a Mac, ~/Google Drive,
+    /tmp, and /var are links, so refusing every linked path refused ordinary folders. What matters
+    is where the path ends up: an existing directory that is not inside or above the state directory.
+    """
+    text = str(location or "").strip()
+    if not text or "\x00" in text:
+        return None, "The path is empty."
+    if text.startswith("//") or text.startswith("\\\\") or "://" in text:
+        return None, "A network address is not a folder on this computer."
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        return None, "The path must start with / or ~."
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, f"There is no folder at {candidate}. Check the spelling, and that its disk or cloud drive is connected."
+    if not resolved.is_dir():
+        return None, f"{resolved} is a file, not a folder."
+    state = Path(state_dir).resolve()
+    if resolved == state or state in resolved.parents or resolved in state.parents:
+        return None, "That folder is inside or above the SSIOS state directory."
+    return resolved, ""

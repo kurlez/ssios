@@ -8,7 +8,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from ssios.errors import SsiosError
-from ssios.util import read_nofollow, write_nofollow
+from ssios.util import read_nofollow, walk_nofollow, write_nofollow
 
 _BLOCKED = {".ssios", ".ssios-demo", ".ssios-memfs"}
 _IMAGE_LIMIT = 6
@@ -39,9 +39,49 @@ def vault_base(settings) -> Path:
 
 
 def account_vault(settings, account_id: str) -> Path:
+    """This account's vault. It is the folder under the vault base, or the Obsidian vault the operator pointed it at."""
     if not re.fullmatch(r"acct-[0-9a-f]{16}", account_id):
         raise SsiosError("path_rejected", "account id rejected", 400)
+    own = own_vault(settings, account_id)
+    if own is not None:
+        return own
     return vault_base(settings) / account_id
+
+
+def own_vault(settings, account_id: str) -> Path | None:
+    """The folder set with ssios vault-set, or None. A folder that is gone is an error, not a reason to write elsewhere."""
+    from ssios.util import read_json
+
+    data = read_json(Path(settings.state_dir) / "accounts" / account_id / "vault.json", {})
+    raw = str(data.get("path") or "") if isinstance(data, dict) else ""
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_dir() or path.is_symlink():
+        raise SsiosError("path_rejected", "The notes vault folder is not there. Connect its disk, or set it again with ssios vault-set.", 400)
+    return path
+
+
+def set_vault(settings, account_id: str, location: str) -> Path:
+    """Point an account's Notes at an existing folder, such as an Obsidian vault. Empty goes back to the default."""
+    from ssios.util import write_json
+
+    if not re.fullmatch(r"acct-[0-9a-f]{16}", account_id):
+        raise SsiosError("path_rejected", "account id rejected", 400)
+    target = Path(settings.state_dir) / "accounts" / account_id / "vault.json"
+    text = str(location or "").strip()
+    if not text:
+        write_json(target, {"path": ""})
+        return vault_base(settings) / account_id
+    from ssios.util import real_directory
+
+    resolved, why = real_directory(text, Path(settings.state_dir))
+    if resolved is None:
+        raise SsiosError("path_rejected", "That folder cannot be the notes vault. " + why, 400)
+    if any(part in _BLOCKED for part in resolved.parts):
+        raise SsiosError("path_rejected", "That folder cannot be the notes vault. It is a development state directory.", 400)
+    write_json(target, {"path": str(resolved)})
+    return resolved
 
 
 def slugify(title: str) -> str:
@@ -75,42 +115,180 @@ def render_markdown(markdown: str, *, link_for) -> tuple[dict, str]:
     return meta, html_body
 
 
-def list_notes(settings, account_id: str) -> list[dict]:
+MAX_NOTES = 5000
+_IMAGE_KINDS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _safe_rel(rel: str, suffixes: tuple[str, ...]) -> str:
+    """A path inside the vault. No parent steps, no hidden folder such as .obsidian or .trash."""
+    text = str(rel or "").replace("\\", "/").strip("/")
+    parts = text.split("/")
+    if not text or any(part in {"", ".", ".."} or part.startswith(".") for part in parts) or not text.casefold().endswith(suffixes):
+        raise SsiosError("path_rejected", "note path rejected", 400)
+    return text
+
+
+def note_paths(settings, account_id: str) -> list[str]:
+    """Every Markdown note in the vault, in any folder, as Obsidian shows it. Hidden folders and links are left out."""
+    import os
+
     root = account_vault(settings, account_id)
-    folder = root / "Clippings"
-    if not folder.is_dir():
+    if not root.is_dir():
         return []
+    found = []
+    for base, names, leaves in os.walk(root, followlinks=False):
+        names[:] = sorted(name for name in names if not name.startswith(".") and not (Path(base) / name).is_symlink())
+        for leaf in sorted(leaves):
+            if leaf.startswith(".") or not leaf.casefold().endswith(".md") or (Path(base) / leaf).is_symlink():
+                continue
+            found.append((Path(base) / leaf).relative_to(root).as_posix())
+            if len(found) >= MAX_NOTES:
+                return found
+    return found
+
+
+def _tag_list(meta: dict, body: str) -> list[str]:
+    raw = str(meta.get("tags") or "").strip().strip("[]")
+    tags = [part.strip().strip("\"'").lstrip("#") for part in raw.split(",") if part.strip()]
+    for line in body.splitlines()[:400]:
+        for found in re.findall(r"(?:^|\s)#([A-Za-z\u4e00-\u9fff][\w/\-\u4e00-\u9fff]*)", line):
+            tags.append(found)
+    unique = []
+    for tag in tags:
+        if tag and tag not in unique:
+            unique.append(tag[:40])
+    return unique[:30]
+
+
+_HEAD_BYTES = 16_000
+_INDEX_VERSION = 2
+NOTE_BYTES = 2_000_000
+
+
+def list_notes(settings, account_id: str) -> list[dict]:
+    """Title, folder, source, and tags of every note.
+
+    A note is opened only when it is new or its size or time changed. The rest comes from a small
+    index in the state directory, so a vault on a cloud drive is not read again on every page.
+    Only the first 16 KB of a note is read for its properties and tags.
+    """
+    import os
+
+    from ssios.util import read_json, write_json
+
+    root = account_vault(settings, account_id)
+    index_path = Path(settings.state_dir) / "accounts" / account_id / "vault-index.json"
+    saved = read_json(index_path, {})
+    current = isinstance(saved, dict) and saved.get("root") == str(root) and saved.get("v") == _INDEX_VERSION and isinstance(saved.get("notes"), dict)
+    cache = saved.get("notes") if current else {}
+    fresh: dict[str, dict] = {}
     notes = []
-    for path in sorted(folder.glob("*.md")):
-        if path.is_symlink():
-            continue
-        rel = "Clippings/" + path.name
+    changed = False
+    for rel in note_paths(settings, account_id):
         try:
-            text = read_nofollow(root, rel, limit=200_000).decode("utf-8", "replace")
-        except SsiosError:
+            info = os.lstat(root / rel)
+        except OSError:
             continue
-        meta, _body = _split_frontmatter(text)
-        notes.append({"path": rel, "title": str(meta.get("title") or path.stem), "source": str(meta.get("source") or "")})
+        stamp = [info.st_mtime_ns, info.st_size]
+        row = cache.get(rel) if isinstance(cache.get(rel), dict) else None
+        if row is None or row.get("stamp") != stamp:
+            try:
+                path = walk_nofollow(root, rel, expect="file")
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    text = os.read(fd, _HEAD_BYTES).decode("utf-8", "replace")
+                finally:
+                    os.close(fd)
+            except (SsiosError, OSError):
+                continue
+            meta, body = _split_frontmatter(text)
+            aliases = [part.strip().strip("\"'") for part in str(meta.get("aliases") or meta.get("alias") or "").strip("[]").split(",") if part.strip()][:20]
+            row = {"stamp": stamp, "title": str(meta.get("title") or Path(rel).stem)[:200], "source": str(meta.get("source") or "")[:500], "tags": _tag_list(meta, body), "aliases": aliases}
+            changed = True
+        fresh[rel] = row
+        notes.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": row["title"], "source": row["source"], "tags": list(row.get("tags") or []), "aliases": list(row.get("aliases") or []), "mtime": info.st_mtime})
+    if changed or set(fresh) != set(cache):
+        try:
+            write_json(index_path, {"root": str(root), "v": _INDEX_VERSION, "notes": fresh})
+        except OSError:
+            pass
     return notes
 
 
 def read_note(settings, account_id: str, rel: str) -> str:
-    if not rel.startswith("Clippings/") or rel.count("..") or not rel.endswith(".md"):
-        raise SsiosError("path_rejected", "note path rejected", 400)
-    return read_nofollow(account_vault(settings, account_id), rel, limit=200_000).decode("utf-8", "replace")
+    return read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".md",)), limit=NOTE_BYTES).decode("utf-8", "replace")
+
+
+def list_attachments(settings, account_id: str) -> list[dict]:
+    """Images and PDFs in the vault, by name and time. Nothing is opened."""
+    import os
+
+    root = account_vault(settings, account_id)
+    found: list[dict] = []
+    if not root.is_dir():
+        return found
+    kinds = tuple(_IMAGE_KINDS) + (".pdf",)
+    for base, names, leaves in os.walk(root, followlinks=False):
+        names[:] = sorted(name for name in names if not name.startswith(".") and not (Path(base) / name).is_symlink())
+        for leaf in sorted(leaves):
+            path = Path(base) / leaf
+            if leaf.startswith(".") or not leaf.casefold().endswith(kinds) or path.is_symlink():
+                continue
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            found.append({"path": rel, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "", "title": leaf, "source": "", "tags": [], "mtime": info.st_mtime})
+            if len(found) >= MAX_NOTES:
+                return found
+    return found
 
 
 def read_asset(settings, account_id: str, rel: str) -> tuple[bytes, str]:
-    if not rel.startswith("Clippings/assets/") or ".." in rel.split("/"):
-        raise SsiosError("path_rejected", "asset path rejected", 400)
-    suffix = Path(rel).suffix.lower()
-    kinds = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
-    if suffix not in kinds:
+    if str(rel).casefold().endswith(".pdf"):
+        data = read_nofollow(account_vault(settings, account_id), _safe_rel(rel, (".pdf",)), limit=60_000_000)
+        if not data.startswith(b"%PDF"):
+            raise SsiosError("path_rejected", "asset type rejected", 400)
+        return data, "application/pdf"
+    path = _safe_rel(rel, tuple(_IMAGE_KINDS))
+    suffix = Path(path).suffix.lower()
+    data = read_nofollow(account_vault(settings, account_id), path, limit=25_000_000)
+    kind = _image_ext(data)
+    if kind != suffix.lstrip(".") and not (kind == "jpg" and suffix == ".jpeg"):
         raise SsiosError("path_rejected", "asset type rejected", 400)
-    data = read_nofollow(account_vault(settings, account_id), rel, limit=_IMAGE_BYTES)
-    if _image_ext(data) != suffix.lstrip("."):
-        raise SsiosError("path_rejected", "asset type rejected", 400)
-    return data, kinds[suffix]
+    return data, _IMAGE_KINDS[suffix]
+
+
+def resolve_link(settings, account_id: str, current: str, target: str) -> str:
+    """Where an Obsidian link points: beside the current note, from the vault root, or the one file with that name."""
+    text = str(target or "").split("#", 1)[0].split("|", 1)[0].strip()
+    if not text or text.startswith("/") or ".." in text.split("/"):
+        return ""
+    root = account_vault(settings, account_id)
+    files = tuple(_IMAGE_KINDS) + (".pdf",)
+    image = text.casefold().endswith(files)
+    name = text if image or text.casefold().endswith(".md") else text + ".md"
+    folder = current.rsplit("/", 1)[0] if "/" in current else ""
+    for candidate in ((folder + "/" + name) if folder else name, name):
+        try:
+            safe = _safe_rel(candidate, files if image else (".md",))
+        except SsiosError:
+            continue
+        if (root / safe).is_file() and not (root / safe).is_symlink():
+            return safe
+    if "/" in name:
+        return ""
+    if image:
+        import os
+
+        for base, names, leaves in os.walk(root, followlinks=False):
+            names[:] = [one for one in names if not one.startswith(".")]
+            if name in leaves and not (Path(base) / name).is_symlink():
+                return (Path(base) / name).relative_to(root).as_posix()
+        return ""
+    matches = [rel for rel in note_paths(settings, account_id) if rel.rsplit("/", 1)[-1].casefold() == name.casefold()]
+    return matches[0] if matches else ""
 
 
 class _Convert(HTMLParser):
@@ -280,105 +458,64 @@ def _table(rows: list[list[str]]) -> str:
 
 
 def _split_frontmatter(markdown: str) -> tuple[dict, str]:
-    if not markdown.startswith("---\n"):
+    """Properties as text, and the body. A list property, inline or one item per line, becomes "a, b"."""
+    props, body = properties(markdown)
+    return {key: ", ".join(value) if isinstance(value, list) else value for key, value in props.items()}, body
+
+
+def properties(markdown: str) -> tuple[dict, str]:
+    """The YAML block at the top, in the subset Obsidian writes: key: value, key: [a, b], and lists of "- item" lines."""
+    text = markdown.replace("\r\n", "\n")
+    if not text.startswith("---\n"):
         return {}, markdown
-    end = markdown.find("\n---\n", 4)
-    if end < 0:
+    end = text.find("\n---", 3)
+    if end < 0 or (len(text) > end + 4 and text[end + 4] not in "\n"):
         return {}, markdown
-    raw = markdown[4:end]
-    meta: dict[str, str] = {}
-    for line in raw.splitlines():
-        if ":" not in line:
+    raw = text[4:end]
+    rest = text[end + 4 :]
+    body = rest[1:] if rest.startswith("\n") else rest
+    props: dict = {}
+    key = ""
+    for line in raw.split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        key, value = line.split(":", 1)
-        meta[key.strip()] = value.strip().strip('"')
-    return meta, markdown[end + 5 :]
+        item = re.match(r"^\s+-\s*(.*)$", line) or re.match(r"^-\s+(.*)$", line)
+        if item and key:
+            current = props.get(key)
+            if not isinstance(current, list):
+                current = [] if current in ("", None) else [current]
+            current.append(_scalar(item.group(1)))
+            props[key] = current
+            continue
+        if ":" not in line or line.startswith(" "):
+            continue
+        name, value = line.split(":", 1)
+        key = name.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            props[key] = [_scalar(part) for part in value[1:-1].split(",") if part.strip()]
+        else:
+            props[key] = _scalar(value)
+    return props, body
+
+
+def _scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 def _md_html(body: str, link_for) -> str:
-    import html as html_lib
+    from ssios.markdown_render import render
 
-    chunks = []
-    lines = body.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if line.startswith("```"):
-            code = []
-            index += 1
-            while index < len(lines) and not lines[index].startswith("```"):
-                code.append(lines[index])
-                index += 1
-            chunks.append("<pre><code>" + html_lib.escape("\n".join(code)) + "</code></pre>")
-            index += 1
-            continue
-        if line.startswith("#"):
-            level = len(line) - len(line.lstrip("#"))
-            level = min(max(level, 1), 4)
-            chunks.append(f"<h{level}>" + _inline(line[level:].strip(), link_for) + f"</h{level}>")
-        elif line.startswith("| ") and index + 1 < len(lines) and lines[index + 1].startswith("|"):
-            rows = []
-            while index < len(lines) and lines[index].startswith("|"):
-                cells = [cell.strip() for cell in lines[index].strip("|").split("|")]
-                rows.append(cells)
-                index += 1
-            table = ["<table>"]
-            for row_index, cells in enumerate(rows):
-                if row_index == 1 and all(set(cell) <= set("-: ") for cell in cells):
-                    continue
-                tag = "th" if row_index == 0 else "td"
-                table.append("<tr>" + "".join(f"<{tag}>{html_lib.escape(cell)}</{tag}>" for cell in cells) + "</tr>")
-            table.append("</table>")
-            chunks.append("".join(table))
-            continue
-        elif line.startswith("- ") or line.startswith("1. "):
-            items = []
-            ordered = line.startswith("1. ")
-            while index < len(lines) and (lines[index].startswith("- ") or lines[index].startswith("1. ")):
-                items.append(_inline(lines[index].split(" ", 1)[1], link_for))
-                index += 1
-            tag = "ol" if ordered else "ul"
-            chunks.append(f"<{tag}>" + "".join(f"<li>{item}</li>" for item in items) + f"</{tag}>")
-            continue
-        elif line.strip():
-            chunks.append("<p>" + _inline(line, link_for) + "</p>")
-        index += 1
-    return "\n".join(chunks)
+    return render(body, link_for)
 
 
 def _inline(text: str, link_for) -> str:
-    import html as html_lib
+    from ssios.markdown_render import inline
 
-    text = re.sub(r"!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", lambda match: f"![]({match.group(1).strip()})", text)
-    text = re.sub(
-        r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]",
-        lambda match: f"[{(match.group(2) or match.group(1)).strip()}]({match.group(1).strip()})",
-        text,
-    )
-    parts = []
-    cursor = 0
-    pattern = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`")
-    for match in pattern.finditer(text):
-        parts.append(html_lib.escape(text[cursor:match.start()]))
-        if match.group(1) is not None or match.group(0).startswith("!["):
-            alt = html_lib.escape(match.group(1) or "")
-            href = link_for(match.group(2))
-            if href:
-                parts.append(f'<img alt="{alt}" src="{html_lib.escape(href, quote=True)}">')
-            else:
-                parts.append(alt)
-        elif match.group(3) is not None:
-            label = html_lib.escape(match.group(3))
-            href = link_for(match.group(4))
-            if href.startswith("https://") or href.startswith("http://") or href.startswith("/ui/vault/"):
-                parts.append(f'<a href="{html_lib.escape(href, quote=True)}" rel="noopener noreferrer">{label}</a>')
-            else:
-                parts.append(label)
-        else:
-            parts.append("<code>" + html_lib.escape(match.group(5) or "") + "</code>")
-        cursor = match.end()
-    parts.append(html_lib.escape(text[cursor:]))
-    return "".join(parts)
+    return inline(text, link_for)
 
 
 def image_kind(data: bytes) -> str:

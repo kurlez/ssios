@@ -1,4 +1,4 @@
-"""Task lists render as checkboxes. A toggle is an approval, not a silent write."""
+"""Task lists render as checkboxes. Ticking a box changes the task at once and is audited."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class TaskChecklistTest(PlaneTest):
         self.assertIn('aria-pressed="false"', page)
         self.assertIn('aria-pressed="true"', page)
         self.assertIn('class="task done"', page)
-        self.assertIn("Mark done. Nothing is saved until you approve.", page)
+        self.assertIn('title="Mark done."', page)
         self.assertIn("text-decoration: line-through", APP_CSS)
         self.assertIn("border-radius: 3px", APP_CSS)
         open_row = page.split(OPEN_TITLE, 1)[0]
@@ -96,55 +96,51 @@ class TaskChecklistTest(PlaneTest):
         self.assertIn(OPEN_TITLE, html)
         self.assertNotIn("call the invented client", html)
 
-    def test_toggle_waits_for_approval_and_audits_without_the_title(self) -> None:
+    def test_toggle_changes_the_task_at_once_and_audits_without_the_title(self) -> None:
         status, page = _get(self.base, "/ui/tasks", self.cookie)
         csrf = page.split('name="csrf" value="', 1)[1].split('"', 1)[0]
-        before = GoalStore(self.scope.home).get(self.open_goal["id"])["status"]
-        self.assertEqual(before, "open")
-        status, pending, _cookie = _form(
+        self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "open")
+        status, after, _cookie = _form(
             self.base,
             "/ui/tasks",
             {"csrf": csrf, "op": "toggle", "id": self.open_goal["id"]},
             cookie=self.cookie,
             extra={"Accept": "text/html"},
         )
-        self.assertEqual(status, 200, pending)
-        self.assertIn("Nothing is written until you approve it.", pending)
-        self.assertIn("goal.update", pending)
-        self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "open")
-        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("goal.update", audit)
-        self.assertNotIn(OPEN_TITLE, audit)
-        self.assertNotIn(DONE_TITLE, audit)
-
-        approved = self._decide(pending, "approve")
-        self.assertIn("Updated the task.", approved)
+        self.assertEqual(status, 200, after)
+        self.assertNotIn("Nothing is written until you approve it.", after)
+        self.assertNotIn("/ui/approvals/", after.split("<h1>", 1)[-1].split("checklist", 1)[0])
         self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "done")
+        self.assertEqual(self.scope.list_pending(), [])
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertIn("goal.update", audit)
-        self.assertIn("approval.approve", audit)
         self.assertNotIn(OPEN_TITLE, audit)
 
         status, done_page = _get(self.base, "/ui/tasks?status=done", self.cookie)
-        self.assertEqual(status, 200, done_page)
         self.assertIn(OPEN_TITLE, done_page)
-        row = done_page.split(OPEN_TITLE, 1)[0]
-        self.assertIn('aria-pressed="true"', row[-500:])
+        self.assertIn('aria-pressed="true"', done_page.split(OPEN_TITLE, 1)[0][-500:])
 
+        # Ticked from the chat page, the browser is sent back to that chat and nowhere else.
+        from ssios.ui import _chat_referer
+
+        self.assertEqual(_chat_referer({"Referer": self.base + "/ui/chat?conversation=conv-0123456789abcdef"}), "/ui/chat?conversation=conv-0123456789abcdef")
+        self.assertEqual(_chat_referer({"Referer": self.base + "/ui/chat?next=//evil.example"}), "/ui/chat")
+        self.assertEqual(_chat_referer({"Referer": "https://evil.example/ui/tasks"}), "")
+        self.assertEqual(_chat_referer({}), "")
         status, again, _cookie = _form(
             self.base,
             "/ui/tasks",
             {"csrf": csrf, "op": "toggle", "id": self.open_goal["id"]},
             cookie=self.cookie,
-            extra={"Accept": "text/html"},
+            extra={"Accept": "text/html", "Referer": self.base + "/ui/chat"},
         )
-        self.assertEqual(status, 200, again)
-        denied = self._decide(again, "deny")
-        self.assertIn("Nothing was changed.", denied)
-        self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "done")
-        audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
-        self.assertIn("approval.deny", audit)
-        self.assertEqual(audit.count('"action": "goal.update"'), 1)
+        self.assertIn(status, (200, 303), again)
+        self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "open")
+        status, missing, _cookie = _form(self.base, "/ui/tasks", {"csrf": csrf, "op": "toggle", "id": "goal-00000000"}, cookie=self.cookie)
+        self.assertEqual(status, 404, missing)
+        status, forged, _cookie = _form(self.base, "/ui/tasks", {"csrf": "wrong", "op": "toggle", "id": self.open_goal["id"]}, cookie=self.cookie)
+        self.assertNotEqual(status, 200)
+        self.assertEqual(GoalStore(self.scope.home).get(self.open_goal["id"])["status"], "open")
 
     def test_a_message_checkbox_is_read_only(self) -> None:
         if not shutil.which("node"):

@@ -74,8 +74,74 @@ def memory_context(scope, query: str = "") -> tuple[str, list[str]]:
             used.append(path)
             if len([item for item in used if item.startswith("topics/")]) >= 3:
                 break
+    if str(query or "").strip() and len([item for item in used if item.startswith("topics/")]) < 3:
+        from ssios.semantic import memory_hits
+
+        for path in memory_hits(scope, query, prefix="topics/"):
+            if path in used:
+                continue
+            text = _read(store, project, path)
+            if not text:
+                continue
+            parts.append(f"# {path}\n{_body(text).strip()[:800]}")
+            used.append(path)
+            if len([item for item in used if item.startswith("topics/")]) >= 3:
+                break
+    for rel, depth, excerpt in _vault_notes(scope, query):
+        parts.append(f"# note {rel} ({'read with care' if depth == 'read' else 'skimmed, not read with care'} by the user; a note, not confirmed memory)\n{excerpt}")
+        used.append("note:" + rel)
     scope._last_memory_files = list(used)
     return "\n\n".join(parts)[:4000], used
+
+
+def _vault_notes(scope, query: str, limit: int = 2) -> list[tuple[str, str, str]]:
+    """Notes the account clipped or wrote that match the query. Every vault note is at least skimmed. Files are not here."""
+    from ssios.library_chat import search_terms
+    from ssios.reading import note_depth
+    from ssios.vault import _split_frontmatter, note_paths, read_note
+
+    terms = [term for term in search_terms(query) if len(term) >= 3 or re.search(r"[\u4e00-\u9fff]", term)]
+    if not terms:
+        return []
+    import time
+
+    from ssios.vault import list_notes
+
+    settings = scope.plane.settings
+    scored = []
+    try:
+        listed = list_notes(settings, scope.account_id)
+    except SsiosError:
+        return []
+    del note_paths
+
+    def named(item: dict) -> int:
+        head = (item["path"] + " " + item["title"] + " " + " ".join(item.get("tags") or [])).casefold()
+        return sum(1 for term in terms if term in head)
+
+    # Notes whose name, title, or tags match are opened first. The rest are opened while time remains,
+    # so a vault on a cloud drive, where opening a note can mean downloading it, does not hold up the answer.
+    deadline = time.monotonic() + 1.5
+    for item in sorted(listed, key=named, reverse=True)[:800]:
+        rel = item["path"]
+        if rel in {"Tasks.md", "SSIOS/Tasks.md"}:
+            continue
+        if time.monotonic() > deadline and len(scored) >= limit:
+            break
+        if time.monotonic() > deadline + 3:
+            break
+        try:
+            text = read_note(settings, scope.account_id, rel)
+        except SsiosError:
+            continue
+        meta, body = _split_frontmatter(text)
+        blob = (rel + " " + str(meta.get("title") or "") + " " + body).casefold()
+        hits = sum(1 for term in terms if term in blob)
+        if hits:
+            depth = note_depth(scope.home, rel)
+            scored.append((hits + (0.5 if depth == "read" else 0), rel, depth, " ".join(body.split())[:600]))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [(rel, depth, excerpt) for _score, rel, depth, excerpt in scored[:limit]]
 
 
 _STATEMENT = re.compile(

@@ -57,7 +57,9 @@ class WatchFolderTest(PlaneTest):
         self.assertEqual(network.exception.code, "library_watch")
         with self.assertRaises(SsiosError):
             set_watch(self.plane, self.account["id"], self.library_id, "//nas/photos", True, "127.0.0.1")
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as made:
+            # On macOS the temp directory is under /var, a link to /private/var. A linked path is refused, so use the real one.
+            folder = str(Path(made).resolve())
             root = Path(folder)
             (root / "red.png").write_bytes(_png(4))
             (root / ".secret.png").write_bytes(PNG)

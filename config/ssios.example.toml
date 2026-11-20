@@ -80,6 +80,12 @@ num_ctx = 16384
 step_limit = 6
 turn_timeout_seconds = 180
 
+[agent.planner]
+# When the Codex guest cannot start, a turn that needs several tools can run a tool loop on this computer instead.
+# The local chat model picks from the same host tools the guest uses. Reads run now. A write is still an approval card.
+# Off by default. The chat model must support Ollama tool calls. If it does not, the turn uses the single-route path.
+enabled = false
+
 [limits]
 task_timeout_seconds = 30
 max_tool_calls = 8
@@ -103,6 +109,15 @@ timeout_seconds = 8
 max_bytes = 200000
 # Empty uses <state>/vaults/<account>. Do not point this at .ssios, .ssios-demo, or .ssios-memfs.
 vault_dir = ""
+
+[search]
+# Search by meaning in Memory and Files. Empty keeps keyword search only. No model is pinned.
+# Compare candidates on this computer first: ./scripts/ssios library-embed-bench
+# bge-m3 handles Chinese and English. nomic-embed-text is smaller and mostly English. Pull by hand: ollama pull bge-m3
+embed_model = ""
+# At most this many results come from meaning. A lower score admits looser matches.
+semantic_top_k = 8
+semantic_min_score = 0.5
 
 [memory]
 # letta-memfs-compat: the compatibility library used when the Letta CLI is absent. It is not upstream MemFS.

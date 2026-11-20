@@ -10,28 +10,15 @@ from ssios.library import import_path, metadata, replace_metadata
 from ssios.locale_messages import say
 from ssios.util import read_json, write_json
 
-_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
 def local_directory(path: str, state_dir: Path, lang: str = "en") -> Path:
     """A real directory on this machine. Network paths and the state directory are refused."""
-    text = str(path or "").strip()
-    if not text or text.startswith("//") or text.startswith("\\\\") or _SCHEME.match(text):
-        raise SsiosError("library_watch", say(lang, "watch_rejected"), 400)
-    candidate = Path(text)
-    if not candidate.is_absolute():
-        raise SsiosError("library_watch", say(lang, "watch_rejected"), 400)
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current = current / part
-        if current.is_symlink():
-            raise SsiosError("library_watch", say(lang, "watch_rejected"), 400)
-    if not current.is_dir():
-        raise SsiosError("library_watch", say(lang, "watch_rejected"), 400)
-    resolved = current.resolve()
-    state = Path(state_dir).resolve()
-    if resolved == state or state in resolved.parents or resolved in state.parents:
-        raise SsiosError("library_watch", say(lang, "watch_rejected"), 400)
+    from ssios.util import real_directory
+
+    resolved, why = real_directory(path, Path(state_dir))
+    if resolved is None:
+        raise SsiosError("library_watch", say(lang, "watch_rejected") + " " + why, 400)
     return resolved
 
 

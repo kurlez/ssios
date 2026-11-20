@@ -165,6 +165,21 @@ def iter_turn(
         decision, fallback = choose_route(acted, guest_ready=ready, override=override or "auto", llm=plane.llm)
     else:
         decision, fallback = choose_route(message, guest_ready=ready, override=override or "auto", llm=plane.llm)
+    planned = None
+    from ssios.host_planner import planner_ready
+
+    if fallback and decision.route not in {"vm", "connector_vm"} and planner_ready(plane):
+        # The guest cannot start. A turn that needs several tools runs the tool loop on this computer.
+        planned = decision
+        fallback = ""
+        decision = RouteDecision(
+            route="planner",
+            reason="The Codex guest is not available, so the local model picks host tools on this computer. A write still waits for approval.",
+            reason_code="rule_planner",
+            source="rule",
+            services=decision.services,
+            skill=decision.skill,
+        )
     if fallback and fallback not in decision.reason:
         decision = RouteDecision(
             route=decision.route,
@@ -201,6 +216,17 @@ def iter_turn(
             reason_code="rule_skill",
             source="rule",
             skill="weather",
+        )
+    from ssios.library_chat import try_files_first
+
+    earlier = (stored_conv.get("messages") or []) if conversation_id else []
+    if not resumed and try_files_first(plane, account["id"], message, decision.route, decision.skill, earlier):
+        planned = None
+        decision = RouteDecision(
+            route="files",
+            reason="Files on this computer has a match for this, so it is listed first. No model is asked.",
+            reason_code="rule_files",
+            source="rule",
         )
     if decision.skill == "weather" and asks_web_weather(message) and not place and weather_place:
         place = weather_place
@@ -262,6 +288,8 @@ def iter_turn(
             yield from _vm(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "codex":
             yield from _codex(plane, scope, record["id"], message, peer_ip, place=place)
+        elif decision.route == "planner":
+            yield from _planner(plane, scope, record["id"], acted, peer_ip, planned, place)
         elif decision.route == "skill":
             yield from _skill(
                 plane,
@@ -277,6 +305,8 @@ def iter_turn(
             yield from _propose_explicit(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "account":
             yield from _account_facts(scope, record["id"], message)
+        elif decision.route == "files":
+            yield from _files(plane, scope, record["id"], message, decision)
         elif decision.route == "tasks":
             yield from _task_command(plane, scope, record["id"], message, peer_ip)
         elif decision.route == "reminders":
@@ -509,7 +539,7 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     from ssios.mcp_host import ToolSession
     from ssios.orchestrator import choose_route, codex_prompt, present_answer
 
-    session = ToolSession(plane, scope.account, peer_ip)
+    session = ToolSession(plane, scope.account, peer_ip, message)
     cancel = threading.Event()
     finished = threading.Event()
     if not hasattr(plane, "_codex_cancel"):
@@ -659,6 +689,41 @@ def _codex(plane, scope: AccountScope, conversation_id: str, message: str, peer_
     yield from _codex_approvals(scope, conversation_id, session.results)
 
 
+def _planner(plane, scope: AccountScope, conversation_id: str, message: str, peer_ip: str, planned: RouteDecision | None, place: str) -> Iterator[dict]:
+    """Run the host tool loop. If the model does not plan, use the single route chosen before."""
+    from ssios.account_memory import memory_context
+    from ssios.host_planner import plan_turn
+    from ssios.orchestrator import present_answer
+
+    context = clock_block(plane, scope.account)
+    memory, files = memory_context(scope, message)
+    if memory:
+        context += "\n\nMEMORY-CONTEXT\n" + memory
+    if files:
+        yield {"event": "memory", "data": {"files": files}}
+    state: dict = {}
+    yield from plan_turn(plane, scope, message, peer_ip, state, context=context)
+    if not state.get("handled"):
+        if state.get("results"):
+            yield from _codex_approvals(scope, conversation_id, state["results"])
+        if planned is not None:
+            yield from _dispatch_host(plane, scope, conversation_id, message, peer_ip, planned, place)
+        return
+    results = state.get("results") or []
+    answer = present_answer(str(state.get("answer") or ""), results)
+    if answer.strip():
+        scope.chat().append(
+            conversation_id,
+            {
+                "role": "assistant",
+                "text": answer,
+                "route": {"route": "planner", "reason": "The local model answered from the host tools.", "source": "rule"},
+            },
+        )
+        yield {"event": "results", "data": {"text": answer, "blocks": [], "reply": answer}}
+    yield from _codex_approvals(scope, conversation_id, results)
+
+
 _CHECK_LINE = re.compile(r"^(Network|Outbound|Marker|Sandbox denied|Outside write):.*$")
 
 
@@ -781,6 +846,8 @@ def _dispatch_host(
         yield from _schedule(plane, scope, conversation_id, message, peer_ip)
     elif decision.route == "account":
         yield from _account_facts(scope, conversation_id, message)
+    elif decision.route == "files":
+        yield from _files(plane, scope, conversation_id, message, decision)
     elif decision.route == "vm":
         yield from _vm(plane, scope, conversation_id, message, peer_ip)
 
@@ -1457,6 +1524,25 @@ def _stage_fetch(scope: AccountScope, conversation_id: str, message: str, decisi
         )
         return
     yield from _propose_tool(scope, conversation_id, tool, arguments, limits, followup=followup, route_name=route_name)
+
+
+def _files(plane, scope: AccountScope, conversation_id: str, message: str, decision: RouteDecision) -> Iterator[dict]:
+    """List matching Files items with links. The catalog is read. No model writes the list."""
+    from ssios.library_chat import files_text, find_files
+
+    from ssios.library_chat import files_block
+
+    rows = find_files(plane, scope.account_id, message)
+    lang = _turn_language(plane, scope.account_id, message)
+    text = files_text(rows, lang)
+    blocks = [files_block(rows, lang)] if rows else []
+    stored = {"role": "assistant", "text": text, "route": decision.public()}
+    if blocks:
+        stored["results"] = blocks
+    scope.chat().append(conversation_id, stored)
+    plane.security_audit.write(actor=scope.account_id, ip="127.0.0.1", action="library.search", target="chat", result="ok", extra={"service": "library", "item_count": str(len(rows))})
+    # Cards carry the links. The chat page shows a reply line as plain text, so a found list is not sent as one.
+    yield {"event": "results", "data": {"text": blocks[0]["summary"] if blocks else text, "blocks": blocks, "reply": "" if blocks else text}}
 
 
 def _account_facts(scope: AccountScope, conversation_id: str, message: str) -> Iterator[dict]:
@@ -2160,6 +2246,7 @@ def failure_hint(code: str, lang: str = "en") -> str:
         "skill_denied": "That site is not allowed, or the city is missing. Nothing was fetched.",
         "city_not_found": "No city matched that name. Try a city and a region, such as Bellevue, WA. Nothing was fetched.",
         "skill_search_unconfigured": "Web search has no keyless provider in this build. Paste a URL instead.",
+        "weather_unreachable": "This computer could not reach Open-Meteo, MET Norway, or wttr.in. Check the network or proxy. Nothing was invented.",
         "skill_upstream": "The site may block automated readers. Open the page in your browser and use the clipper, or paste the text or HTML.",
         "connector_needs_reconnect": "Open Connections and click Reconnect. Nothing was invented.",
         "connector_api_disabled": "Enable that API in the Cloud project. Nothing was invented.",

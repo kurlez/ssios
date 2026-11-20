@@ -1,8 +1,8 @@
 name = "weather"
-description = "Current weather from the keyless Open-Meteo API. The account can set a default city."
+description = "Current weather from the keyless Open-Meteo API, or from MET Norway and wttr.in when Open-Meteo cannot be reached. The account can set a default city."
 enabled = true
 methods = ["GET"]
-domains = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+domains = ["api.open-meteo.com", "geocoding-api.open-meteo.com", "api.met.no", "wttr.in"]
 tools = ["geocode", "forecast"]
 timeout_seconds = 8
 max_bytes = 100000

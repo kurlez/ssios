@@ -54,7 +54,8 @@ CHAT_JS = r"""
   });
   box.addEventListener("input", function () { grow(); syncSend(); });
   box.addEventListener("keydown", function (event) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // Enter is a new line. Ctrl+Enter, or Command+Enter on a Mac, sends.
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing) {
       event.preventDefault();
       var pickedNow = form.querySelector("input[name=image]");
       if (box.value.trim() || pending.length || (pickedNow && pickedNow.files && pickedNow.files.length)) {
@@ -470,7 +471,7 @@ CHAT_JS = r"""
       copy.className = "copy";
       copy.textContent = "Copy";
       wrap.dataset.source = message.text || "";
-      copy.addEventListener("click", function () { copyText(wrap.dataset.source || message.text || ""); });
+      copy.addEventListener("click", function () { copyText(wrap.dataset.source || message.text || "", copy); });
       tools.appendChild(copy);
       if (message.at) tools.appendChild(stamp(message.at));
       body.appendChild(tools);
@@ -478,6 +479,14 @@ CHAT_JS = r"""
       wrap.appendChild(body);
     }
     if (role === "user" && message.at) wrap.appendChild(stamp(message.at));
+    if (role === "user" && message.text) {
+      var copyMine = document.createElement("button");
+      copyMine.type = "button";
+      copyMine.className = "copy";
+      copyMine.textContent = "Copy";
+      copyMine.addEventListener("click", function () { copyText(message.text || "", copyMine); });
+      wrap.appendChild(copyMine);
+    }
     var reply = document.createElement("button");
     reply.type = "button";
     reply.className = "copy";
@@ -593,12 +602,23 @@ CHAT_JS = r"""
           meta.textContent = item.meta;
           card.appendChild(meta);
         }
-        if (item.link && /^https?:\/\//.test(item.link)) {
+        var viewable = item.preview && /^\/ui\/library\/raw\?/.test(item.preview);
+        if (viewable) {
+          var show = document.createElement("p");
+          var here = document.createElement("button");
+          here.type = "button";
+          here.className = "open-here";
+          here.textContent = "Open";
+          here.addEventListener("click", function () { openFile(item.preview, item.badge, item.title, item.link); });
+          show.appendChild(here);
+          card.appendChild(show);
+        }
+        if (item.link && (/^https?:\/\//.test(item.link) || /^\/ui\/library\?/.test(item.link))) {
           var open = document.createElement("p");
           var anchor = document.createElement("a");
           anchor.href = item.link;
           anchor.rel = "noopener noreferrer";
-          anchor.textContent = "Open";
+          anchor.textContent = /^\/ui\/library\?/.test(item.link) ? "Show in Files" : "Open";
           open.appendChild(anchor);
           card.appendChild(open);
         }
@@ -648,8 +668,75 @@ CHAT_JS = r"""
     column.appendChild(button);
   }
 
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () {});
+  function copyText(text, button) {
+    function copied() {
+      if (!button) return;
+      button.textContent = "Copied";
+      setTimeout(function () { button.textContent = "Copy"; }, 1200);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(copied).catch(function () {});
+      return;
+    }
+    // An http page on the home network has no clipboard API. A hidden text box and the copy command still work there.
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try { if (document.execCommand("copy")) copied(); } catch (err) {}
+    area.remove();
+  }
+
+  function openFile(src, badge, title, page) {
+    // An image or a PDF from Files, shown over the chat. Other kinds have no viewer here.
+    var box = document.getElementById("file-viewer");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "file-viewer";
+      box.className = "lightbox file-viewer";
+      box.hidden = true;
+      box.innerHTML = '<div class="viewer-frame"><div class="viewer-head"><strong></strong><span class="viewer-links"><a class="in-files" href="#">Show in Files</a><a class="new-tab" href="#" target="_blank" rel="noopener noreferrer">New tab</a><button type="button" class="viewer-close">Close</button></span></div><div class="viewer-body"></div></div>';
+      box.addEventListener("click", function (clickEvent) { if (clickEvent.target === box) closeFile(); });
+      box.querySelector(".viewer-close").addEventListener("click", closeFile);
+      document.addEventListener("keydown", function (keyEvent) { if (keyEvent.key === "Escape") closeFile(); });
+      document.body.appendChild(box);
+    }
+    var body = box.querySelector(".viewer-body");
+    body.textContent = "";
+    var shown;
+    if (String(badge || "").toUpperCase() === "PDF") {
+      shown = document.createElement("iframe");
+      shown.title = title || "File";
+    } else {
+      shown = document.createElement("img");
+      shown.alt = title || "File";
+    }
+    shown.src = src;
+    body.appendChild(shown);
+    box.querySelector("strong").textContent = title || "";
+    box.querySelector(".new-tab").href = src;
+    var inFiles = box.querySelector(".in-files");
+    inFiles.hidden = !page;
+    if (page) inFiles.href = page;
+    box.hidden = false;
+    box.querySelector(".viewer-close").focus();
+    var where = /[?&]library=([^&]+)&item=([^&]+)/.exec(src);
+    if (where) {
+      var seen = new URLSearchParams();
+      seen.set("csrf", csrf); seen.set("op", "opened"); seen.set("ajax", "1");
+      seen.set("library", decodeURIComponent(where[1])); seen.set("item", decodeURIComponent(where[2]));
+      fetch("/ui/library", { method: "POST", body: seen, credentials: "same-origin" }).catch(function () {});
+    }
+  }
+
+  function closeFile() {
+    var box = document.getElementById("file-viewer");
+    if (!box) return;
+    box.hidden = true;
+    box.querySelector(".viewer-body").textContent = "";
   }
 
   function showError(node, text) {
@@ -681,7 +768,7 @@ CHAT_JS = r"""
       var li = document.createElement("li");
       li.className = "task " + (done ? "done" : "open");
       var writable = task.writable && task.id;
-      var hint = task.hint || (done ? "Mark open. Nothing is saved until you approve." : "Mark done. Nothing is saved until you approve.");
+      var hint = task.hint || (done ? "Mark open." : "Mark done.");
       if (!writable) hint = task.hint || "This box is read-only.";
       var label = document.createElement("span");
       label.className = "label";
@@ -764,7 +851,7 @@ CHAT_JS = r"""
         copy.type = "button";
         copy.className = "copy";
         copy.textContent = "Copy";
-        copy.addEventListener("click", function () { copyText(body); });
+        copy.addEventListener("click", function () { copyText(body, copy); });
         head.appendChild(label);
         head.appendChild(copy);
         var pre = document.createElement("pre");
@@ -1702,9 +1789,13 @@ def _result_blocks_html(blocks) -> str:
             if meta:
                 extra += f"<p>{meta}</p>"
             link = str(item.get("link") or "")
-            if link.startswith("https://") or link.startswith("http://"):
+            preview = str(item.get("preview") or "")
+            if preview.startswith("/ui/library/raw?"):
+                extra += f"<p><a href=\"{html.escape(preview, quote=True)}\" target=\"_blank\" rel=\"noopener noreferrer\">Open</a></p>"
+            if link.startswith(("https://", "http://", "/ui/library?")):
                 href = html.escape(link, quote=True)
-                extra += f"<p><a href=\"{href}\" rel=\"noopener noreferrer\">Open</a></p>"
+                word = "Show in Files" if link.startswith("/ui/library?") else "Open"
+                extra += f"<p><a href=\"{href}\" rel=\"noopener noreferrer\">{word}</a></p>"
             if description:
                 extra += f"<details><summary>Details</summary><p>{description}</p></details>"
             cards.append(f"<article class=\"event-card\"><h3>{title}</h3>{extra}</article>")
@@ -1853,7 +1944,8 @@ def _public_block(block: dict) -> dict:
                 "description": str(item.get("description") or ""),
                 "meta": str(item.get("meta") or ""),
                 "badge": str(item.get("badge") or ""),
-                "link": str(item.get("link") or "") if str(item.get("link") or "").startswith(("http://", "https://")) else "",
+                "link": str(item.get("link") or "") if str(item.get("link") or "").startswith(("http://", "https://", "/ui/library?")) else "",
+                "preview": str(item.get("preview") or "") if str(item.get("preview") or "").startswith("/ui/library/raw?") else "",
             }
         )
     return {
@@ -2159,7 +2251,7 @@ def _chat_page(plane, session, conversation_id: str) -> str:
         "<button type=\"submit\" class=\"send primary\" aria-label=\"Send\">"
         "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M3 11.5 21 3l-8.5 18-2.2-7.3z\"/></svg>"
         "</button></div></form>"
-        "<p class=\"hint\">Enter to send, Shift+Enter for a new line</p></div></section>"
+        "<p class=\"hint\">Ctrl+Enter to send, Enter for a new line</p></div></section>"
         + _info_pane(plane, session, state)
         + "</div>"
         + "<link rel=\"stylesheet\" href=\"/ui/vendor/katex/katex.min.css\">"

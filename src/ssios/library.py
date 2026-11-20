@@ -22,6 +22,9 @@ IMAGE_LIMIT = 50_000_000
 DOCUMENT_LIMIT = 100_000_000
 MEDIA_LIMIT = 500_000_000
 _LOCK = threading.Lock()
+SOURCES = {"paste", "drag", "picker", "folder", "link", "watch", "eagle"}
+MAX_DROP_DEPTH = 12
+MARKER = "ssios-library.json"
 _PARTIAL = {".part", ".crdownload", ".download", ".tmp", ".filepart"}
 _ARCHIVE = {".zip", ".7z", ".rar", ".gz", ".tgz", ".dmg", ".iso", ".tar"}
 _ID = re.compile(r"lib-[0-9a-f]{8}")
@@ -67,6 +70,7 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                 continue
             acl = read_json(_shared_acl_path(plane, library_id), {})
             owner_id = str(acl.get("owner_id") or "")
+            where = str(acl.get("root") or "")
             rows.append(
                 {
                     "id": library_id,
@@ -76,9 +80,12 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                     "owner_id": owner_id,
                     "owner_name": _username(plane, owner_id),
                     "members": _member_rows(plane, acl),
+                    "location": where,
+                    "offline": bool(where) and not _marker_ok(where, library_id),
                 }
             )
             continue
+        where = str(row.get("root") or "")
         rows.append(
             {
                 "id": library_id,
@@ -88,12 +95,15 @@ def list_libraries(plane, account_id: str) -> list[dict]:
                 "owner_id": account_id,
                 "owner_name": "",
                 "members": [],
+                "location": where,
+                "offline": bool(where) and not _marker_ok(where, library_id),
             }
         )
     return rows
 
 
-def create_library(plane, account_id: str, name: str, peer_ip: str) -> dict:
+def create_library(plane, account_id: str, name: str, peer_ip: str, location: str = "") -> dict:
+    """A new library. With location, its files live in a new folder inside that directory, which may be on another disk."""
     ensure_personal(plane, account_id)
     title = " ".join(str(name or "").split())[:40]
     if len(title) < 2:
@@ -105,6 +115,12 @@ def create_library(plane, account_id: str, name: str, peer_ip: str) -> dict:
         while any(isinstance(row, dict) and row.get("id") == library_id for row in index.get("libraries") or []):
             library_id = "lib-" + hashlib.sha256(library_id.encode()).hexdigest()[:8]
         row = {"id": library_id, "name": title, "kind": "personal"}
+        if str(location or "").strip():
+            from ssios.library_storage import new_root
+
+            made = new_root(plane, account_id, library_id, title, location)
+            row["root"] = str(made["root"])
+            row["permissions"] = made["permissions"]
         index.setdefault("libraries", []).append(row)
         write_json(index_path, index)
     _metadata(plane, account_id, library_id, create=True, name=title)
@@ -153,6 +169,88 @@ def add_folder(plane, account_id: str, library_id: str, name: str, peer_ip: str,
     return {"id": folder_id, "name": title}
 
 
+def ensure_folder_path(plane, account_id: str, library_id: str, parent_id: str, names: list[str], peer_ip: str) -> str:
+    """The folder at parent/names[0]/names[1]/..., made where it is missing. Names match without regard to case."""
+    _require(plane, account_id, library_id, "add")
+    if len(names) > MAX_DROP_DEPTH:
+        raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
+    with _LOCK:
+        data = _metadata(plane, account_id, library_id, create=False, name="")
+        folders = [row for row in data.get("folders") or [] if isinstance(row, dict)]
+        current = parent_id or ""
+        made = False
+        for raw in names:
+            title = " ".join(str(raw or "").split())[:40]
+            if not title or title.startswith(".") or "/" in title:
+                raise SsiosError("library_folder_name", say(_lang(plane, account_id), "lib_folder_name"), 400)
+            hit = next((row for row in folders if str(row.get("parent_id") or "") == current and str(row.get("name") or "").casefold() == title.casefold()), None)
+            if hit is None:
+                hit = {"id": "fld-" + hashlib.sha256(f"{library_id}:{current}:{title}:{_now()}:{len(folders)}".encode()).hexdigest()[:8], "name": title, "parent_id": current}
+                folders.append(hit)
+                made = True
+            current = str(hit["id"])
+        if made:
+            data["folders"] = folders
+            _write_metadata(plane, account_id, library_id, data)
+    if made:
+        _audit(plane, account_id, peer_ip, "library.folder", current, "ok", 0)
+    return current
+
+
+def clean_tags(raw) -> list[str]:
+    """Tags typed as "a, b" or a list. Blank, slashed, and repeated tags are dropped."""
+    values = raw if isinstance(raw, list) else str(raw or "").replace("，", ",").split(",")
+    found: list[str] = []
+    for value in values:
+        title = " ".join(str(value or "").split()).lstrip("#")[:40]
+        if title and "/" not in title and title.casefold() not in {one.casefold() for one in found}:
+            found.append(title)
+    return found[:20]
+
+
+def add_item_tags(plane, account_id: str, library_id: str, item_id: str, tags: list[str], peer_ip: str) -> dict:
+    """Add several tags to one item at once, and to the library's tag list."""
+    from ssios.library_autotag import canonical, known_tags
+
+    _require(plane, account_id, library_id, "add")
+    # "Sky" or " sky " becomes the library's "sky".
+    tags = canonical(tags, known_tags(plane, account_id, library_id))
+    with _LOCK:
+        item = get_item(plane, account_id, library_id, item_id)
+        current = [str(tag) for tag in item.get("tags") or []]
+        known = {tag.casefold(): tag for tag in current}
+        for tag in tags:
+            if tag.casefold() not in known:
+                current.append(tag)
+                known[tag.casefold()] = tag
+        item["tags"] = current[:40]
+        _write_item(plane, account_id, library_id, item)
+        data = _metadata(plane, account_id, library_id, create=False, name="")
+        listed = [str(tag) for tag in data.get("tags") or []]
+        lower = {tag.casefold() for tag in listed}
+        added = [tag for tag in tags if tag.casefold() not in lower]
+        if added:
+            data["tags"] = (listed + added)[:2000]
+            _write_metadata(plane, account_id, library_id, data)
+    _audit(plane, account_id, peer_ip, "library.tag", item_id, "ok", 0)
+    return item
+
+
+def tag_counts(plane, account_id: str, library_id: str, items: list[dict] | None = None) -> list[tuple[str, int]]:
+    """Every tag in the library with the number of live items that carry it.
+
+    A tag made on the page, by analysis, or by a batch edit is listed the same way.
+    """
+    counts: dict[str, int] = {}
+    for name in metadata(plane, account_id, library_id).get("tags") or []:
+        counts.setdefault(str(name), 0)
+    live = list_items(plane, account_id, library_id) if items is None else filter_items(items)
+    for item in live:
+        for name in item.get("tags") or []:
+            counts[str(name)] = counts.get(str(name), 0) + 1
+    return sorted(counts.items(), key=lambda row: (-row[1], row[0].casefold()))
+
+
 def add_tag(plane, account_id: str, library_id: str, name: str, peer_ip: str) -> str:
     title = " ".join(str(name or "").split())[:40]
     if not title:
@@ -179,7 +277,7 @@ def import_bytes(
     peer_ip: str,
     folder_id: str = "",
 ) -> dict:
-    """Store one finished file. A name or byte conflict is staged until the owner chooses."""
+    """Store one finished file. Content already in the library is staged until the owner chooses."""
     lang = _lang(plane, account_id)
     _require(plane, account_id, library_id, "add")
     filename = _check_name(name, lang)
@@ -284,17 +382,23 @@ def import_relative(
     source: str,
     peer_ip: str,
     folder_id: str = "",
+    tags: list[str] | None = None,
 ) -> dict:
-    """Import one dropped file. A directory path is rejected and is not walked."""
+    """Import one dropped file. A file inside a dropped folder lands in the same subfolders, made in Files as needed."""
     lang = _lang(plane, account_id)
     parts = [part for part in str(relative or "").replace("\\", "/").split("/") if part not in {"", "."}]
     shown = "/".join(parts) or str(relative or "")
-    if len(parts) > 1 or shown.endswith("/"):
+    if shown.endswith("/") and len(parts) <= 1:
         return {"path": shown.rstrip("/"), "status": "rejected", "code": "drop_directory", "reason": say(lang, "drop_directory"), "id": ""}
     if not parts or any(part in {"..", ".git"} or part.startswith(".") for part in parts):
         return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "library_rejected"), "id": ""}
+    if len(parts) - 1 > MAX_DROP_DEPTH:
+        return {"path": shown, "status": "rejected", "code": "library_rejected", "reason": say(lang, "drop_too_deep", depth=MAX_DROP_DEPTH), "id": ""}
     try:
         parent = folder_id or ""
+        if len(parts) > 1:
+            parent = ensure_folder_path(plane, account_id, library_id, parent, parts[:-1], peer_ip)
+            source = "folder" if source in {"drag", "picker"} else source
         saved = import_path(
             plane,
             account_id,
@@ -307,6 +411,17 @@ def import_relative(
         )
     except SsiosError as exc:
         return {"path": shown, "status": "rejected", "code": exc.code, "reason": exc.detail, "id": ""}
+    wanted = list(tags or [])
+    if len(parts) > 1 and saved.get("result") == "saved":
+        from ssios.library_autotag import rules_of
+
+        if rules_of(metadata(plane, account_id, library_id))["folder_names"]:
+            wanted += parts[:-1]
+    if wanted and saved.get("result") in {"saved", "version"} and saved.get("id"):
+        try:
+            add_item_tags(plane, account_id, library_id, str(saved["id"]), clean_tags(wanted), peer_ip)
+        except SsiosError:
+            pass
     if saved.get("result") == "conflict":
         return {
             "path": shown,
@@ -331,8 +446,13 @@ def drop_summary(lang: str, results: list[dict]) -> str:
 
 def list_items(plane, account_id: str, library_id: str, *, folder: str = "", tag: str = "", trash: bool = False, uncategorized: bool = False, untagged: bool = False) -> list[dict]:
     library_or_default(plane, account_id, library_id)
+    return filter_items(_items(plane, account_id, library_id), folder=folder, tag=tag, trash=trash, uncategorized=uncategorized, untagged=untagged)
+
+
+def filter_items(items: list[dict], *, folder: str = "", tag: str = "", trash: bool = False, uncategorized: bool = False, untagged: bool = False) -> list[dict]:
+    """The rows of one catalog read that a sidebar entry shows. A page reads the catalog once and filters it here."""
     rows = []
-    for item in _items(plane, account_id, library_id):
+    for item in items:
         if bool(item.get("trashed")) != trash:
             continue
         folders = item.get("folder_ids") if isinstance(item.get("folder_ids"), list) else []
@@ -352,9 +472,12 @@ def list_items(plane, account_id: str, library_id: str, *, folder: str = "", tag
 def get_item(plane, account_id: str, library_id: str, item_id: str) -> dict:
     if not _ITEM.fullmatch(item_id):
         raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
-    for item in _items(plane, account_id, library_id):
-        if item.get("id") == item_id:
-            return item
+    # One row is one file. Reading it directly keeps a thumbnail request from parsing the whole catalog.
+    path = _item_path(plane, account_id, library_id, item_id)
+    if path.is_file() and not path.is_symlink():
+        data = read_json(path, {})
+        if isinstance(data, dict) and data.get("id") == item_id:
+            return data
     raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
 
 
@@ -387,9 +510,12 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
         item["folder_ids"] = folders
         action = "library.folder"
     if tag:
-        title = " ".join(tag.split())[:40]
+        from ssios.library_autotag import canonical, known_tags, tag_key
+
+        found = canonical([tag], known_tags(plane, account_id, library_id))
+        title = found[0] if found else ""
         tags = list(item.get("tags") or [])
-        if title and title not in tags:
+        if title and tag_key(title) not in {tag_key(one) for one in tags}:
             tags.append(title)
         item["tags"] = tags
         action = "library.tag"
@@ -408,6 +534,20 @@ def update_item(plane, account_id: str, library_id: str, item_id: str, *, peer_i
     item["modified_at"] = _now()
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, action, item_id, "ok", int(item.get("size") or 0))
+    if folder_id:
+        from ssios.library_autotag import on_move
+
+        if on_move(plane, account_id, library_id, item_id, folder_id, peer_ip):
+            item = get_item(plane, account_id, library_id, item_id)
+    if (star is not None and int(star) > 0) or (annotation is not None and str(annotation).strip()):
+        # A star or a note of the account's own is the account having read the file.
+        from ssios.library_analyze import _account
+        from ssios.reading import mark_file
+
+        try:
+            mark_file(plane, _account(plane, account_id), library_id, item_id, "read", "star" if star else "note", peer_ip)
+        except SsiosError:
+            pass
     return item
 
 
@@ -453,29 +593,10 @@ def purge_item(plane, account_id: str, library_id: str, item_id: str, confirm: s
     item = get_item(plane, account_id, library_id, item_id)
     if not item.get("trashed"):
         raise SsiosError("library_rejected", say(_lang(plane, account_id), "library_rejected"), 400)
-    from ssios.library_analyze import revoke_recall
-    from ssios.library_share import reader_ids
+    from ssios.library_trash import purge_many
 
-    for reader_id in reader_ids(plane, account_id, library_id):
-        revoke_recall(plane, reader_id, item_id, peer_ip)
-    path = _item_path(plane, account_id, library_id, item_id)
-    if path.is_file() and not path.is_symlink():
-        path.unlink()
-    cited = set()
-    for other in _items(plane, account_id, library_id):
-        if other.get("id") == item_id:
-            continue
-        cited.add(str(other.get("sha256") or ""))
-        for version in other.get("versions") or []:
-            if isinstance(version, dict):
-                cited.add(str(version.get("sha256") or ""))
-    for version in item.get("versions") or []:
-        digest = str(version.get("sha256") or "") if isinstance(version, dict) else ""
-        if digest and digest not in cited:
-            blob = _library_root(plane, account_id, library_id) / "objects" / f"{digest}.{item.get('ext')}"
-            if blob.is_file() and not blob.is_symlink():
-                blob.unlink()
-    _audit(plane, account_id, peer_ip, "library.purge", item_id, "ok", int(item.get("size") or 0))
+    # The row, its preview, and every stored file nothing else uses.
+    purge_many(plane, account_id, library_id, [item_id], peer_ip)
 
 
 def _migrate_files(plane, account_id: str, library_id: str) -> None:
@@ -608,6 +729,9 @@ def _record_item(
     existing_id: str = "",
 ) -> dict:
     stamp = _now()
+    from ssios.library_index import index_fields
+
+    media = index_fields(_library_root(plane, account_id, library_id), digest, kind["ext"])
     with _LOCK:
         items = _items(plane, account_id, library_id)
         match = next((item for item in items if item.get("id") == existing_id), None) if existing_id else None
@@ -632,7 +756,7 @@ def _record_item(
                 "tags": [],
                 "star": 0,
                 "annotation": "",
-                "source_kind": source if source in {"paste", "drag", "picker"} else "picker",
+                "source_kind": source if source in SOURCES else "picker",
                 "imported_at": stamp,
                 "modified_at": stamp,
                 "captured_at": captured,
@@ -641,6 +765,7 @@ def _record_item(
                 "trashed": False,
                 "trashed_at": "",
             }
+            match.update(media)
             _write_item(plane, account_id, library_id, match)
             action = "library.import"
             result = "saved"
@@ -657,12 +782,24 @@ def _record_item(
             match["analysis_model"] = ""
             if captured:
                 match["captured_at"] = captured
+            for key in ("width", "height", "orientation", "duration", "palette", "indexed"):
+                match.pop(key, None)
+            match.update(media)
             if folder_id and folder_id not in (match.get("folder_ids") or []):
                 match["folder_ids"] = list(match.get("folder_ids") or []) + [folder_id]
             _write_item(plane, account_id, library_id, match)
             action = "library.version"
             result = "version"
     _audit(plane, account_id, peer_ip, action, match["id"], result, size)
+    if result == "saved" or folder_id:
+        # Folder auto-tags for a file entering a folder, rule tags for a new file. Never fails the import.
+        try:
+            from ssios.library_autotag import on_import
+
+            if on_import(plane, account_id, library_id, match["id"], [folder_id] if folder_id else [], peer_ip, new=result == "saved"):
+                match = get_item(plane, account_id, library_id, match["id"])
+        except SsiosError:
+            pass
     public = dict(match)
     public["version_count"] = len(match.get("versions") or [])
     public["result"] = result
@@ -707,24 +844,10 @@ def _find_conflict(plane, account_id: str, library_id: str, filename: str, diges
     identical = next((item for item in items if item.get("sha256") == digest), None)
     if identical is not None:
         return {"item": identical, "conflict_kind": "identical"}
-    named = next(
-        (
-            item
-            for item in items
-            if str(item.get("name") or "").casefold() == filename.casefold() and _same_folder(item, folder_id)
-        ),
-        None,
-    )
-    if named is not None and named.get("sha256") != digest:
-        return {"item": named, "conflict_kind": "name"}
+    # A file with the same name and different content is a different file, as in Eagle. It is imported
+    # beside the other one; Files keeps no versions of it.
+    del filename, folder_id
     return None
-
-
-def _same_folder(item: dict, folder_id: str) -> bool:
-    folders = item.get("folder_ids") if isinstance(item.get("folder_ids"), list) else []
-    if folder_id:
-        return folder_id in folders
-    return not folders
 
 
 def _stage_conflict(plane, account_id, library_id, stored, conflict, filename, kind, captured, source, folder_id, digest: str = "", size: int = 0, incoming=None) -> dict:
@@ -869,17 +992,9 @@ def _write_metadata(plane, account_id: str, library_id: str, data: dict) -> None
 
 
 def _items(plane, account_id: str, library_id: str) -> list[dict]:
-    folder = _library_root(plane, account_id, library_id) / "items"
-    if not folder.is_dir():
-        return []
-    rows = []
-    for path in sorted(folder.glob("item-*.json")):
-        if path.is_symlink():
-            continue
-        data = read_json(path, {})
-        if isinstance(data, dict) and data.get("id"):
-            rows.append(data)
-    return rows
+    from ssios.library_catalog import rows
+
+    return rows(_library_root(plane, account_id, library_id))
 
 
 def _write_item(plane, account_id: str, library_id: str, item: dict) -> None:
@@ -896,13 +1011,41 @@ def _shared_acl_path(plane, library_id: str):
     return plane.settings.state_dir / "shared-libraries" / library_id / "acl.json"
 
 
+def _marker_ok(root: str, library_id: str) -> bool:
+    """True when the folder is there and its marker names this library. False when the disk is not connected."""
+    from pathlib import Path
+
+    try:
+        data = read_json(Path(root) / MARKER, {})
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("id") == library_id
+
+
+def _outside_root(plane, account_id: str, library_id: str, root: str):
+    """A library kept outside the state directory. Nothing is created here: a missing disk is an error, not an empty library."""
+    from pathlib import Path
+
+    if not _marker_ok(root, library_id):
+        raise SsiosError("library_offline", say(_lang(plane, account_id), "library_offline"), 503)
+    return Path(root)
+
+
 def _library_root(plane, account_id: str, library_id: str):
     if not _ID.fullmatch(library_id):
         raise SsiosError("path_rejected", "library id rejected", 400)
     if _shared_acl_path(plane, library_id).is_file():
         if _role_of(plane, account_id, library_id) is None:
             raise SsiosError("library_missing", say(_lang(plane, account_id), "library_missing"), 404)
+        where = str(read_json(_shared_acl_path(plane, library_id), {}).get("root") or "")
+        if where:
+            return _outside_root(plane, account_id, library_id, where)
         return _shared_acl_path(plane, library_id).parent
+    # The location is read from this account's own list, so one account cannot name another account's folder.
+    index = read_json(plane.accounts.home(account_id) / "library" / "libraries.json", {})
+    for row in index.get("libraries") or [] if isinstance(index, dict) else []:
+        if isinstance(row, dict) and row.get("id") == library_id and row.get("root") and row.get("kind") != "shared":
+            return _outside_root(plane, account_id, library_id, str(row["root"]))
     root = plane.accounts.home(account_id) / "library" / library_id
     secure_mkdir(root)
     return root

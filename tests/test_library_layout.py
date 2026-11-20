@@ -112,3 +112,38 @@ class LibraryLayoutTest(PlaneTest):
         self.assertIn("PDF", page)
         self.assertIn("个版本", page)
         self.assertNotIn(" bytes", page)
+
+
+class PdfRenderLimitTest(PlaneTest):
+    def test_a_pdf_that_cannot_be_drawn_is_tried_once_and_the_tools_share_one_time_limit(self) -> None:
+        import subprocess
+
+        import ssios.library_thumb as thumb
+
+        account = self.plane.accounts.add_member("ada", "other-horse-stable")
+        library_id = ensure_personal(self.plane, account["id"])["id"]
+        saved = import_bytes(self.plane, account["id"], library_id, b"%PDF-1.4\n1 0 obj\nendobj\n", name="notes.pdf", source="picker", peer_ip="127.0.0.1")
+        calls = []
+        real_render = thumb._render_pdf
+        thumb._render_pdf = lambda raw: calls.append(1) or b""
+        self.addCleanup(setattr, thumb, "_render_pdf", real_render)
+        first = thumb.preview_png(self.plane, account["id"], library_id, saved)
+        second = thumb.preview_png(self.plane, account["id"], library_id, saved)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(first.startswith(b"\x89PNG"))
+        self.assertEqual(first, second)
+        thumb._render_pdf = real_render
+        waits = []
+
+        def slow(command, **kwargs):
+            waits.append(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        real_which, real_run = thumb.shutil.which, thumb.subprocess.run
+        thumb.shutil.which = lambda name: "/usr/bin/" + name
+        thumb.subprocess.run = slow
+        self.addCleanup(setattr, thumb.shutil, "which", real_which)
+        self.addCleanup(setattr, thumb.subprocess, "run", real_run)
+        self.assertEqual(thumb._render_pdf(b"%PDF-1.4\n"), b"")
+        self.assertEqual(len(waits), 4)
+        self.assertTrue(all(0 < wait <= thumb.RENDER_SECONDS for wait in waits), waits)

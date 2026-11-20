@@ -48,7 +48,7 @@ class LibraryTest(PlaneTest):
         self.ada = ada.split(";", 1)[0]
         self.owner = next(item for item in self.plane.accounts.public_list() if item["username"] == "owner")
 
-    def test_personal_library_imports_versions_and_stays_private(self) -> None:
+    def test_personal_library_imports_same_names_and_stays_private(self) -> None:
         status, page = _get(self.base, "/ui/library", self.cookie)
         self.assertEqual(status, 200, page)
         self.assertIn("<h1>Files</h1>", page)
@@ -83,22 +83,24 @@ class LibraryTest(PlaneTest):
         self.assertNotIn(b"GPSLatitude", blob)
         self.assertNotIn(b"tEXt", blob)
 
+        # The same name with different content is a different file: both are kept.
         status, again = self._file(csrf, library_id, "harbor-desk.png", _png(2), "drag")
         self.assertEqual(status, 200, again)
-        self.assertIn("Keep existing", again)
-        self.assertIn("Replace with new", again)
-        self.assertNotIn("2 version", again)
-        conflict = again.split('name="conflict" value="', 1)[1].split('"', 1)[0]
-        status, replaced, _cookie = _form(
+        self.assertNotIn('name="conflict"', again)
+        self.assertEqual(again.split("lib-grid", 1)[1].count("<span class=\"name\">harbor-desk.png<"), 2)
+        # The same content again is the same file: Files asks before keeping a second copy.
+        status, same = self._file(csrf, library_id, "harbor-desk.png", _png(2), "drag")
+        self.assertIn('name="conflict"', same)
+        conflict = same.split('name="conflict" value="', 1)[1].split('"', 1)[0]
+        status, kept, _cookie = _form(
             self.base,
             "/ui/library",
-            {"csrf": csrf, "op": "resolve", "library": library_id, "conflict": conflict, "decision": "replace"},
+            {"csrf": csrf, "op": "resolve", "library": library_id, "conflict": conflict, "decision": "keep"},
             cookie=self.cookie,
         )
-        self.assertEqual(status, 200, replaced)
-        self.assertIn("Saved as a new version.", replaced)
+        self.assertEqual(status, 200, kept)
+        self.assertEqual(kept.split("lib-grid", 1)[1].count("<span class=\"name\">harbor-desk.png<"), 2)
         objects = list((self.plane.accounts.home(self.owner["id"]) / "library" / library_id / "objects").glob("*"))
-        self.assertGreaterEqual(len(objects), 1)
         names = {path.name.split(".", 1)[0] for path in objects}
         self.assertEqual(len(names), len(set(names)))
 
@@ -127,8 +129,7 @@ class LibraryTest(PlaneTest):
 
         audit = (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8")
         self.assertIn("library.import", audit)
-        self.assertIn("library.version", audit)
-        self.assertIn("library.replace", audit)
+        self.assertIn("library.keep", audit)
         self.assertNotIn("harbor-desk.png", audit)
         self.assertNotIn("GPSLatitude", audit)
 

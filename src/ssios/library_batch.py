@@ -54,7 +54,34 @@ def batch_apply(plane, account_id: str, library_id: str, raw_ids, op: str, peer_
         raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
     _require(plane, account_id, library_id, _OPS[op])
     role = _role_of(plane, account_id, library_id) or ""
+    if op == "tag" and tag:
+        from ssios.library_autotag import canonical, known_tags
+
+        found = canonical([tag], known_tags(plane, account_id, library_id))
+        tag = found[0] if found else tag
     results = []
+    if op == "purge":
+        # One pass for the whole selection: each stored file is checked once against what is left.
+        from ssios.library_trash import purge_many
+
+        if confirm != "delete":
+            raise SsiosError("library_rejected", say(lang, "library_rejected"), 400)
+        wanted = [item_id for item_id in parse_ids(raw_ids) if _ITEM.fullmatch(item_id)]
+        trashed = set()
+        for item_id in wanted:
+            try:
+                if get_item(plane, account_id, library_id, item_id).get("trashed"):
+                    trashed.add(item_id)
+            except SsiosError:
+                pass
+        purge_many(plane, account_id, library_id, sorted(trashed), peer_ip)
+        for item_id in wanted:
+            if item_id in trashed:
+                _audit(plane, account_id, peer_ip, "library.batch_purge", item_id, "ok", 0)
+                results.append({"id": item_id, "ok": True})
+            else:
+                results.append({"id": item_id, "ok": False, "code": "library_rejected", "error": say(lang, "library_rejected")})
+        return {"results": results}
     for item_id in parse_ids(raw_ids):
         try:
             _one(plane, account_id, library_id, item_id, op, peer_ip, lang, role, tag=tag, folder_id=folder_id, confirm=confirm, model=model)
@@ -115,6 +142,10 @@ def _one(plane, account_id, library_id, item_id, op, peer_ip, lang, role, *, tag
     item["modified_at"] = _now()
     _write_item(plane, account_id, library_id, item)
     _audit(plane, account_id, peer_ip, "library.batch_" + op, item_id, "ok", int(item.get("size") or 0))
+    if op == "folder":
+        from ssios.library_autotag import on_move
+
+        on_move(plane, account_id, library_id, item_id, folder_id, peer_ip)
 
 
 def _tag(item: dict, tag: str, lang: str, *, add: bool) -> None:
@@ -122,10 +153,10 @@ def _tag(item: dict, tag: str, lang: str, *, add: bool) -> None:
     if not title or "/" in title:
         raise SsiosError("library_rename", say(lang, "lib_batch_value"), 400)
     tags = [str(one) for one in item.get("tags") or []]
-    if add and title not in tags:
+    if add and title.casefold() not in {one.casefold() for one in tags}:
         tags.append(title)
     if not add:
-        tags = [one for one in tags if one != title]
+        tags = [one for one in tags if one.casefold() != title.casefold()]
     item["tags"] = tags[:40]
 
 

@@ -55,13 +55,8 @@ def add_smart_folder(plane, account_id: str, library_id: str, name: str, query_t
 
 
 def smart_items(plane, account_id: str, library_id: str, smart_id: str) -> list[dict]:
-    if not _SMART.fullmatch(smart_id):
-        raise SsiosError("library_missing", say(_lang_of(plane, account_id), "library_missing"), 404)
-    data = metadata(plane, account_id, library_id)
-    row = next((item for item in data.get("smart_folders") or [] if isinstance(item, dict) and item.get("id") == smart_id), None)
-    if row is None:
-        raise SsiosError("library_missing", say(_lang_of(plane, account_id), "library_missing"), 404)
-    return [item for item in list_items(plane, account_id, library_id) if matches(item, row.get("query"))]
+    row = smart_row(plane, account_id, library_id, smart_id)
+    return smart_filter(list_items(plane, account_id, library_id), row)
 
 
 def matches(item: dict, query) -> bool:
@@ -97,8 +92,61 @@ def _blob(item: dict) -> str:
         str(item.get("description") or ""),
         str(item.get("ocr") or ""),
         " ".join(str(tag) for tag in item.get("tags") or []),
+        str(item.get("source_url") or ""),
+        # Folder names, set by the page for the rows of one read. Not stored on the item.
+        str(item.get("_folder_names") or ""),
     ]
     return " ".join(parts).casefold()
+
+
+def add_filter_folder(plane, account_id: str, library_id: str, name: str, filters: dict, keywords: str, peer_ip: str) -> dict:
+    """Save the filter bar as a smart folder. It is worked out again each time it is opened."""
+    from ssios.library import _audit, _lang, _require
+    from ssios.library_filter import as_query, describe, parse
+
+    _require(plane, account_id, library_id, "organize")
+    lang = _lang(plane, account_id)
+    title = " ".join(str(name or "").split())[:40]
+    if len(title) < 1 or title.startswith(".") or "/" in title:
+        raise SsiosError("library_smart_name", say(lang, "lib_smart_name"), 400)
+    cleaned = parse(filters)
+    words = " ".join(str(keywords or "").split())[:200]
+    if not cleaned and not words:
+        raise SsiosError("library_smart_query", say(lang, "lib_smart_empty"), 400)
+    data = metadata(plane, account_id, library_id)
+    folder_id = "smf-" + hashlib.sha256(f"{library_id}:{title}:{_now()}".encode()).hexdigest()[:8]
+    while any(isinstance(row, dict) and row.get("id") == folder_id for row in data.get("smart_folders") or []):
+        folder_id = "smf-" + hashlib.sha256(folder_id.encode()).hexdigest()[:8]
+    text = " · ".join(([f'"{words}"'] if words else []) + describe(cleaned, lang))[:200]
+    row = {"id": folder_id, "name": title, "filters": as_query(cleaned), "q": words, "text": text}
+    data.setdefault("smart_folders", []).append(row)
+    replace_metadata(plane, account_id, library_id, data)
+    _audit(plane, account_id, peer_ip, "library.smart", folder_id, "ok", 0)
+    return row
+
+
+def smart_row(plane, account_id: str, library_id: str, smart_id: str) -> dict:
+    if not _SMART.fullmatch(smart_id):
+        raise SsiosError("library_missing", say(_lang_of(plane, account_id), "library_missing"), 404)
+    data = metadata(plane, account_id, library_id)
+    row = next((item for item in data.get("smart_folders") or [] if isinstance(item, dict) and item.get("id") == smart_id), None)
+    if row is None:
+        raise SsiosError("library_missing", say(_lang_of(plane, account_id), "library_missing"), 404)
+    return row
+
+
+def smart_filter(items: list[dict], row: dict) -> list[dict]:
+    """The live rows a smart folder holds: a written query, or saved filters with keywords."""
+    if isinstance(row.get("query"), dict):
+        return [item for item in items if not item.get("trashed") and matches(item, row["query"])]
+    from ssios.library_filter import apply, parse
+
+    live = [item for item in items if not item.get("trashed")]
+    chosen = apply(live, parse(row.get("filters") if isinstance(row.get("filters"), dict) else {}))
+    words = str(row.get("q") or "").casefold()
+    if words:
+        chosen = [item for item in chosen if all(word in _blob(item) for word in words.split())]
+    return chosen
 
 
 def _star(actual: int, cmp: str, expected: int) -> bool:

@@ -144,7 +144,8 @@ class MacOSRuntimeTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             loaded = load_settings(ROOT / "config" / "ssios.example.toml", state_dir=Path(tmp) / "state", port=0)
-            plane = ControlPlane(replace(loaded, runtime_backend="macos-vm"))
+            # A Mac that has krunvm installed would boot a guest here. Name a binary that is not on PATH.
+            plane = ControlPlane(replace(loaded, runtime_backend="macos-vm", krunvm_bin="ssios-test-no-krunvm"))
             plane.open()
             status = plane.status(plane.auth.read_secret("human"))
             self.assertEqual(status["runtime"]["active_backend"], "macos-vm")

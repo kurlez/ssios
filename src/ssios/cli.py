@@ -66,6 +66,36 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--execute-version", action="store_true")
         if name == "memfs-upstream-smoke":
             command.add_argument("--letta-bin", default="")
+    sub.add_parser("launchd-plist", parents=[common])
+    for name in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread", "library-reindex"):
+        command = sub.add_parser(name, parents=[common])
+        command.add_argument("--username", required=True, help="the account that owns the library")
+        if name == "vault-sync":
+            command.add_argument("--with", dest="peer", required=True, help="the Obsidian vault folder to keep the same as Notes")
+            command.add_argument("--dry-run", action="store_true", help="print what would change and change nothing")
+        if name == "vault-set":
+            command.add_argument("--path", required=True, help="an existing folder, such as an Obsidian vault. Empty goes back to the default")
+        if name == "library-create":
+            command.add_argument("--name", required=True)
+        if name in ("library-create", "eagle-import"):
+            command.add_argument("--location", default="", help="directory that will hold the library's own folder. Default: the state directory")
+        if name == "library-reindex":
+            command.add_argument("--library", default="", help="library id, from library-list. Default: every library the account owns")
+            command.add_argument("--all", action="store_true", help="index every item again, not only those that need it")
+        if name == "library-move":
+            command.add_argument("--library", required=True, help="library id, from library-list")
+            command.add_argument("--location", required=True, help="directory that will hold the library's own folder")
+        if name == "eagle-import":
+            command.add_argument("--source", required=True, help="path of the Eagle .library folder. It is only read")
+            command.add_argument("--library", default="", help="continue into this library id")
+    command = sub.add_parser("backup", parents=[common])
+    command.add_argument("--out", required=True, help="directory for the archive, outside the state directory")
+    command.add_argument("--allow-running", action="store_true", help="back up while the UI is running")
+    command = sub.add_parser("backup-verify", parents=[common])
+    command.add_argument("archive")
+    command = sub.add_parser("restore", parents=[common])
+    command.add_argument("archive")
+    command.add_argument("--into", required=True, help="new state directory. It must not exist, or be empty")
     for name in ("oauth-install-client", "oauth-connect", "oauth-status", "oauth-disconnect", "oauth-revoke-account", "connector-fetch"):
         command = sub.add_parser(name, parents=[common])
         command.add_argument("--account", required=True)
@@ -82,6 +112,96 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_library_command(settings, args) -> int:
+    """Library work that can run for a long time, or that names a folder on this computer."""
+    plane = ControlPlane(settings)
+    plane.open()
+    account = next((row for row in plane.accounts.public_list() if row.get("username") == args.username and row.get("status", "active") == "active"), None)
+    if account is None:
+        print(json.dumps({"error": "account_missing", "detail": "No active account has that username."}, ensure_ascii=False), flush=True)
+        return 1
+    account_id = str(account["id"])
+    try:
+        if args.command == "vault-set":
+            from ssios.vault import note_paths, set_vault
+
+            where = set_vault(settings, account_id, args.path)
+            # Names only. Opening every note would download each one from a cloud drive.
+            report: dict = {"vault": str(where), "notes": len(note_paths(settings, account_id))}
+        elif args.command == "vault-sync":
+            from ssios.vault_sync import sync_vault
+
+            report = sync_vault(settings, account_id, args.peer, dry_run=args.dry_run)
+            if not args.dry_run:
+                plane.security_audit.write(actor=account_id, ip="127.0.0.1", action="vault.sync", target="obsidian", result="ok", extra={"item_count": str(sum(report["counts"].values()))})
+        elif args.command == "memory-prune-unread":
+            from ssios.reading import prune_unread
+
+            report = prune_unread(plane, account)
+        elif args.command == "library-list":
+            from ssios.library import list_libraries
+
+            rows = [{key: row.get(key) for key in ("id", "name", "kind", "role", "location", "offline")} for row in list_libraries(plane, account_id)]
+            report = {"libraries": rows}
+        elif args.command == "library-reindex":
+            from ssios.library import list_libraries
+            from ssios.library_index import reindex_library
+
+            chosen = [row for row in list_libraries(plane, account_id) if not row.get("offline") and (not args.library or row["id"] == args.library) and (row.get("kind") != "shared" or row.get("role") == "owner")]
+            if args.library and not chosen:
+                print(json.dumps({"error": "library_missing", "detail": "No library with that id is open to this account."}, ensure_ascii=False), flush=True)
+                return 1
+            report = {"libraries": {str(row["id"]): reindex_library(plane, account_id, str(row["id"]), force=args.all) for row in chosen}}
+        elif args.command == "library-create":
+            from ssios.library import create_library
+
+            report = create_library(plane, account_id, args.name, "127.0.0.1", args.location)
+        elif args.command == "library-move":
+            from ssios.library_storage import move_library
+
+            report = move_library(plane, account_id, args.library, args.location, "127.0.0.1")
+        else:
+            from ssios.library_eagle import import_eagle
+
+            def progress(done: int, total: int, state: dict) -> None:
+                print(f"{done}/{total} read, {state['imported']} copied", file=sys.stderr, flush=True)
+
+            report = import_eagle(plane, account_id, args.source, "127.0.0.1", location=args.location, library_id=args.library, progress=progress)
+    except SsiosError as exc:
+        print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    return 0
+
+
+LAUNCHD_LABEL = "local.ssios.ui"
+
+
+def launchd_plist(state_dir: Path, config: Path) -> str:
+    """A LaunchAgent for the signed-in user. It is printed, not installed.
+
+    The agent is limited to the Aqua session, so it starts after the user signs in
+    at the Mac and the login keychain is unlocked. KeepAlive is off, so
+    ./scripts/ssios stop stays stopped.
+    """
+    import plistlib
+
+    from ssios.paths import repo_root
+
+    body = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [str(repo_root() / "scripts" / "ssios"), "fg"],
+        "EnvironmentVariables": {"SSIOS_STATE": str(Path(state_dir).resolve()), "SSIOS_CONFIG": str(Path(config).resolve())},
+        "WorkingDirectory": str(repo_root()),
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "LimitLoadToSessionType": "Aqua",
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
+    }
+    return plistlib.dumps(body).decode("utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -91,6 +211,25 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "memfs-info":
         print(json.dumps({"memfs": describe_memfs(), "probe": probe_local_binary(execute=args.execute_version)}, indent=2, ensure_ascii=False))
+        return 0
+    if args.command == "launchd-plist":
+        sys.stdout.write(launchd_plist(Path(args.state), Path(args.config)))
+        sys.stdout.flush()
+        return 0
+    if args.command in ("backup", "backup-verify", "restore"):
+        from ssios.backup import create_backup, restore_backup, verify_backup
+
+        try:
+            if args.command == "backup":
+                report = create_backup(Path(args.state), Path(args.out), allow_running=args.allow_running)
+            elif args.command == "backup-verify":
+                report = verify_backup(Path(args.archive))
+            else:
+                report = restore_backup(Path(args.archive), Path(args.into))
+        except SsiosError as exc:
+            print(json.dumps({"error": exc.code, "detail": exc.detail}, ensure_ascii=False), flush=True)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0
     if args.command == "memfs-upstream-smoke":
         return run_upstream_smoke(Path(args.state), args.config, args.letta_bin)
@@ -136,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         return _up(settings)
     if args.command == "user":
         return run_user_add(settings, args.username, admin=bool(args.admin))
+    if args.command in ("library-list", "library-create", "library-move", "eagle-import", "vault-set", "vault-sync", "memory-prune-unread", "library-reindex"):
+        return run_library_command(settings, args)
     if args.command == "audit-verify":
         plane = ControlPlane(settings)
         plane.open()

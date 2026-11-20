@@ -6,8 +6,11 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import zlib
 from pathlib import Path
+
+RENDER_SECONDS = 6.0
 
 _GLYPH = {
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
@@ -62,13 +65,18 @@ def preview_png(plane, account_id: str, library_id: str, item: dict) -> bytes:
     if ext == "pdf":
         if cache.is_file() and not cache.is_symlink() and cache.stat().st_size > 32:
             return cache.read_bytes()
-        raw, _mime = item_bytes(plane, account_id, library_id, item["id"])
-        drawn = _render_pdf(raw)
-        if drawn:
+        # A page that could not be drawn is not tried again for this version of the file.
+        failed = cache.with_name(f"{item['id']}.{str(item.get('sha256') or '')[:16]}.failed")
+        if not failed.exists():
+            raw, _mime = item_bytes(plane, account_id, library_id, item["id"])
+            drawn = _render_pdf(raw)
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_bytes(drawn)
-            cache.chmod(0o600)
-            return drawn
+            if drawn:
+                cache.write_bytes(drawn)
+                cache.chmod(0o600)
+                return drawn
+            failed.write_bytes(b"")
+            failed.chmod(0o600)
     return pdf_tile() if ext == "pdf" else _label_tile(ext.upper() or "FILE")
 
 
@@ -95,9 +103,14 @@ def _run_renderer(src: Path, out: Path) -> bool:
         commands.append(["qlmanage", "-t", "-s", "480", "-o", str(out.parent), str(src)])
     if shutil.which("sips"):
         commands.append(["sips", "-s", "format", "png", str(src), "--out", str(out)])
+    # The browser is waiting for this image. All tools together get RENDER_SECONDS.
+    deadline = time.monotonic() + RENDER_SECONDS
     for command in commands:
+        left = deadline - time.monotonic()
+        if left <= 0.2:
+            break
         try:
-            subprocess.run(command, check=False, timeout=15, capture_output=True)
+            subprocess.run(command, check=False, timeout=left, capture_output=True)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if out.is_file():

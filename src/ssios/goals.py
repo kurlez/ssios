@@ -413,7 +413,17 @@ def mirror_vault(scope, goals: list[dict]) -> None:
             lines.append(f"- [ ] {item.get('due')} {item.get('text')}{repeat}")
     except (SsiosError, OSError, TypeError, ValueError):
         pass
+    from ssios.vault import own_vault
+
     path = root / "Tasks.md"
+    try:
+        external = own_vault(scope.plane.settings, scope.account_id) is not None
+    except SsiosError:
+        return
+    if external:
+        # The vault is the account's own Obsidian vault. Its Tasks.md is not SSIOS's to overwrite.
+        (root / "SSIOS").mkdir(exist_ok=True)
+        path = root / "SSIOS" / "Tasks.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -106,32 +106,39 @@ class DropImportTest(PlaneTest):
                 source="drag",
                 peer_ip="127.0.0.1",
             )
-            self.assertEqual(chinese["reason"], "不支持拖入文件夹，请拖入文件。")
+            # Inside a dropped folder, an archive is still refused for what it is.
+            self.assertEqual(chinese["reason"], "已拒绝。压缩包、程序、数据库、隐藏文件、未下完的文件和代码仓库不会保存。")
             from ssios.library import add_folder, list_items, metadata
 
             placed = add_folder(self.plane, self.account["id"], self.library_id, "Harbor", "127.0.0.1")
+            (root / "pier.png").write_bytes(PNG_B)
             filed = import_relative(
                 self.plane,
                 self.account["id"],
                 self.library_id,
-                day / "harbor.png",
-                relative="harbor.png",
+                root / "pier.png",
+                relative="pier.png",
                 source="drag",
                 peer_ip="127.0.0.1",
                 folder_id=placed["id"],
             )
             self.assertEqual(filed["status"], "saved", filed)
             items = list_items(self.plane, self.account["id"], self.library_id, folder=placed["id"])
-            self.assertEqual(items[0]["name"], "harbor.png")
+            self.assertEqual(items[0]["name"], "pier.png")
             folders = metadata(self.plane, self.account["id"], self.library_id)["folders"]
-            self.assertEqual({row["name"] for row in folders}, {"Harbor"})
+            by_name = {row["name"]: row for row in folders}
+            self.assertEqual(set(by_name), {"Album", "Day", "Harbor"})
+            self.assertEqual(by_name["Day"]["parent_id"], by_name["Album"]["id"])
+            in_day = list_items(self.plane, self.account["id"], self.library_id, folder=by_name["Day"]["id"])
+            self.assertEqual([item["name"] for item in in_day], ["harbor.png"])
+            self.assertEqual(in_day[0]["source_kind"], "folder")
         saved = [row for row in results if row["status"] == "saved"]
         rejected = [row for row in results if row["status"] == "rejected"]
-        self.assertEqual(saved, [])
-        self.assertTrue(any(row["code"] == "drop_directory" for row in rejected))
+        self.assertEqual([row["path"] for row in saved], ["Album/Day/harbor.png"])
+        self.assertTrue(any(row["path"].endswith("notes.zip") for row in rejected))
         self.assertTrue(any(row["path"].endswith(".secret.png") for row in rejected))
 
-    def test_streamed_reimport_is_a_version_and_oversize_stops(self) -> None:
+    def test_streamed_same_name_is_a_new_file_and_oversize_stops(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as folder:
@@ -142,25 +149,15 @@ class DropImportTest(PlaneTest):
             )
             self.assertEqual(first["result"], "saved")
             path.write_bytes(b"%PDF-1.4\nhello again")
+            # Same name, different content: a second file, not a version of the first.
             second = import_path(
                 self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
             )
-            self.assertEqual(second["result"], "conflict")
-            self.assertEqual(second["conflict_kind"], "name")
+            self.assertEqual(second["result"], "saved")
+            self.assertNotEqual(second["id"], first["id"])
             from ssios.library import get_item, resolve_conflict
 
-            kept = resolve_conflict(self.plane, self.account["id"], self.library_id, second["conflict_id"], "keep", "127.0.0.1")
-            self.assertEqual(kept["status"], "kept")
             self.assertEqual(len(get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]), 1)
-            path.write_bytes(b"%PDF-1.4\nhello again")
-            third = import_path(
-                self.plane, self.account["id"], self.library_id, path, name="sheet.pdf", source="drag", peer_ip="127.0.0.1"
-            )
-            replaced = resolve_conflict(self.plane, self.account["id"], self.library_id, third["conflict_id"], "replace", "127.0.0.1")
-            self.assertEqual(replaced["status"], "version")
-            versions = get_item(self.plane, self.account["id"], self.library_id, first["id"])["versions"]
-            self.assertEqual(len(versions), 2)
-            self.assertNotEqual(versions[0]["sha256"], versions[1]["sha256"])
             same = import_path(
                 self.plane, self.account["id"], self.library_id, path, name="other.pdf", source="drag", peer_ip="127.0.0.1"
             )
@@ -175,10 +172,7 @@ class DropImportTest(PlaneTest):
 
             rows = [json.loads(line) for line in (self.state / "audit" / "security.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
             keeps = [row for row in rows if row.get("action") == "library.keep"]
-            replaces = [row for row in rows if row.get("action") == "library.replace"]
-            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in keeps))
             self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "identical" for row in keeps))
-            self.assertTrue(any((row.get("extra") or {}).get("reason_code") == "name" for row in replaces))
             self.assertNotIn("sheet.pdf", json.dumps(rows))
             import ssios.library as library
 
@@ -240,7 +234,7 @@ class PlaywrightDropTest(PlaneTest):
                   });
                   const one = new File([bytes(png)], "one.png");
                   const two = new File([bytes(pngB)], "two.png");
-                  const harbor = new File([bytes(png)], "harbor.png");
+                  const harbor = new File([bytes(png), new Uint8Array([0])], "harbor.png");
                   const notes = new File([bytes(zip)], "notes.zip");
                   const hidden = new File([bytes(png)], ".secret.png");
                   const album = dirEntry("Album", [fileEntry(harbor), fileEntry(notes), fileEntry(hidden)]);
@@ -265,17 +259,17 @@ class PlaywrightDropTest(PlaneTest):
                 [_b64(PNG), _b64(PNG_B), _b64(b"PK\x03\x04notes")],
             )
             page.evaluate("() => window.__drop(['one.png', 'Album', 'two.png'])")
+            # A dropped folder is read through the entry API: its files land in a folder of the same name.
             page.wait_for_function(
-                "() => document.querySelectorAll('#drop-log li.ok').length >= 2"
-                " && (document.getElementById('drop-log').innerText || '').includes('不支持拖入文件夹')"
+                "() => document.querySelectorAll('#drop-log li.ok').length >= 3"
+                " && (document.getElementById('drop-log').innerText || '').includes('notes.zip')"
             )
             text = page.inner_text("#drop-log")
             self.assertIn("one.png", text)
             self.assertIn("two.png", text)
-            self.assertIn("Album", text)
-            self.assertIn("不支持拖入文件夹，请拖入文件。", text)
-            self.assertNotIn("harbor.png", text)
-            self.assertNotIn("notes.zip", text)
+            self.assertIn("Album/harbor.png", text)
+            self.assertIn("Album/notes.zip", text)
+            self.assertNotIn(".secret.png", text)
             page.evaluate("() => window.__drop(['one.png'])")
             page.wait_for_selector("#drop-log button.primary")
             page.locator("#drop-log label input").check()

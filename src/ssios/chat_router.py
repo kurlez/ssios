@@ -109,6 +109,10 @@ def classify(text: str, override: str = "auto", llm=None, deadline: float | None
         return _decision("memory", "rule_memory", "The message asks to save memory. A timed reminder is stored immediately. A note waits for approval.", ())
     if is_agenda(message) and forced != "force_vm" and "calendar" not in services:
         return _decision("schedule", "rule_schedule", "The message asks what is planned. Reminders and the calendar are read. The model is not asked to invent them.", ())
+    from ssios.library_chat import files_request
+
+    if files_request(message) and forced != "force_vm" and not services and not skill:
+        return _decision("files", "rule_files", "The message asks to find something in Files. The catalog on this computer is searched. No model is asked.", ())
     if skill and forced != "force_vm" and not _writes(message):
         return _decision(
             "skill",
